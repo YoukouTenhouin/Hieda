@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is currently an empty project skeleton: no application source, test suite, assets, or build manifest has been added yet. Keep the root uncluttered as the project takes shape. Prefer a conventional layout:
+Keep the root uncluttered as the project takes shape. The project follows this conventional layout:
 
 - `src/` for production code, grouped by feature or domain.
 - `tests/` for automated tests that mirror the structure under `src/`.
@@ -12,6 +12,10 @@ This repository is currently an empty project skeleton: no application source, t
 Document any intentional departure from this layout in this file or the main README.
 
 Public C++ headers live under `include/`, Qt Quick source files under `qml/`, and reusable CMake scripts under `cmake/`; these are conventional tool-specific counterparts to production code under `src/`. Qt adapter behavior is tested directly, while declarative file-dialog wiring receives a packaged-process smoke test rather than brittle native-dialog automation.
+
+## Qt UI Conventions
+
+Toolkit neutrality applies at the Notebook module boundary, not to the presentation. The Qt Quick UI should use Qt Quick Controls without forcing a style so the runtime can select the host platform style. Prefer native dialogs, standard actions, menus, keyboard shortcuts, system fonts, palette colors, and control metrics. Do not build a custom cross-platform skin or hardcode theme colors; introduce custom visuals only when standard controls cannot provide a required capability or accessible interaction. Keep the `QApplication`/Qt Widgets application bootstrap: Linux desktop platform themes use it to supply their integrated file-dialog helper to `QtQuick.Dialogs`.
 
 ## Build, Test, and Development Commands
 
@@ -41,4 +45,4 @@ Every behavior change should include automated coverage. Place tests in `tests/`
 
 ## Commit & Pull Request Guidelines
 
-No Git history is available to establish an existing commit convention. Use short, imperative subjects such as `Add token validation`, and keep unrelated changes in separate commits. Pull requests should explain the problem and solution, list verification performed, and link relevant issues. Include screenshots or logs for visible UI or operational changes, and call out migrations, compatibility risks, or follow-up work explicitly.
+Use short, imperative commit subjects such as `Add token validation`, and keep unrelated changes in separate commits. Pull requests should explain the problem and solution, list verification performed, and link relevant issues. Include screenshots or logs for visible UI or operational changes, and call out migrations, compatibility risks, or follow-up work explicitly.

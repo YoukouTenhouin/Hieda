@@ -8,7 +8,7 @@ closes, and reopens one portable `.hieda` Notebook at a time.
 - A 64-bit Linux system
 - CMake 3.24 or newer and Ninja
 - GCC 11 or newer, or Clang 16 or newer
-- Qt 6.8 or newer with Core, GUI, QML, Quick, Quick Controls, and Quick Dialogs
+- Qt 6.8 or newer with Core, GUI, Widgets, QML, Quick, Quick Controls, and Quick Dialogs
 - LMDB 0.9.30 or newer, exposed through `pkg-config`
 - Catch2 3
 - clang-format, clang-tidy, and ripgrep for linting

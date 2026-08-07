@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "notebook_controller.hpp"
 
-#include <QGuiApplication>
+#include <QApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QTimer>
 
 auto main(int argc, char* argv[]) -> int {
-    QGuiApplication application(argc, argv);
+    QApplication application(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("Hieda"));
     QCoreApplication::setOrganizationName(QStringLiteral("Hieda"));
 
