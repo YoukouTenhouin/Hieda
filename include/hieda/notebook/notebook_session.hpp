@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -44,6 +45,11 @@ struct NotebookError {
     NotebookErrorCode code;
     std::filesystem::path path;
     std::string detail;
+};
+
+class NotebookException : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
 };
 
 template <typename T> class Result {

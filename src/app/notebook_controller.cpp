@@ -20,21 +20,31 @@ auto NotebookController::errorMessage() const -> QString {
 
 void NotebookController::createNotebook(const QUrl& url) {
     const auto path = url.toLocalFile().toStdString();
-    const auto result = session_.create(path);
-    if (result) {
-        accept(result.value());
-    } else {
-        reject(result.error());
+    try {
+        const auto result = session_.create(path);
+        if (result) {
+            accept(result.value());
+        } else {
+            reject(result.error());
+        }
+    } catch (const hieda::notebook::NotebookException&) {
+        error_ = tr("Hieda encountered an unexpected Notebook error.");
+        emit stateChanged();
     }
 }
 
 void NotebookController::openNotebook(const QUrl& url) {
     const auto path = url.toLocalFile().toStdString();
-    const auto result = session_.open(path);
-    if (result) {
-        accept(result.value());
-    } else {
-        reject(result.error());
+    try {
+        const auto result = session_.open(path);
+        if (result) {
+            accept(result.value());
+        } else {
+            reject(result.error());
+        }
+    } catch (const hieda::notebook::NotebookException&) {
+        error_ = tr("Hieda encountered an unexpected Notebook error.");
+        emit stateChanged();
     }
 }
 

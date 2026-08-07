@@ -68,6 +68,10 @@ auto errorFromErrno(const std::filesystem::path& path, int error, std::string_vi
 
 auto errorFromLmdb(const std::filesystem::path& path, int error, std::string_view operation)
     -> NotebookError {
+    if (error == MDB_PANIC || error == MDB_BAD_TXN || error == MDB_BAD_RSLOT ||
+        error == MDB_BAD_VALSIZE || error == MDB_INCOMPATIBLE) {
+        throw NotebookException(std::string(operation) + ": " + mdb_strerror(error));
+    }
     auto code = NotebookErrorCode::ioFailure;
     if (error == MDB_INVALID || error == MDB_CORRUPTED || error == MDB_NOTFOUND) {
         code = NotebookErrorCode::invalidNotebook;
@@ -321,6 +325,11 @@ class NotebookSession::Impl {
             static_cast<void>(::close(lockFile));
             lockFile = -1;
         }
+        if (dataLockFile >= 0) {
+            static_cast<void>(flock(dataLockFile, LOCK_UN));
+            static_cast<void>(::close(dataLockFile));
+            dataLockFile = -1;
+        }
         info.reset();
     }
 
@@ -340,6 +349,24 @@ class NotebookSession::Impl {
             return errorFromErrno(path, error, "lock Notebook");
         }
         lockFile = descriptor;
+        return std::nullopt;
+    }
+
+    auto acquireDataLock(const std::filesystem::path& path) -> std::optional<NotebookError> {
+        const auto descriptor = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+        if (descriptor < 0) {
+            return errorFromErrno(path, errno, "open Notebook data lock");
+        }
+        if (flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
+            const auto error = errno;
+            static_cast<void>(::close(descriptor));
+            if (error == EWOULDBLOCK || error == EAGAIN) {
+                return makeError(NotebookErrorCode::alreadyInUse, path,
+                                 "Notebook is already open through another path");
+            }
+            return errorFromErrno(path, error, "lock Notebook data file");
+        }
+        dataLockFile = descriptor;
         return std::nullopt;
     }
 
@@ -398,6 +425,7 @@ class NotebookSession::Impl {
     mutable std::mutex mutex;
     MDB_env* environment{nullptr};
     int lockFile{-1};
+    int dataLockFile{-1};
     std::optional<NotebookInfo> info;
 };
 
@@ -457,7 +485,16 @@ auto NotebookSession::create(const std::filesystem::path& inputPath) -> Result<N
     const auto createdAt = std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::system_clock::now().time_since_epoch())
                                .count();
-    if (auto creationError = createEnvironment(temporaryPath, Manifest{id, createdAt, 0})) {
+    std::optional<NotebookError> creationError;
+    try {
+        creationError = createEnvironment(temporaryPath, Manifest{id, createdAt, 0});
+    } catch (...) {
+        removeIfPresent(temporaryPath);
+        removeIfPresent(std::filesystem::path(temporaryPath.string() + "-lock"));
+        impl_->closeUnlocked();
+        throw;
+    }
+    if (creationError) {
         removeIfPresent(temporaryPath);
         removeIfPresent(std::filesystem::path(temporaryPath.string() + "-lock"));
         impl_->closeUnlocked();
@@ -477,6 +514,11 @@ auto NotebookSession::create(const std::filesystem::path& inputPath) -> Result<N
     removeIfPresent(temporaryPath);
     removeIfPresent(std::filesystem::path(temporaryPath.string() + "-lock"));
 
+    if (auto lockError = impl_->acquireDataLock(path)) {
+        impl_->closeUnlocked();
+        return Result<NotebookInfo>::failure(std::move(*lockError));
+    }
+
     const auto directoryDescriptor =
         ::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (directoryDescriptor >= 0) {
@@ -484,7 +526,14 @@ auto NotebookSession::create(const std::filesystem::path& inputPath) -> Result<N
         static_cast<void>(::close(directoryDescriptor));
     }
 
-    auto opened = impl_->openEnvironment(path);
+    Result<NotebookInfo> opened = [&]() -> Result<NotebookInfo> {
+        try {
+            return impl_->openEnvironment(path);
+        } catch (...) {
+            impl_->closeUnlocked();
+            throw;
+        }
+    }();
     if (!opened) {
         impl_->closeUnlocked();
     }
@@ -511,7 +560,18 @@ auto NotebookSession::open(const std::filesystem::path& inputPath) -> Result<Not
     if (auto lockError = impl_->acquireLock(path)) {
         return Result<NotebookInfo>::failure(std::move(*lockError));
     }
-    auto opened = impl_->openEnvironment(path);
+    if (auto lockError = impl_->acquireDataLock(path)) {
+        impl_->closeUnlocked();
+        return Result<NotebookInfo>::failure(std::move(*lockError));
+    }
+    Result<NotebookInfo> opened = [&]() -> Result<NotebookInfo> {
+        try {
+            return impl_->openEnvironment(path);
+        } catch (...) {
+            impl_->closeUnlocked();
+            throw;
+        }
+    }();
     if (!opened) {
         impl_->closeUnlocked();
     }

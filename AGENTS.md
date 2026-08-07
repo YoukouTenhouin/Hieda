@@ -11,6 +11,8 @@ This repository is currently an empty project skeleton: no application source, t
 
 Document any intentional departure from this layout in this file or the main README.
 
+Public C++ headers live under `include/`, Qt Quick source files under `qml/`, and reusable CMake scripts under `cmake/`; these are conventional tool-specific counterparts to production code under `src/`. Qt adapter behavior is tested directly, while declarative file-dialog wiring receives a packaged-process smoke test rather than brittle native-dialog automation.
+
 ## Build, Test, and Development Commands
 
 The project uses CMake with Ninja and system-provided dependencies. The canonical commands are:
