@@ -69,7 +69,8 @@ auto errorFromErrno(const std::filesystem::path& path, int error, std::string_vi
 auto errorFromLmdb(const std::filesystem::path& path, int error, std::string_view operation)
     -> NotebookError {
     if (error == MDB_PANIC || error == MDB_BAD_TXN || error == MDB_BAD_RSLOT ||
-        error == MDB_BAD_VALSIZE || error == MDB_INCOMPATIBLE) {
+        error == MDB_BAD_VALSIZE || error == MDB_INCOMPATIBLE || error == MDB_BAD_DBI ||
+        error == MDB_DBS_FULL || error == MDB_PAGE_FULL || error == MDB_CURSOR_FULL) {
         throw NotebookException(std::string(operation) + ": " + mdb_strerror(error));
     }
     auto code = NotebookErrorCode::ioFailure;
@@ -83,6 +84,27 @@ auto errorFromLmdb(const std::filesystem::path& path, int error, std::string_vie
         code = NotebookErrorCode::pathNotFound;
     }
     return makeError(code, path, std::string(operation) + ": " + mdb_strerror(error));
+}
+
+auto openLmdbEnvironment(const std::filesystem::path& path) -> Result<MDB_env*> {
+    MDB_env* environment = nullptr;
+    auto result = mdb_env_create(&environment);
+    if (result == MDB_SUCCESS) {
+        result = mdb_env_set_maxdbs(environment, 16);
+    }
+    if (result == MDB_SUCCESS) {
+        result = mdb_env_set_mapsize(environment, mapSize);
+    }
+    if (result == MDB_SUCCESS) {
+        result = mdb_env_open(environment, path.c_str(), MDB_NOSUBDIR, 0600);
+    }
+    if (result != MDB_SUCCESS) {
+        if (environment != nullptr) {
+            mdb_env_close(environment);
+        }
+        return Result<MDB_env*>::failure(errorFromLmdb(path, result, "open LMDB environment"));
+    }
+    return Result<MDB_env*>::success(environment);
 }
 
 void appendU16(std::vector<std::uint8_t>& output, std::uint16_t value) {
@@ -226,30 +248,18 @@ auto generateId() -> NotebookId {
 
 auto createEnvironment(const std::filesystem::path& path, const Manifest& manifest)
     -> std::optional<NotebookError> {
-    MDB_env* environment = nullptr;
-    auto result = mdb_env_create(&environment);
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result, "create LMDB environment");
+    auto opened = openLmdbEnvironment(path);
+    if (!opened) {
+        return opened.error();
     }
+    MDB_env* environment = opened.value();
+    auto result = MDB_SUCCESS;
     const auto closeEnvironment = [&environment]() -> void {
         if (environment != nullptr) {
             mdb_env_close(environment);
             environment = nullptr;
         }
     };
-
-    result = mdb_env_set_maxdbs(environment, 16);
-    if (result == MDB_SUCCESS) {
-        result = mdb_env_set_mapsize(environment, mapSize);
-    }
-    if (result == MDB_SUCCESS) {
-        result = mdb_env_open(environment, path.c_str(), MDB_NOSUBDIR, 0600);
-    }
-    if (result != MDB_SUCCESS) {
-        auto error = errorFromLmdb(path, result, "initialize LMDB environment");
-        closeEnvironment();
-        return error;
-    }
 
     MDB_txn* transaction = nullptr;
     result = mdb_txn_begin(environment, nullptr, 0, &transaction);
@@ -371,23 +381,12 @@ class NotebookSession::Impl {
     }
 
     auto openEnvironment(const std::filesystem::path& path) -> Result<NotebookInfo> {
-        MDB_env* openedEnvironment = nullptr;
-        auto result = mdb_env_create(&openedEnvironment);
-        if (result == MDB_SUCCESS) {
-            result = mdb_env_set_maxdbs(openedEnvironment, 16);
+        auto opened = openLmdbEnvironment(path);
+        if (!opened) {
+            return Result<NotebookInfo>::failure(opened.error());
         }
-        if (result == MDB_SUCCESS) {
-            result = mdb_env_set_mapsize(openedEnvironment, mapSize);
-        }
-        if (result == MDB_SUCCESS) {
-            result = mdb_env_open(openedEnvironment, path.c_str(), MDB_NOSUBDIR, 0600);
-        }
-        if (result != MDB_SUCCESS) {
-            if (openedEnvironment != nullptr) {
-                mdb_env_close(openedEnvironment);
-            }
-            return Result<NotebookInfo>::failure(errorFromLmdb(path, result, "open Notebook"));
-        }
+        MDB_env* openedEnvironment = opened.value();
+        auto result = MDB_SUCCESS;
 
         MDB_txn* transaction = nullptr;
         MDB_dbi metadata = 0;
@@ -420,6 +419,19 @@ class NotebookSession::Impl {
         environment = openedEnvironment;
         info = NotebookInfo{manifest.value().id, path, schemaVersion};
         return Result<NotebookInfo>::success(*info);
+    }
+
+    auto finishOpen(const std::filesystem::path& path) -> Result<NotebookInfo> {
+        try {
+            auto opened = openEnvironment(path);
+            if (!opened) {
+                closeUnlocked();
+            }
+            return opened;
+        } catch (...) {
+            closeUnlocked();
+            throw;
+        }
     }
 
     mutable std::mutex mutex;
@@ -521,23 +533,21 @@ auto NotebookSession::create(const std::filesystem::path& inputPath) -> Result<N
 
     const auto directoryDescriptor =
         ::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (directoryDescriptor >= 0) {
-        static_cast<void>(::fsync(directoryDescriptor));
-        static_cast<void>(::close(directoryDescriptor));
-    }
-
-    Result<NotebookInfo> opened = [&]() -> Result<NotebookInfo> {
-        try {
-            return impl_->openEnvironment(path);
-        } catch (...) {
-            impl_->closeUnlocked();
-            throw;
-        }
-    }();
-    if (!opened) {
+    if (directoryDescriptor < 0) {
+        const auto error = errorFromErrno(path, errno, "open Notebook parent directory");
         impl_->closeUnlocked();
+        return Result<NotebookInfo>::failure(error);
     }
-    return opened;
+    if (::fsync(directoryDescriptor) != 0) {
+        const auto syncError = errno;
+        static_cast<void>(::close(directoryDescriptor));
+        impl_->closeUnlocked();
+        return Result<NotebookInfo>::failure(
+            errorFromErrno(path, syncError, "flush Notebook parent directory"));
+    }
+    static_cast<void>(::close(directoryDescriptor));
+
+    return impl_->finishOpen(path);
 }
 
 auto NotebookSession::open(const std::filesystem::path& inputPath) -> Result<NotebookInfo> {
@@ -564,18 +574,7 @@ auto NotebookSession::open(const std::filesystem::path& inputPath) -> Result<Not
         impl_->closeUnlocked();
         return Result<NotebookInfo>::failure(std::move(*lockError));
     }
-    Result<NotebookInfo> opened = [&]() -> Result<NotebookInfo> {
-        try {
-            return impl_->openEnvironment(path);
-        } catch (...) {
-            impl_->closeUnlocked();
-            throw;
-        }
-    }();
-    if (!opened) {
-        impl_->closeUnlocked();
-    }
-    return opened;
+    return impl_->finishOpen(path);
 }
 
 void NotebookSession::close() noexcept {

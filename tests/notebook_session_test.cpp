@@ -52,7 +52,8 @@ void appendField(std::vector<std::uint8_t>& output, std::uint16_t tag,
     output.insert(output.end(), value.begin(), value.end());
 }
 
-void createUnsupportedNotebook(const std::filesystem::path& path) {
+void createNotebookFixture(const std::filesystem::path& path, std::uint32_t fixtureSchemaVersion,
+                           bool includeIdentity = true) {
     MDB_env* environment = nullptr;
     REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
     REQUIRE(mdb_env_set_maxdbs(environment, 1) == MDB_SUCCESS);
@@ -70,9 +71,11 @@ void createUnsupportedNotebook(const std::filesystem::path& path) {
     appendU32(number, 1);
     appendField(manifest, 2, number);
     number.clear();
-    appendU32(number, 2);
+    appendU32(number, fixtureSchemaVersion);
     appendField(manifest, 3, number);
-    appendField(manifest, 4, std::vector<std::uint8_t>(16, 0));
+    if (includeIdentity) {
+        appendField(manifest, 4, std::vector<std::uint8_t>(16, 0));
+    }
 
     constexpr std::string_view keyText = "manifest";
     MDB_val key{keyText.size(), const_cast<char*>(keyText.data())};
@@ -173,13 +176,25 @@ TEST_CASE("opening invalid input returns a typed error") {
 TEST_CASE("opening a newer Notebook schema returns an unsupported-version error") {
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath = temporaryDirectory.path() / "newer.hieda";
-    createUnsupportedNotebook(notebookPath);
+    createNotebookFixture(notebookPath, 2);
     hieda::notebook::NotebookSession session;
 
     const auto result = session.open(notebookPath);
 
     REQUIRE_FALSE(result);
     CHECK(result.error().code == hieda::notebook::NotebookErrorCode::unsupportedVersion);
+}
+
+TEST_CASE("opening an incomplete Notebook manifest returns an invalid error") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "incomplete.hieda";
+    createNotebookFixture(notebookPath, 1, false);
+    hieda::notebook::NotebookSession session;
+
+    const auto result = session.open(notebookPath);
+
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == hieda::notebook::NotebookErrorCode::invalidNotebook);
 }
 
 TEST_CASE("one session keeps its current Notebook when another open is attempted") {
@@ -272,4 +287,22 @@ TEST_CASE("creating requires an existing parent directory") {
 
     REQUIRE_FALSE(result);
     CHECK(result.error().code == hieda::notebook::NotebookErrorCode::invalidPath);
+}
+
+TEST_CASE("creating reports a permission-denied parent directory") {
+    TemporaryDirectory temporaryDirectory;
+    const auto restrictedDirectory = temporaryDirectory.path() / "restricted";
+    std::filesystem::create_directory(restrictedDirectory);
+    std::filesystem::permissions(restrictedDirectory,
+                                 std::filesystem::perms::owner_read |
+                                     std::filesystem::perms::owner_exec,
+                                 std::filesystem::perm_options::replace);
+    hieda::notebook::NotebookSession session;
+
+    const auto result = session.create(restrictedDirectory / "notes.hieda");
+    std::filesystem::permissions(restrictedDirectory, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace);
+
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == hieda::notebook::NotebookErrorCode::permissionDenied);
 }
