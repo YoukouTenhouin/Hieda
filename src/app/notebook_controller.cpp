@@ -1,7 +1,29 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "notebook_controller.hpp"
 
+#include <QFile>
 #include <QFileInfo>
+
+namespace {
+
+auto localPath(const QUrl& url) -> std::filesystem::path {
+#ifdef _WIN32
+    return std::filesystem::path(url.toLocalFile().toStdWString());
+#else
+    const auto encoded = QFile::encodeName(url.toLocalFile());
+    return {encoded.constData()};
+#endif
+}
+
+auto displayPath(const std::filesystem::path& path) -> QString {
+#ifdef _WIN32
+    return QString::fromStdWString(path.native());
+#else
+    return QFile::decodeName(path.c_str());
+#endif
+}
+
+} // namespace
 
 NotebookController::NotebookController(QObject* parent) : QObject(parent) {}
 
@@ -19,7 +41,7 @@ auto NotebookController::errorMessage() const -> QString {
 }
 
 void NotebookController::createNotebook(const QUrl& url) {
-    const auto path = url.toLocalFile().toStdString();
+    const auto path = localPath(url);
     try {
         const auto result = session_.create(path);
         if (result) {
@@ -34,7 +56,7 @@ void NotebookController::createNotebook(const QUrl& url) {
 }
 
 void NotebookController::openNotebook(const QUrl& url) {
-    const auto path = url.toLocalFile().toStdString();
+    const auto path = localPath(url);
     try {
         const auto result = session_.open(path);
         if (result) {
@@ -64,7 +86,7 @@ void NotebookController::clearError() {
 }
 
 void NotebookController::accept(const hieda::notebook::NotebookInfo& info) {
-    path_ = QString::fromStdString(info.path.string());
+    path_ = displayPath(info.path);
     name_ = QFileInfo(path_).completeBaseName();
     error_.clear();
     emit stateChanged();

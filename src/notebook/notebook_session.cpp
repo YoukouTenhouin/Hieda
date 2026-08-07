@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "hieda/notebook/notebook_session.hpp"
+#include "platform_file.hpp"
 
 #include <lmdb.h>
-
-#include <fcntl.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <array>
 #include <cerrno>
@@ -54,16 +50,57 @@ auto makeError(NotebookErrorCode code, const std::filesystem::path& path, std::s
     return {code, path, std::move(detail)};
 }
 
-auto errorFromErrno(const std::filesystem::path& path, int error, std::string_view operation)
-    -> NotebookError {
+auto errorFromSystem(const std::filesystem::path& path, const std::error_code& error,
+                     std::string_view operation) -> NotebookError {
     auto code = NotebookErrorCode::ioFailure;
-    if (error == EACCES || error == EPERM) {
+    if (error == std::errc::permission_denied || error == std::errc::read_only_file_system) {
         code = NotebookErrorCode::permissionDenied;
-    } else if (error == ENOENT) {
+    } else if (error == std::errc::no_such_file_or_directory) {
         code = NotebookErrorCode::pathNotFound;
     }
-    return makeError(code, path,
-                     std::string(operation) + ": " + std::generic_category().message(error));
+    return makeError(code, path, std::string(operation) + ": " + error.message());
+}
+
+auto errorFromPlatform(const std::filesystem::path& path, const platform::FileError& error,
+                       std::string_view operation) -> NotebookError {
+    auto code = NotebookErrorCode::ioFailure;
+    switch (error.kind) {
+    case platform::FileErrorKind::alreadyLocked:
+        code = NotebookErrorCode::alreadyInUse;
+        break;
+    case platform::FileErrorKind::alreadyExists:
+        code = NotebookErrorCode::pathExists;
+        break;
+    case platform::FileErrorKind::permissionDenied:
+        code = NotebookErrorCode::permissionDenied;
+        break;
+    case platform::FileErrorKind::notFound:
+        code = NotebookErrorCode::pathNotFound;
+        break;
+    case platform::FileErrorKind::other:
+        break;
+    }
+    return makeError(code, path, std::string(operation) + ": " + error.systemError.message());
+}
+
+auto pathWithSuffix(const std::filesystem::path& path, std::string_view suffix)
+    -> std::filesystem::path {
+    auto result = path;
+#ifdef _WIN32
+    result += std::wstring(suffix.begin(), suffix.end());
+#else
+    result += suffix;
+#endif
+    return result;
+}
+
+auto lmdbPath(const std::filesystem::path& path) -> std::string {
+#ifdef _WIN32
+    const auto utf8 = path.u8string();
+    return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
+#else
+    return path.native();
+#endif
 }
 
 auto errorFromLmdb(const std::filesystem::path& path, int error, std::string_view operation)
@@ -98,7 +135,8 @@ auto openLmdbEnvironment(const std::filesystem::path& path) -> Result<MDB_env*> 
         result = mdb_env_set_mapsize(environment, mapSize);
     }
     if (result == MDB_SUCCESS) {
-        result = mdb_env_open(environment, path.c_str(), MDB_NOSUBDIR, 0600);
+        const auto encodedPath = lmdbPath(path);
+        result = mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR, 0600);
     }
     if (result != MDB_SUCCESS) {
         if (environment != nullptr) {
@@ -332,53 +370,35 @@ class NotebookSession::Impl {
             mdb_env_close(environment);
             environment = nullptr;
         }
-        if (lockFile >= 0) {
-            static_cast<void>(flock(lockFile, LOCK_UN));
-            static_cast<void>(::close(lockFile));
-            lockFile = -1;
-        }
-        if (dataLockFile >= 0) {
-            static_cast<void>(flock(dataLockFile, LOCK_UN));
-            static_cast<void>(::close(dataLockFile));
-            dataLockFile = -1;
-        }
+        lockFile.reset();
+        dataLockFile.reset();
         info.reset();
     }
 
     auto acquireLock(const std::filesystem::path& path) -> std::optional<NotebookError> {
-        const auto lockPath = std::filesystem::path(path.string() + ".open-lock");
-        const auto descriptor = ::open(lockPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-        if (descriptor < 0) {
-            return errorFromErrno(path, errno, "open Notebook ownership lock");
-        }
-        if (flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
-            const auto error = errno;
-            static_cast<void>(::close(descriptor));
-            if (error == EWOULDBLOCK || error == EAGAIN) {
+        auto acquired =
+            platform::acquireExclusiveFileLock(pathWithSuffix(path, ".open-lock"), true);
+        if (const auto* error = std::get_if<platform::FileError>(&acquired)) {
+            if (error->kind == platform::FileErrorKind::alreadyLocked) {
                 return makeError(NotebookErrorCode::alreadyInUse, path,
                                  "Notebook is already open in another session");
             }
-            return errorFromErrno(path, error, "lock Notebook");
+            return errorFromPlatform(path, *error, "lock Notebook");
         }
-        lockFile = descriptor;
+        lockFile.emplace(std::get<platform::ExclusiveFileLock>(std::move(acquired)));
         return std::nullopt;
     }
 
     auto acquireDataLock(const std::filesystem::path& path) -> std::optional<NotebookError> {
-        const auto descriptor = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
-        if (descriptor < 0) {
-            return errorFromErrno(path, errno, "open Notebook data lock");
-        }
-        if (flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
-            const auto error = errno;
-            static_cast<void>(::close(descriptor));
-            if (error == EWOULDBLOCK || error == EAGAIN) {
+        auto acquired = platform::acquireExclusiveFileLock(path, false);
+        if (const auto* error = std::get_if<platform::FileError>(&acquired)) {
+            if (error->kind == platform::FileErrorKind::alreadyLocked) {
                 return makeError(NotebookErrorCode::alreadyInUse, path,
                                  "Notebook is already open through another path");
             }
-            return errorFromErrno(path, error, "lock Notebook data file");
+            return errorFromPlatform(path, *error, "lock Notebook data file");
         }
-        dataLockFile = descriptor;
+        dataLockFile.emplace(std::get<platform::ExclusiveFileLock>(std::move(acquired)));
         return std::nullopt;
     }
 
@@ -438,8 +458,8 @@ class NotebookSession::Impl {
 
     mutable std::mutex mutex;
     MDB_env* environment{nullptr};
-    int lockFile{-1};
-    int dataLockFile{-1};
+    std::optional<platform::ExclusiveFileLock> lockFile;
+    std::optional<platform::ExclusiveFileLock> dataLockFile;
     std::optional<NotebookInfo> info;
 };
 
@@ -482,7 +502,7 @@ auto NotebookSession::create(const std::filesystem::path& inputPath) -> Result<N
     }
     if (filesystemError) {
         return Result<NotebookInfo>::failure(
-            errorFromErrno(path, filesystemError.value(), "inspect Notebook path"));
+            errorFromSystem(path, filesystemError, "inspect Notebook path"));
     }
 
     if (auto lockError = impl_->acquireLock(path)) {
@@ -495,7 +515,8 @@ auto NotebookSession::create(const std::filesystem::path& inputPath) -> Result<N
     }
 
     const auto id = generateId();
-    const auto temporaryPath = std::filesystem::path(path.string() + ".tmp-" + id.toString());
+    const auto temporaryPath = pathWithSuffix(path, ".tmp-" + id.toString());
+    const auto temporaryLockPath = pathWithSuffix(temporaryPath, "-lock");
     const auto createdAt = std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::system_clock::now().time_since_epoch())
                                .count();
@@ -504,50 +525,37 @@ auto NotebookSession::create(const std::filesystem::path& inputPath) -> Result<N
         creationError = createEnvironment(temporaryPath, Manifest{id, createdAt, 0});
     } catch (...) {
         removeIfPresent(temporaryPath);
-        removeIfPresent(std::filesystem::path(temporaryPath.string() + "-lock"));
+        removeIfPresent(temporaryLockPath);
         impl_->closeUnlocked();
         throw;
     }
     if (creationError) {
         removeIfPresent(temporaryPath);
-        removeIfPresent(std::filesystem::path(temporaryPath.string() + "-lock"));
+        removeIfPresent(temporaryLockPath);
         impl_->closeUnlocked();
         return Result<NotebookInfo>::failure(std::move(*creationError));
     }
 
-    if (::link(temporaryPath.c_str(), path.c_str()) != 0) {
-        const auto error = errno;
+    if (const auto publishError = platform::publishNewFile(temporaryPath, path)) {
         removeIfPresent(temporaryPath);
-        removeIfPresent(std::filesystem::path(temporaryPath.string() + "-lock"));
+        removeIfPresent(temporaryLockPath);
         impl_->closeUnlocked();
-        const auto code =
-            error == EEXIST ? NotebookErrorCode::pathExists : NotebookErrorCode::ioFailure;
         return Result<NotebookInfo>::failure(
-            makeError(code, path, std::string("publish Notebook: ") + std::strerror(error)));
+            errorFromPlatform(path, *publishError, "publish Notebook"));
     }
     removeIfPresent(temporaryPath);
-    removeIfPresent(std::filesystem::path(temporaryPath.string() + "-lock"));
+    removeIfPresent(temporaryLockPath);
 
     if (auto lockError = impl_->acquireDataLock(path)) {
         impl_->closeUnlocked();
         return Result<NotebookInfo>::failure(std::move(*lockError));
     }
 
-    const auto directoryDescriptor =
-        ::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (directoryDescriptor < 0) {
-        const auto error = errorFromErrno(path, errno, "open Notebook parent directory");
-        impl_->closeUnlocked();
-        return Result<NotebookInfo>::failure(error);
-    }
-    if (::fsync(directoryDescriptor) != 0) {
-        const auto syncError = errno;
-        static_cast<void>(::close(directoryDescriptor));
+    if (const auto syncError = platform::syncParentDirectory(path)) {
         impl_->closeUnlocked();
         return Result<NotebookInfo>::failure(
-            errorFromErrno(path, syncError, "flush Notebook parent directory"));
+            errorFromPlatform(path, *syncError, "flush Notebook parent directory"));
     }
-    static_cast<void>(::close(directoryDescriptor));
 
     return impl_->finishOpen(path);
 }

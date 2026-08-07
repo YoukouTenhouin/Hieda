@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <QFile>
 #include <QUrl>
 
 #include <chrono>
@@ -33,6 +34,18 @@ class TemporaryDirectory {
     std::filesystem::path path_;
 };
 
+auto displayPath(const std::filesystem::path& path) -> QString {
+#ifdef _WIN32
+    return QString::fromStdWString(path.native());
+#else
+    return QFile::decodeName(path.c_str());
+#endif
+}
+
+auto localFileUrl(const std::filesystem::path& path) -> QUrl {
+    return QUrl::fromLocalFile(displayPath(path));
+}
+
 } // namespace
 
 TEST_CASE("the Qt adapter exposes create and close state") {
@@ -40,11 +53,11 @@ TEST_CASE("the Qt adapter exposes create and close state") {
     const auto notebookPath = temporaryDirectory.path() / "adapter.hieda";
     NotebookController controller;
 
-    controller.createNotebook(QUrl::fromLocalFile(QString::fromStdString(notebookPath.string())));
+    controller.createNotebook(localFileUrl(notebookPath));
 
     CHECK(controller.hasOpenNotebook());
     CHECK(controller.notebookName() == QStringLiteral("adapter"));
-    CHECK(controller.notebookPath() == QString::fromStdString(notebookPath.string()));
+    CHECK(controller.notebookPath() == displayPath(notebookPath));
     CHECK(controller.errorMessage().isEmpty());
 
     controller.closeNotebook();
@@ -61,10 +74,22 @@ TEST_CASE("the Qt adapter presents invalid Notebook errors") {
     }
     NotebookController controller;
 
-    controller.openNotebook(QUrl::fromLocalFile(QString::fromStdString(invalidPath.string())));
+    controller.openNotebook(localFileUrl(invalidPath));
 
     CHECK_FALSE(controller.hasOpenNotebook());
     CHECK(controller.errorMessage() == QStringLiteral("That file is not a valid Hieda Notebook."));
     controller.clearError();
     CHECK(controller.errorMessage().isEmpty());
+}
+
+TEST_CASE("the Qt adapter preserves a non-ASCII Notebook path") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / std::filesystem::path(u8"筆記.hieda");
+    NotebookController controller;
+
+    controller.createNotebook(localFileUrl(notebookPath));
+
+    REQUIRE(controller.hasOpenNotebook());
+    CHECK(controller.notebookName() == QString::fromUtf8("筆記"));
+    CHECK(controller.notebookPath() == displayPath(notebookPath));
 }

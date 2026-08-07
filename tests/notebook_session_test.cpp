@@ -34,6 +34,15 @@ class TemporaryDirectory {
     std::filesystem::path path_;
 };
 
+auto lmdbFixturePath(const std::filesystem::path& path) -> std::string {
+#ifdef _WIN32
+    const auto utf8 = path.u8string();
+    return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
+#else
+    return path.native();
+#endif
+}
+
 void appendU16(std::vector<std::uint8_t>& output, std::uint16_t value) {
     output.push_back(static_cast<std::uint8_t>(value >> 8U));
     output.push_back(static_cast<std::uint8_t>(value));
@@ -57,7 +66,8 @@ void createNotebookFixture(const std::filesystem::path& path, std::uint32_t fixt
     MDB_env* environment = nullptr;
     REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
     REQUIRE(mdb_env_set_maxdbs(environment, 1) == MDB_SUCCESS);
-    REQUIRE(mdb_env_open(environment, path.c_str(), MDB_NOSUBDIR, 0600) == MDB_SUCCESS);
+    const auto encodedPath = lmdbFixturePath(path);
+    REQUIRE(mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR, 0600) == MDB_SUCCESS);
     MDB_txn* transaction = nullptr;
     REQUIRE(mdb_txn_begin(environment, nullptr, 0, &transaction) == MDB_SUCCESS);
     MDB_dbi metadata = 0;
@@ -124,6 +134,21 @@ TEST_CASE("a created Notebook closes and reopens with the same identity") {
         }
     }
     CHECK(canonicalFiles == 1);
+}
+
+TEST_CASE("a Notebook path can contain non-ASCII characters") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / std::filesystem::path(u8"筆記.hieda");
+    hieda::notebook::NotebookSession session;
+
+    const auto created = session.create(notebookPath);
+    REQUIRE(created);
+    CHECK(created.value().path == notebookPath);
+
+    session.close();
+    const auto reopened = session.open(notebookPath);
+    REQUIRE(reopened);
+    CHECK(reopened.value().path == notebookPath);
 }
 
 TEST_CASE("creating never overwrites an existing path") {
@@ -290,6 +315,9 @@ TEST_CASE("creating requires an existing parent directory") {
 }
 
 TEST_CASE("creating reports a permission-denied parent directory") {
+#ifdef _WIN32
+    SKIP("Windows ACL coverage requires a platform integration test");
+#else
     TemporaryDirectory temporaryDirectory;
     const auto restrictedDirectory = temporaryDirectory.path() / "restricted";
     std::filesystem::create_directory(restrictedDirectory);
@@ -305,4 +333,5 @@ TEST_CASE("creating reports a permission-denied parent directory") {
 
     REQUIRE_FALSE(result);
     CHECK(result.error().code == hieda::notebook::NotebookErrorCode::permissionDenied);
+#endif
 }
