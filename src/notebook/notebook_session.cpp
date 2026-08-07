@@ -68,13 +68,15 @@ auto errorFromErrno(const std::filesystem::path& path, int error, std::string_vi
 
 auto errorFromLmdb(const std::filesystem::path& path, int error, std::string_view operation)
     -> NotebookError {
-    if (error == MDB_PANIC || error == MDB_BAD_TXN || error == MDB_BAD_RSLOT ||
-        error == MDB_BAD_VALSIZE || error == MDB_INCOMPATIBLE || error == MDB_BAD_DBI ||
-        error == MDB_DBS_FULL || error == MDB_PAGE_FULL || error == MDB_CURSOR_FULL) {
+    if (error == MDB_KEYEXIST || error == MDB_PANIC || error == MDB_TLS_FULL ||
+        error == MDB_BAD_TXN || error == MDB_BAD_RSLOT || error == MDB_BAD_VALSIZE ||
+        error == MDB_INCOMPATIBLE || error == MDB_BAD_DBI || error == MDB_DBS_FULL ||
+        error == MDB_PAGE_FULL || error == MDB_CURSOR_FULL) {
         throw NotebookException(std::string(operation) + ": " + mdb_strerror(error));
     }
     auto code = NotebookErrorCode::ioFailure;
-    if (error == MDB_INVALID || error == MDB_CORRUPTED || error == MDB_NOTFOUND) {
+    if (error == MDB_INVALID || error == MDB_CORRUPTED || error == MDB_PAGE_NOTFOUND ||
+        error == MDB_NOTFOUND) {
         code = NotebookErrorCode::invalidNotebook;
     } else if (error == MDB_VERSION_MISMATCH) {
         code = NotebookErrorCode::unsupportedVersion;
