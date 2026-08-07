@@ -12,7 +12,7 @@ lint: build
 package:
 	cmake --preset release
 	cmake --build --preset release
-	cpack --config build/release/CPackConfig.cmake -B build/release/package
-	cmake -DARCHIVE=build/release/package/hieda-0.1.0-$$(uname -m).tar.gz -P cmake/PackageSmoke.cmake
+	cmake -DBUILD_DIR=build/release -DOUTPUT_DIR=build/release/package -DPROJECT_VERSION=0.1.0 -DSOURCE_DIR=. -P cmake/BuildAppImage.cmake
+	cmake -DAPPIMAGE=build/release/package/hieda-0.1.0-linux-x86_64.AppImage -P cmake/PackageSmoke.cmake
 
 .PHONY: build test lint package

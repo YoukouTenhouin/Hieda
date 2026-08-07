@@ -26,7 +26,7 @@ commands are:
 - `make build` configures and builds the development preset.
 - `make test` builds and runs the complete CTest suite.
 - `make lint` verifies clang-format and runs clang-tidy with warnings as errors.
-- `make package` creates a release TGZ and smoke-tests its installed executable.
+- `make package` creates a Linux AppImage and smoke-tests its installed executable.
 
 Run one test with `ctest --test-dir build/dev -R '<test name>' --output-on-failure`. Required packages and supported tool versions are documented in `README.md`.
 

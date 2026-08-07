@@ -11,6 +11,10 @@
 #include <string_view>
 #include <vector>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace {
 
 class TemporaryDirectory {
@@ -318,6 +322,9 @@ TEST_CASE("creating reports a permission-denied parent directory") {
 #ifdef _WIN32
     SKIP("Windows ACL coverage requires a platform integration test");
 #else
+    if (geteuid() == 0) {
+        SKIP("root can bypass directory write permissions");
+    }
     TemporaryDirectory temporaryDirectory;
     const auto restrictedDirectory = temporaryDirectory.path() / "restricted";
     std::filesystem::create_directory(restrictedDirectory);

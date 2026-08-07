@@ -36,8 +36,14 @@ Run one test by name with:
 ctest --test-dir build/dev -R 'closes and reopens' --output-on-failure
 ```
 
-The current `make package` command remains a dependency-unbundled Linux TGZ. Cross-platform
-distribution packages are handled separately from application compatibility.
+On Linux, `make package` creates and smoke-tests an x86-64 AppImage. It downloads checksum-pinned
+linuxdeploy tools into `build/release/package/tools`; the build itself still uses the dependencies
+listed above.
+
+GitHub Actions builds and tests Windows x86-64, macOS on Apple Silicon, and Linux x86-64. Tags of
+the form `v<project version>` additionally publish a portable Windows ZIP, a macOS DMG, and a Linux
+AppImage to a GitHub release. The Linux release build uses openSUSE Leap 15.6 as its compatibility
+baseline and builds Qt 6.8.3 from a checksum-verified source archive.
 
 ## Notebook files
 

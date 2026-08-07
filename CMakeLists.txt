@@ -69,14 +69,57 @@ target_link_libraries(hieda_qt_adapter PUBLIC Hieda::Notebook Qt6::Core)
 
 qt_add_executable(hieda src/app/main.cpp)
 if(WIN32)
-    set_target_properties(hieda PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_sources(hieda PRIVATE assets/hieda.rc)
+    target_include_directories(hieda PRIVATE assets)
+    set_target_properties(hieda PROPERTIES
+        OUTPUT_NAME Hieda
+        WIN32_EXECUTABLE TRUE
+    )
 elseif(APPLE)
-    set_target_properties(hieda PROPERTIES MACOSX_BUNDLE TRUE)
+    set(mac_icon "${CMAKE_CURRENT_BINARY_DIR}/hieda.icns")
+    add_custom_command(
+        OUTPUT "${mac_icon}"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.png"
+            "-DOUTPUT=${mac_icon}"
+            "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/mac-icon"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateMacIcon.cmake"
+        DEPENDS assets/icon.png cmake/GenerateMacIcon.cmake
+        VERBATIM
+    )
+    target_sources(hieda PRIVATE
+        "${mac_icon}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+    )
+    set_source_files_properties("${mac_icon}" PROPERTIES
+        GENERATED TRUE
+        MACOSX_PACKAGE_LOCATION Resources
+    )
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+        PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources/licenses"
+    )
+    set_target_properties(hieda PROPERTIES
+        OUTPUT_NAME Hieda
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME Hieda
+        MACOSX_BUNDLE_GUI_IDENTIFIER io.github.youkoutenhouin.hieda
+        MACOSX_BUNDLE_ICON_FILE hieda.icns
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+    )
+endif()
+set(hieda_qml_options)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND hieda_qml_options NO_IMPORT_SCAN)
 endif()
 qt_add_qml_module(hieda
     URI Hieda
     VERSION 1.0
-    NO_IMPORT_SCAN
+    ${hieda_qml_options}
     QML_FILES qml/Main.qml
 )
 target_link_libraries(hieda PRIVATE
@@ -96,15 +139,42 @@ install(TARGETS hieda
     BUNDLE DESTINATION .
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
-install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/hieda)
+if(NOT APPLE)
+    install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/hieda)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    install(FILES assets/hieda.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    install(FILES assets/icon.png
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/1024x1024/apps
+        RENAME hieda.png
+    )
+endif()
+
+if(WIN32 OR APPLE)
+    qt_generate_deploy_qml_app_script(
+        TARGET hieda
+        OUTPUT_SCRIPT hieda_deploy_script
+        NO_UNSUPPORTED_PLATFORM_ERROR
+    )
+    install(SCRIPT ${hieda_deploy_script})
+endif()
 
 set(CPACK_PACKAGE_NAME "hieda")
 set(CPACK_PACKAGE_VENDOR "Hieda contributors")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
-set(CPACK_GENERATOR "TGZ")
-set(CPACK_PACKAGE_FILE_NAME "hieda-${PROJECT_VERSION}-${CMAKE_SYSTEM_PROCESSOR}")
-set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
-include(CPack)
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Local-first notebook")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+if(WIN32)
+    set(CPACK_GENERATOR "ZIP")
+    set(CPACK_PACKAGE_FILE_NAME "hieda-${PROJECT_VERSION}-windows-x86_64")
+    set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+    include(CPack)
+elseif(APPLE)
+    set(CPACK_GENERATOR "DragNDrop")
+    set(CPACK_PACKAGE_FILE_NAME "hieda-${PROJECT_VERSION}-macos-arm64")
+    set(CPACK_DMG_VOLUME_NAME "Hieda ${PROJECT_VERSION}")
+    include(CPack)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
@@ -112,10 +182,16 @@ if(BUILD_TESTING)
     add_executable(notebook_session_test tests/notebook_session_test.cpp)
     target_link_libraries(notebook_session_test PRIVATE Hieda::Notebook Catch2::Catch2WithMain ${HIEDA_LMDB_TARGET})
     include(Catch)
-    catch_discover_tests(notebook_session_test)
+    set(hieda_catch_skip_arguments)
+    if(Catch2_VERSION VERSION_LESS 3.8)
+        set(hieda_catch_skip_arguments PROPERTIES SKIP_RETURN_CODE 4)
+    endif()
+    catch_discover_tests(notebook_session_test ${hieda_catch_skip_arguments})
     add_executable(notebook_controller_test tests/notebook_controller_test.cpp)
     target_link_libraries(notebook_controller_test PRIVATE hieda_qt_adapter Catch2::Catch2WithMain)
     catch_discover_tests(notebook_controller_test)
     add_test(NAME hieda_app_smoke COMMAND hieda --smoke-test)
-    set_tests_properties(hieda_app_smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    if(NOT APPLE)
+        set_tests_properties(hieda_app_smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endif()
 endif()

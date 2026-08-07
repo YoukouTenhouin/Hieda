@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: MPL-2.0
+[Desktop Entry]
+Type=Application
+Name=Hieda
+Comment=Local-first notebook
+Exec=hieda
+Icon=hieda
+Terminal=false
+Categories=Office;
