@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "hieda/notebook/notebook_session.hpp"
+#include "notebook_session_test_access.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <lmdb.h>
@@ -341,4 +342,209 @@ TEST_CASE("creating reports a permission-denied parent directory") {
     REQUIRE_FALSE(result);
     CHECK(result.error().code == hieda::notebook::NotebookErrorCode::permissionDenied);
 #endif
+}
+
+TEST_CASE("a Journal Page stays virtual until its first Entry is committed") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "lazy-journal.hieda";
+    const hieda::notebook::JournalDate date{2026, 8, 7};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+
+    const auto empty = session.journalPage(date);
+    REQUIRE(empty);
+    CHECK(empty.value().date == date);
+    CHECK_FALSE(empty.value().metadata.has_value());
+    CHECK(empty.value().entries.empty());
+
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    const auto reopened = session.journalPage(date);
+    REQUIRE(reopened);
+    CHECK_FALSE(reopened.value().metadata.has_value());
+}
+
+TEST_CASE("flat Journal Entries preserve identity Unicode text and insertion order") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "journal.hieda";
+    const hieda::notebook::JournalDate date{2026, 8, 7};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+
+    const auto first = session.insertJournalEntry(date, std::nullopt, "first");
+    REQUIRE(first);
+    REQUIRE(first.value().metadata);
+    REQUIRE(first.value().entries.size() == 1);
+    const auto firstId = first.value().entries.front().metadata.id;
+    CHECK(first.value().entries.front().metadata.createdAt ==
+          first.value().entries.front().metadata.updatedAt);
+
+    const auto third = session.insertJournalEntry(date, std::nullopt, "third");
+    REQUIRE(third);
+    REQUIRE(third.value().entries.size() == 2);
+    const auto thirdId = third.value().entries.back().metadata.id;
+
+    const std::string unicodeText = "\xE7\xAC\xAC\xE4\xBA\x8C \xF0\x9F\x8E\xB4";
+    const auto second = session.insertJournalEntry(date, firstId, unicodeText);
+    REQUIRE(second);
+    REQUIRE(second.value().entries.size() == 3);
+    CHECK(second.value().entries[0].authoredText == "first");
+    CHECK(second.value().entries[1].authoredText == unicodeText);
+    CHECK(second.value().entries[2].metadata.id == thirdId);
+
+    const auto& expected = second.value();
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    const auto reopened = session.journalPage(date);
+    REQUIRE(reopened);
+    CHECK(reopened.value() == expected);
+}
+
+TEST_CASE("editing a Journal Entry acknowledges only valid exact text") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "edit.hieda";
+    const hieda::notebook::JournalDate date{2026, 8, 7};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    const auto inserted = session.insertJournalEntry(date, std::nullopt, "before");
+    REQUIRE(inserted);
+    const auto entry = inserted.value().entries.front();
+    REQUIRE(inserted.value().metadata);
+    const auto pageMetadata = inserted.value().metadata.value_or(hieda::notebook::BlockMetadata{});
+
+    const auto updated = session.updateJournalEntry(entry.metadata.id, "  after  ");
+    REQUIRE(updated);
+    CHECK(updated.value().authoredText == "  after  ");
+    CHECK(updated.value().metadata.id == entry.metadata.id);
+    CHECK(updated.value().metadata.createdAt == entry.metadata.createdAt);
+
+    const auto rejected = session.updateJournalEntry(entry.metadata.id, "two\nlines");
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == hieda::notebook::NotebookErrorCode::invalidAuthoredText);
+    const auto page = session.journalPage(date);
+    REQUIRE(page);
+    CHECK(page.value().entries.front().authoredText == "  after  ");
+    CHECK(page.value().metadata == pageMetadata);
+}
+
+TEST_CASE("Journal commands report closed sessions and invalid insertion points") {
+    const hieda::notebook::JournalDate date{2026, 8, 7};
+    hieda::notebook::NotebookSession session;
+
+    const auto closed = session.journalPage(date);
+    REQUIRE_FALSE(closed);
+    CHECK(closed.error().code == hieda::notebook::NotebookErrorCode::notebookNotOpen);
+
+    TemporaryDirectory temporaryDirectory;
+    REQUIRE(session.create(temporaryDirectory.path() / "positions.hieda"));
+    hieda::notebook::BlockId missing;
+    missing.bytes.front() = std::byte{1};
+    const auto invalid = session.insertJournalEntry(date, missing, "entry");
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().code == hieda::notebook::NotebookErrorCode::invalidInsertionPoint);
+    const auto page = session.journalPage(date);
+    REQUIRE(page);
+    CHECK_FALSE(page.value().metadata.has_value());
+}
+
+TEST_CASE("a rejected Journal commit leaves the acknowledged state intact") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "rejected-save.hieda";
+    const hieda::notebook::JournalDate date{2026, 8, 7};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    const auto inserted = session.insertJournalEntry(date, std::nullopt, "durable");
+    REQUIRE(inserted);
+    const auto entryId = inserted.value().entries.front().metadata.id;
+    const auto revisionBeforeFailure = session.current().value_or({}).revision;
+
+    hieda::notebook::NotebookSessionTestAccess::rejectNextJournalCommit(session);
+    const auto rejected = session.updateJournalEntry(entryId, "not committed");
+
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
+    CHECK(session.current().value_or({}).revision == revisionBeforeFailure);
+    const auto current = session.journalPage(date);
+    REQUIRE(current);
+    CHECK(current.value().entries.front().authoredText == "durable");
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    const auto reopened = session.journalPage(date);
+    REQUIRE(reopened);
+    CHECK(reopened.value().entries.front().authoredText == "durable");
+}
+
+TEST_CASE("Journal ordering rebalances after repeated insertion at one position") {
+    TemporaryDirectory temporaryDirectory;
+    const hieda::notebook::JournalDate date{2026, 8, 7};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "rebalance.hieda"));
+    const auto first = session.insertJournalEntry(date, std::nullopt, "anchor");
+    REQUIRE(first);
+    const auto anchor = first.value().entries.front().metadata.id;
+
+    for (int index = 0; index < 40; ++index) {
+        REQUIRE(session.insertJournalEntry(date, anchor, std::to_string(index)));
+    }
+
+    const auto page = session.journalPage(date);
+    REQUIRE(page);
+    REQUIRE(page.value().entries.size() == 41);
+    CHECK(page.value().entries.front().authoredText == "anchor");
+    CHECK(page.value().entries[1].authoredText == "39");
+    CHECK(page.value().entries.back().authoredText == "0");
+}
+
+TEST_CASE("subscribers observe committed Journal changes after the session lock is released") {
+    TemporaryDirectory temporaryDirectory;
+    const hieda::notebook::JournalDate date{2026, 8, 7};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "subscription.hieda"));
+    int notifications = 0;
+    {
+        auto subscription = session.subscribeToChanges([&]() -> void {
+            ++notifications;
+            REQUIRE(session.journalPage(date));
+        });
+        REQUIRE(session.insertJournalEntry(date, std::nullopt, "committed"));
+        CHECK(notifications == 1);
+        const auto currentPage = session.journalPage(date);
+        REQUIRE(currentPage);
+        const auto entry = currentPage.value().entries.front();
+        REQUIRE(session.updateJournalEntry(entry.metadata.id, "changed"));
+        CHECK(notifications == 2);
+        REQUIRE(session.updateJournalEntry(entry.metadata.id, "changed"));
+        CHECK(notifications == 2);
+    }
+    REQUIRE(session.insertJournalEntry(date, std::nullopt, "after unsubscribe"));
+    CHECK(notifications == 2);
+}
+
+TEST_CASE("a failing subscriber cannot make a committed Journal command appear rejected") {
+    TemporaryDirectory temporaryDirectory;
+    const hieda::notebook::JournalDate date{2026, 8, 7};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "subscriber-failure.hieda"));
+    auto subscription =
+        session.subscribeToChanges([]() -> void { throw std::runtime_error("observer failed"); });
+
+    const auto inserted = session.insertJournalEntry(date, std::nullopt, "committed");
+
+    REQUIRE(inserted);
+    CHECK(session.current().value_or({}).revision == 1);
+    session.close();
+    REQUIRE(session.open(temporaryDirectory.path() / "subscriber-failure.hieda"));
+    REQUIRE(session.journalPage(date));
+}
+
+TEST_CASE("Journal Entry text rejects malformed UTF-8") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "utf8.hieda"));
+    const std::string malformed{"\xC0\xAF", 2};
+
+    const auto result = session.insertJournalEntry({2026, 8, 7}, std::nullopt, malformed);
+
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == hieda::notebook::NotebookErrorCode::invalidAuthoredText);
 }

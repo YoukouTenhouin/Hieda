@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "notebook_controller.hpp"
 
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+
+#include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -23,9 +29,100 @@ auto displayPath(const std::filesystem::path& path) -> QString {
 #endif
 }
 
+auto domainJournalDate(const QDate& date) -> hieda::notebook::JournalDate {
+    return {date.year(), static_cast<std::uint8_t>(date.month()),
+            static_cast<std::uint8_t>(date.day())};
+}
+
+auto blockId(const QString& text) -> std::optional<hieda::notebook::BlockId> {
+    const auto compact = QString(text).remove(QLatin1Char('-'));
+    if (compact.size() != 32) {
+        return std::nullopt;
+    }
+    hieda::notebook::BlockId id;
+    for (qsizetype index = 0; index < compact.size(); index += 2) {
+        bool valid = false;
+        const auto byte = compact.mid(index, 2).toUInt(&valid, 16);
+        if (!valid) {
+            return std::nullopt;
+        }
+        id.bytes[static_cast<std::size_t>(index / 2)] = static_cast<std::byte>(byte);
+    }
+    return id;
+}
+
+auto displayId(const hieda::notebook::BlockId& blockIdentifier) -> QString {
+    return QString::fromStdString(blockIdentifier.toString());
+}
+
 } // namespace
 
-NotebookController::NotebookController(QObject* parent) : QObject(parent) {}
+JournalEntryModel::JournalEntryModel(QObject* parent) : QAbstractListModel(parent) {}
+
+auto JournalEntryModel::rowCount(const QModelIndex& parent) const -> int {
+    return parent.isValid() ? 0 : static_cast<int>(entries_.size());
+}
+
+auto JournalEntryModel::data(const QModelIndex& index, int role) const -> QVariant {
+    if (!index.isValid() || index.row() < 0 ||
+        static_cast<std::size_t>(index.row()) >= entries_.size()) {
+        return {};
+    }
+    const auto& entry = entries_[static_cast<std::size_t>(index.row())];
+    if (role == EntryIdRole) {
+        return displayId(entry.metadata.id);
+    }
+    if (role == AuthoredTextRole) {
+        return QString::fromUtf8(entry.authoredText.data(),
+                                 static_cast<qsizetype>(entry.authoredText.size()));
+    }
+    return {};
+}
+
+auto JournalEntryModel::roleNames() const -> QHash<int, QByteArray> {
+    return {{EntryIdRole, "entryId"}, {AuthoredTextRole, "authoredText"}};
+}
+
+void JournalEntryModel::setEntries(std::vector<hieda::notebook::JournalEntry> entries) {
+    beginResetModel();
+    entries_ = std::move(entries);
+    endResetModel();
+}
+
+void JournalEntryModel::updateEntry(const hieda::notebook::JournalEntry& entry) {
+    const auto found = std::ranges::find_if(entries_, [&](const auto& current) -> bool {
+        return current.metadata.id == entry.metadata.id;
+    });
+    if (found == entries_.end()) {
+        return;
+    }
+    *found = entry;
+    const auto row = static_cast<int>(std::distance(entries_.begin(), found));
+    const auto changed = index(row);
+    emit dataChanged(changed, changed, {AuthoredTextRole});
+}
+
+auto JournalEntryModel::entryId(int row) const -> QString {
+    if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
+        return {};
+    }
+    return displayId(entries_[static_cast<std::size_t>(row)].metadata.id);
+}
+
+NotebookController::NotebookController(QObject* parent)
+    : QObject(parent), journalEntries_(this), midnightTimer_(this) {
+    midnightTimer_.setSingleShot(true);
+    connect(&midnightTimer_, &QTimer::timeout, this, [this]() -> void {
+        if (hasOpenNotebook()) {
+            requestJournalDateRollover(QDate::currentDate());
+        }
+        scheduleMidnightRefresh();
+    });
+    if (QCoreApplication::instance() != nullptr) {
+        QCoreApplication::instance()->installEventFilter(this);
+    }
+    scheduleMidnightRefresh();
+}
 
 auto NotebookController::hasOpenNotebook() const -> bool {
     return session_.isOpen();
@@ -38,6 +135,12 @@ auto NotebookController::notebookName() const -> QString {
 }
 auto NotebookController::errorMessage() const -> QString {
     return error_;
+}
+auto NotebookController::journalDate() const -> QDate {
+    return journalDate_;
+}
+auto NotebookController::journalEntries() -> QAbstractItemModel* {
+    return &journalEntries_;
 }
 
 void NotebookController::createNotebook(const QUrl& url) {
@@ -75,7 +178,105 @@ void NotebookController::closeNotebook() {
     path_.clear();
     name_.clear();
     error_.clear();
+    journalEntries_.setEntries({});
     emit stateChanged();
+    emit journalChanged();
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+auto NotebookController::insertJournalEntry(const QString& authoredText,
+                                            const QString& afterEntryId) -> int {
+    std::optional<hieda::notebook::BlockId> after;
+    if (!afterEntryId.isEmpty()) {
+        after = blockId(afterEntryId);
+        if (!after) {
+            error_ = tr("The selected Journal Entry is no longer available.");
+            emit stateChanged();
+            return -1;
+        }
+    }
+    const auto utf8 = authoredText.toUtf8();
+    try {
+        const auto beforeCount = journalEntries_.rowCount();
+        const auto result = session_.insertJournalEntry(
+            domainJournalDate(journalDate_), after,
+            std::string(utf8.constData(), static_cast<std::size_t>(utf8.size())));
+        if (!result) {
+            rejectSave(result.error());
+            return -1;
+        }
+        journalEntries_.setEntries(result.value().entries);
+        error_.clear();
+        emit stateChanged();
+        emit journalChanged();
+        if (!after) {
+            return beforeCount;
+        }
+        for (int row = 0; row < journalEntries_.rowCount(); ++row) {
+            if (journalEntries_.entryId(row) == afterEntryId) {
+                return row + 1;
+            }
+        }
+    } catch (const hieda::notebook::NotebookException&) {
+        error_ = tr("Hieda encountered an unexpected Notebook error.");
+        emit stateChanged();
+    }
+    return -1;
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+auto NotebookController::updateJournalEntry(const QString& entryId, const QString& authoredText)
+    -> bool {
+    const auto id = blockId(entryId);
+    if (!id) {
+        error_ = tr("That Journal Entry is no longer available.");
+        emit stateChanged();
+        return false;
+    }
+    const auto utf8 = authoredText.toUtf8();
+    try {
+        const auto result = session_.updateJournalEntry(
+            *id, std::string(utf8.constData(), static_cast<std::size_t>(utf8.size())));
+        if (!result) {
+            rejectSave(result.error());
+            loadJournalDate(journalDate_);
+            return false;
+        }
+        journalEntries_.updateEntry(result.value());
+        error_.clear();
+        emit stateChanged();
+        return true;
+    } catch (const hieda::notebook::NotebookException&) {
+        error_ = tr("Hieda encountered an unexpected Notebook error.");
+        emit stateChanged();
+        return false;
+    }
+}
+
+void NotebookController::requestJournalDateRollover(const QDate& date) {
+    if (hasOpenNotebook() && date.isValid()) {
+        pendingJournalDate_ = date;
+        emit journalDateRolloverRequested();
+    }
+}
+
+void NotebookController::completeJournalDateRollover() {
+    if (hasOpenNotebook() && pendingJournalDate_.isValid()) {
+        loadJournalDate(pendingJournalDate_);
+        pendingJournalDate_ = {};
+    }
+}
+
+auto NotebookController::eventFilter(QObject* watched, QEvent* event) -> bool {
+    if (watched == QCoreApplication::instance() &&
+        event->type() == QEvent::ApplicationStateChange) {
+        const auto currentDate = QDate::currentDate();
+        if (hasOpenNotebook() && currentDate != journalDate_) {
+            requestJournalDateRollover(currentDate);
+        }
+        scheduleMidnightRefresh();
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 void NotebookController::clearError() {
@@ -89,6 +290,7 @@ void NotebookController::accept(const hieda::notebook::NotebookInfo& info) {
     path_ = displayPath(info.path);
     name_ = QFileInfo(path_).completeBaseName();
     error_.clear();
+    loadJournalDate(QDate::currentDate());
     emit stateChanged();
 }
 
@@ -122,6 +324,54 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
     case NotebookErrorCode::ioFailure:
         error_ = tr("Hieda could not safely open that Notebook.");
         break;
+    case NotebookErrorCode::notebookNotOpen:
+        error_ = tr("Open a Notebook before editing the Journal.");
+        break;
+    case NotebookErrorCode::invalidJournalDate:
+        error_ = tr("Choose a valid Journal date.");
+        break;
+    case NotebookErrorCode::invalidAuthoredText:
+        error_ = tr("A Journal Entry must contain one line of Unicode text.");
+        break;
+    case NotebookErrorCode::blockNotFound:
+        error_ = tr("That Journal Entry is no longer available.");
+        break;
+    case NotebookErrorCode::invalidInsertionPoint:
+        error_ = tr("The selected Journal Entry is no longer on this Page.");
+        break;
     }
     emit stateChanged();
+}
+
+void NotebookController::rejectSave(const hieda::notebook::NotebookError& error) {
+    if (error.code == hieda::notebook::NotebookErrorCode::ioFailure) {
+        error_ = tr("Hieda could not safely save that Journal change.");
+        emit stateChanged();
+        return;
+    }
+    reject(error);
+}
+
+void NotebookController::loadJournalDate(const QDate& date) {
+    try {
+        const auto result = session_.journalPage(domainJournalDate(date));
+        if (!result) {
+            reject(result.error());
+            return;
+        }
+        journalDate_ = date;
+        journalEntries_.setEntries(result.value().entries);
+        emit journalChanged();
+    } catch (const hieda::notebook::NotebookException&) {
+        error_ = tr("Hieda encountered an unexpected Notebook error.");
+        emit stateChanged();
+    }
+}
+
+void NotebookController::scheduleMidnightRefresh() {
+    const auto now = QDateTime::currentDateTime();
+    const auto nextMidnight = QDateTime(now.date().addDays(1).startOfDay());
+    const auto milliseconds = std::max<qint64>(1, now.msecsTo(nextMidnight));
+    midnightTimer_.start(
+        static_cast<int>(std::min<qint64>(milliseconds, std::numeric_limits<int>::max())));
 }

@@ -6,12 +6,11 @@
 
 **Blocked by:** 01 — Launch the app and create or open a Notebook; [Specify block lifecycle and structural invariants](../../notebook-v0/issues/04-specify-block-lifecycle-and-structural-invariants.md); [Specify the authored text language](../../notebook-v0/issues/05-specify-the-authored-text-language.md); [Define journal editing behavior](../../notebook-v0/issues/06-define-journal-editing-behavior.md)
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Opening a Notebook presents the Journal Page for the user's current calendar date.
-- [ ] A user can create and edit ordered top-level Journal Entries containing Unicode text.
-- [ ] Each persisted Journal Page and Journal Entry receives stable globally unique identity and the agreed metadata.
-- [ ] An acknowledged edit is visible only after its complete canonical transaction succeeds.
-- [ ] Closing and reopening the Notebook reproduces all acknowledged entries, text, identity, and order.
-- [ ] Behavioral tests cover creation, editing, ordering, durable reopen, Unicode content, and a rejected save through the Notebook interface.
-
+- [x] Opening a Notebook presents the Journal Page for the user's current calendar date.
+- [x] A user can create and edit ordered top-level Journal Entries containing Unicode text.
+- [x] Each persisted Journal Page and Journal Entry receives stable globally unique identity and the agreed metadata.
+- [x] An acknowledged edit is visible only after its complete canonical transaction succeeds.
+- [x] Closing and reopening the Notebook reproduces all acknowledged entries, text, identity, and order.
+- [x] Behavioral tests cover creation, editing, ordering, durable reopen, Unicode content, and a rejected save through the Notebook interface.

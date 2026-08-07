@@ -16,6 +16,17 @@ ApplicationWindow {
     visible: true
     title: notebookController.hasOpenNotebook ? qsTr("%1 — Hieda").arg(notebookController.notebookName) : qsTr("Hieda")
 
+    Connections {
+        target: notebookController
+
+        function onJournalDateRolloverRequested() {
+            entryComposer.forceActiveFocus()
+            Qt.callLater(function() {
+                notebookController.completeJournalDateRollover()
+            })
+        }
+    }
+
     Action {
         id: createAction
 
@@ -118,11 +129,12 @@ ApplicationWindow {
                     anchors.centerIn: parent
                     width: Math.min(parent.width - (window.uiSpacing * 8), 560)
                     spacing: window.uiSpacing * 2
+                    visible: !notebookController.hasOpenNotebook
 
                     Label {
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignHCenter
-                        text: notebookController.hasOpenNotebook ? notebookController.notebookName : qsTr("Welcome to Hieda")
+                        text: qsTr("Welcome to Hieda")
                         font.pixelSize: Math.round(window.font.pixelSize * 1.5)
                         font.weight: Font.DemiBold
                     }
@@ -131,14 +143,12 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
-                        text: notebookController.hasOpenNotebook ? qsTr("Your Notebook is ready. Journal editing arrives in the next implementation slice.") : qsTr("Create a portable Notebook or open one you already have.")
+                        text: qsTr("Create a portable Notebook or open one you already have.")
                     }
 
                     RowLayout {
                         Layout.alignment: Qt.AlignHCenter
                         spacing: window.uiSpacing
-                        visible: !notebookController.hasOpenNotebook
-
                         Button {
                             action: createAction
                             highlighted: true
@@ -150,27 +160,104 @@ ApplicationWindow {
 
                     }
 
-                    RowLayout {
+                }
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: window.uiSpacing * 2
+                    spacing: window.uiSpacing
+                    visible: notebookController.hasOpenNotebook
+
+                    Label {
                         Layout.fillWidth: true
-                        visible: notebookController.hasOpenNotebook
+                        text: Qt.formatDate(notebookController.journalDate, Locale.LongFormat)
+                        font.pixelSize: Math.round(window.font.pixelSize * 1.5)
+                        font.weight: Font.DemiBold
+                        Accessible.name: qsTr("Journal Page for %1").arg(text)
+                    }
 
-                        Label {
-                            text: qsTr("Location:")
-                        }
+                    Label {
+                        Layout.fillWidth: true
+                        visible: journalList.count === 0
+                        text: qsTr("No entries yet. Capture the first thought below.")
+                        color: palette.placeholderText
+                    }
 
-                        TextField {
-                            Layout.fillWidth: true
-                            text: notebookController.notebookPath
-                            readOnly: true
+                    ListView {
+                        id: journalList
+
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+                        spacing: window.uiSpacing
+                        model: notebookController.journalEntries
+                        currentIndex: -1
+
+                        delegate: TextField {
+                            id: entryEditor
+
+                            required property string entryId
+                            required property string authoredText
+                            required property int index
+                            width: ListView.view.width
+                            text: authoredText
                             selectByMouse: true
+                            Accessible.name: qsTr("Journal Entry %1").arg(index + 1)
+                            onActiveFocusChanged: {
+                                if (activeFocus)
+                                    journalList.currentIndex = index
+                            }
+                            onEditingFinished: {
+                                if (text !== authoredText
+                                        && !notebookController.updateJournalEntry(entryId, text))
+                                    text = authoredText
+                            }
                         }
 
                     }
 
-                    Button {
-                        Layout.alignment: Qt.AlignHCenter
-                        visible: notebookController.hasOpenNotebook
-                        action: closeAction
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: window.uiSpacing
+
+                        TextField {
+                            id: entryComposer
+
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("New Journal Entry")
+                            selectByMouse: true
+                            Accessible.name: qsTr("New Journal Entry")
+                            onAccepted: addEntryButton.clicked()
+                        }
+
+                        Button {
+                            id: addEntryButton
+
+                            text: qsTr("Add Entry")
+                            highlighted: true
+                            onClicked: {
+                                const afterId = journalList.currentItem
+                                                ? journalList.currentItem.entryId : ""
+                                const newRow = notebookController.insertJournalEntry(
+                                                 entryComposer.text, afterId)
+                                if (newRow >= 0) {
+                                    entryComposer.clear()
+                                    journalList.currentIndex = newRow
+                                    Qt.callLater(function() {
+                                        if (journalList.currentItem)
+                                            journalList.currentItem.forceActiveFocus()
+                                    })
+                                }
+                            }
+                        }
+
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: notebookController.notebookPath
+                        elide: Text.ElideMiddle
+                        color: palette.placeholderText
                     }
 
                 }

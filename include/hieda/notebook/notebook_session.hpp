@@ -2,15 +2,18 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace hieda::notebook {
 
@@ -25,8 +28,65 @@ struct NotebookInfo {
     NotebookId id;
     std::filesystem::path path;
     std::uint32_t schemaVersion{0};
+    std::uint64_t revision{0};
 
     auto operator==(const NotebookInfo&) const -> bool = default;
+};
+
+class NotebookSubscription {
+  public:
+    NotebookSubscription();
+    ~NotebookSubscription();
+    NotebookSubscription(NotebookSubscription&&) noexcept;
+    auto operator=(NotebookSubscription&&) noexcept -> NotebookSubscription&;
+    NotebookSubscription(const NotebookSubscription&) = delete;
+    auto operator=(const NotebookSubscription&) -> NotebookSubscription& = delete;
+
+  private:
+    friend class NotebookSession;
+    class Impl;
+    explicit NotebookSubscription(std::unique_ptr<Impl> impl);
+    std::unique_ptr<Impl> impl_;
+};
+
+struct BlockId {
+    std::array<std::byte, 16> bytes{};
+
+    auto operator==(const BlockId&) const -> bool = default;
+    [[nodiscard]] auto toString() const -> std::string;
+};
+
+struct JournalDate {
+    std::int32_t year{0};
+    std::uint8_t month{0};
+    std::uint8_t day{0};
+
+    auto operator==(const JournalDate&) const -> bool = default;
+};
+
+using BlockTimestamp = std::chrono::sys_time<std::chrono::microseconds>;
+
+struct BlockMetadata {
+    BlockId id;
+    BlockTimestamp createdAt;
+    BlockTimestamp updatedAt;
+
+    auto operator==(const BlockMetadata&) const -> bool = default;
+};
+
+struct JournalEntry {
+    BlockMetadata metadata;
+    std::string authoredText;
+
+    auto operator==(const JournalEntry&) const -> bool = default;
+};
+
+struct JournalPage {
+    JournalDate date;
+    std::optional<BlockMetadata> metadata;
+    std::vector<JournalEntry> entries;
+
+    auto operator==(const JournalPage&) const -> bool = default;
 };
 
 enum class NotebookErrorCode : std::uint8_t {
@@ -39,6 +99,11 @@ enum class NotebookErrorCode : std::uint8_t {
     alreadyInUse,
     permissionDenied,
     ioFailure,
+    notebookNotOpen,
+    invalidJournalDate,
+    invalidAuthoredText,
+    blockNotFound,
+    invalidInsertionPoint,
 };
 
 struct NotebookError {
@@ -96,8 +161,15 @@ class NotebookSession {
     void close() noexcept;
     [[nodiscard]] auto isOpen() const noexcept -> bool;
     [[nodiscard]] auto current() const -> std::optional<NotebookInfo>;
+    [[nodiscard]] auto journalPage(JournalDate date) const -> Result<JournalPage>;
+    [[nodiscard]] auto insertJournalEntry(JournalDate date, std::optional<BlockId> afterEntry,
+                                          std::string authoredText) -> Result<JournalPage>;
+    [[nodiscard]] auto updateJournalEntry(BlockId entryId, std::string authoredText)
+        -> Result<JournalEntry>;
+    [[nodiscard]] auto subscribeToChanges(std::function<void()> callback) -> NotebookSubscription;
 
   private:
+    friend class NotebookSessionTestAccess;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "hieda/notebook/notebook_session.hpp"
+#include "notebook_session_test_access.hpp"
 #include "platform_file.hpp"
 
 #include <lmdb.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <sstream>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 namespace hieda::notebook {
@@ -43,6 +48,56 @@ struct Manifest {
     NotebookId id;
     std::int64_t createdAtMicroseconds{0};
     std::uint64_t revision{0};
+};
+
+enum class BlockType : std::uint8_t { journalPage = 1, journalEntry = 2 };
+
+struct BlockRecord {
+    BlockType type{BlockType::journalEntry};
+    BlockMetadata metadata;
+    std::optional<JournalDate> journalDate;
+    std::string authoredText;
+};
+
+class JournalCommitAdapter {
+  public:
+    virtual ~JournalCommitAdapter() = default;
+    virtual auto commit(MDB_txn*& transaction) -> int = 0;
+};
+
+class LmdbJournalCommitAdapter final : public JournalCommitAdapter {
+  public:
+    auto commit(MDB_txn*& transaction) -> int override {
+        auto* committing = transaction;
+        transaction = nullptr;
+        return mdb_txn_commit(committing);
+    }
+};
+
+#ifdef HIEDA_TESTING
+class RejectNextJournalCommitAdapter final : public JournalCommitAdapter {
+  public:
+    auto commit(MDB_txn*& transaction) -> int override {
+        if (shouldReject_) {
+            shouldReject_ = false;
+            mdb_txn_abort(transaction);
+            transaction = nullptr;
+            return EIO;
+        }
+        auto* committing = transaction;
+        transaction = nullptr;
+        return mdb_txn_commit(committing);
+    }
+
+  private:
+    bool shouldReject_{true};
+};
+#endif
+
+struct SubscriptionState {
+    std::mutex mutex;
+    std::size_t nextIdentifier{1};
+    std::unordered_map<std::size_t, std::function<void()>> callbacks;
 };
 
 auto makeError(NotebookErrorCode code, const std::filesystem::path& path, std::string detail)
@@ -286,6 +341,208 @@ auto generateId() -> NotebookId {
     return id;
 }
 
+auto generateBlockId() -> BlockId {
+    std::random_device random;
+    BlockId id;
+    for (auto& byte : id.bytes) {
+        byte = static_cast<std::byte>(random() & 0xFFU);
+    }
+    id.bytes[6] = static_cast<std::byte>((std::to_integer<unsigned>(id.bytes[6]) & 0x0FU) | 0x40U);
+    id.bytes[8] = static_cast<std::byte>((std::to_integer<unsigned>(id.bytes[8]) & 0x3FU) | 0x80U);
+    return id;
+}
+
+auto currentTimestamp() -> BlockTimestamp {
+    return std::chrono::time_point_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now());
+}
+
+auto validJournalDate(JournalDate date) -> bool {
+    if (date.year < 1 || date.year > 9999) {
+        return false;
+    }
+    const auto value = std::chrono::year_month_day{
+        std::chrono::year{date.year}, std::chrono::month{date.month}, std::chrono::day{date.day}};
+    return value.ok();
+}
+
+auto validAuthoredText(std::string_view text) -> bool {
+    if (text.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    if (text.find('\n') != std::string_view::npos || text.find('\r') != std::string_view::npos) {
+        return false;
+    }
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const auto first = static_cast<unsigned char>(text[index]);
+        std::size_t continuationCount = 0;
+        std::uint32_t codePoint = 0;
+        if (first <= 0x7FU) {
+            ++index;
+            continue;
+        }
+        if ((first & 0xE0U) == 0xC0U) {
+            continuationCount = 1;
+            codePoint = first & 0x1FU;
+        } else if ((first & 0xF0U) == 0xE0U) {
+            continuationCount = 2;
+            codePoint = first & 0x0FU;
+        } else if ((first & 0xF8U) == 0xF0U) {
+            continuationCount = 3;
+            codePoint = first & 0x07U;
+        } else {
+            return false;
+        }
+        if (continuationCount > text.size() - index - 1) {
+            return false;
+        }
+        for (std::size_t offset = 1; offset <= continuationCount; ++offset) {
+            const auto next = static_cast<unsigned char>(text[index + offset]);
+            if ((next & 0xC0U) != 0x80U) {
+                return false;
+            }
+            codePoint = (codePoint << 6U) | (next & 0x3FU);
+        }
+        auto minimum = 0x10000U;
+        if (continuationCount == 1) {
+            minimum = 0x80U;
+        } else if (continuationCount == 2) {
+            minimum = 0x800U;
+        }
+        if (codePoint < minimum || codePoint > 0x10FFFFU ||
+            (codePoint >= 0xD800U && codePoint <= 0xDFFFU)) {
+            return false;
+        }
+        index += continuationCount + 1;
+    }
+    return true;
+}
+
+auto timestampMicroseconds(BlockTimestamp timestamp) -> std::int64_t {
+    return timestamp.time_since_epoch().count();
+}
+
+auto encodeBlock(const BlockRecord& block) -> std::vector<std::uint8_t> {
+    std::vector<std::uint8_t> output;
+    appendU16(output, 1);
+    const auto type = static_cast<std::uint8_t>(block.type);
+    appendField(output, 1, &type, 1);
+    std::vector<std::uint8_t> number;
+    appendU64(number, static_cast<std::uint64_t>(timestampMicroseconds(block.metadata.createdAt)));
+    appendField(output, 2, number.data(), number.size());
+    number.clear();
+    appendU64(number, static_cast<std::uint64_t>(timestampMicroseconds(block.metadata.updatedAt)));
+    appendField(output, 3, number.data(), number.size());
+    const std::uint8_t active = 1;
+    appendField(output, 4, &active, 1);
+    if (block.journalDate) {
+        number.clear();
+        const auto packed =
+            static_cast<std::uint32_t>((block.journalDate->year * 10000) +
+                                       (block.journalDate->month * 100) + block.journalDate->day);
+        appendU32(number, packed);
+        appendField(output, 5, number.data(), number.size());
+    }
+    if (block.type == BlockType::journalEntry) {
+        appendField(output, 6, reinterpret_cast<const std::uint8_t*>(block.authoredText.data()),
+                    block.authoredText.size());
+    }
+    return output;
+}
+
+auto decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
+                 const std::filesystem::path& path) -> Result<BlockRecord> {
+    const auto* bytes = static_cast<const std::uint8_t*>(value.mv_data);
+    if (value.mv_size < 2 || readU16(bytes) != 1) {
+        return Result<BlockRecord>::failure(
+            makeError(NotebookErrorCode::invalidNotebook, path, "invalid Block record version"));
+    }
+    BlockRecord block;
+    block.metadata.id = blockIdentifier;
+    bool hasType = false;
+    bool hasCreated = false;
+    bool hasUpdated = false;
+    bool active = false;
+    std::size_t offset = 2;
+    while (offset < value.mv_size) {
+        if (value.mv_size - offset < 6) {
+            return Result<BlockRecord>::failure(
+                makeError(NotebookErrorCode::invalidNotebook, path, "truncated Block field"));
+        }
+        const auto tag = readU16(bytes + offset);
+        const auto length = static_cast<std::size_t>(readU32(bytes + offset + 2));
+        offset += 6;
+        if (length > value.mv_size - offset) {
+            return Result<BlockRecord>::failure(
+                makeError(NotebookErrorCode::invalidNotebook, path, "invalid Block field length"));
+        }
+        const auto* field = bytes + offset;
+        if (tag == 1 && length == 1 && (field[0] == 1 || field[0] == 2)) {
+            block.type = static_cast<BlockType>(field[0]);
+            hasType = true;
+        } else if (tag == 2 && length == 8) {
+            block.metadata.createdAt = BlockTimestamp{
+                std::chrono::microseconds{static_cast<std::int64_t>(readU64(field))}};
+            hasCreated = true;
+        } else if (tag == 3 && length == 8) {
+            block.metadata.updatedAt = BlockTimestamp{
+                std::chrono::microseconds{static_cast<std::int64_t>(readU64(field))}};
+            hasUpdated = true;
+        } else if (tag == 4 && length == 1) {
+            active = field[0] == 1;
+        } else if (tag == 5 && length == 4) {
+            const auto packed = readU32(field);
+            block.journalDate = JournalDate{static_cast<std::int32_t>(packed / 10000U),
+                                            static_cast<std::uint8_t>((packed / 100U) % 100U),
+                                            static_cast<std::uint8_t>(packed % 100U)};
+        } else if (tag == 6) {
+            block.authoredText.assign(reinterpret_cast<const char*>(field), length);
+        }
+        offset += length;
+    }
+    if (!hasType || !hasCreated || !hasUpdated || !active ||
+        (block.type == BlockType::journalPage && !block.journalDate)) {
+        return Result<BlockRecord>::failure(
+            makeError(NotebookErrorCode::invalidNotebook, path, "Block record is incomplete"));
+    }
+    return Result<BlockRecord>::success(std::move(block));
+}
+
+auto dateKey(JournalDate date) -> std::array<std::uint8_t, 4> {
+    const auto packed =
+        static_cast<std::uint32_t>((date.year * 10000) + (date.month * 100) + date.day);
+    return {static_cast<std::uint8_t>(packed >> 24U), static_cast<std::uint8_t>(packed >> 16U),
+            static_cast<std::uint8_t>(packed >> 8U), static_cast<std::uint8_t>(packed)};
+}
+
+auto blockKey(const BlockId& blockIdentifier) -> MDB_val {
+    return {blockIdentifier.bytes.size(), const_cast<std::byte*>(blockIdentifier.bytes.data())};
+}
+
+template <typename Identifier> auto formatUuid(const Identifier& identifier) -> std::string {
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (std::size_t index = 0; index < identifier.bytes.size(); ++index) {
+        if (index == 4 || index == 6 || index == 8 || index == 10) {
+            output << '-';
+        }
+        output << std::setw(2) << std::to_integer<unsigned>(identifier.bytes[index]);
+    }
+    return output.str();
+}
+
+void notifyCallbacks(const std::vector<std::function<void()>>& callbacks) noexcept {
+    for (const auto& callback : callbacks) {
+        try {
+            callback();
+        } catch (...) {
+            // A committed command remains successful even if an observer fails.
+            static_cast<void>(std::current_exception());
+        }
+    }
+}
+
 auto createEnvironment(const std::filesystem::path& path, const Manifest& manifest)
     -> std::optional<NotebookError> {
     auto opened = openLmdbEnvironment(path);
@@ -357,10 +614,147 @@ void removeIfPresent(const std::filesystem::path& path) noexcept {
     std::filesystem::remove(path, ignored);
 }
 
+struct JournalDatabases {
+    MDB_dbi metadata{0};
+    MDB_dbi blocks{0};
+    MDB_dbi blocksByType{0};
+    MDB_dbi containmentByParent{0};
+    MDB_dbi containmentByChild{0};
+    MDB_dbi journalByDate{0};
+};
+
+auto openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path)
+    -> Result<JournalDatabases> {
+    JournalDatabases databases;
+    const std::array<std::pair<const char*, MDB_dbi*>, 6> names{{
+        {"metadata", &databases.metadata},
+        {"blocks", &databases.blocks},
+        {"blocks_by_type", &databases.blocksByType},
+        {"containment_by_parent", &databases.containmentByParent},
+        {"containment_by_child", &databases.containmentByChild},
+        {"journal_by_date", &databases.journalByDate},
+    }};
+    for (const auto& [name, database] : names) {
+        const auto result = mdb_dbi_open(transaction, name, 0, database);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalDatabases>::failure(
+                errorFromLmdb(path, result, "open Journal database"));
+        }
+    }
+    return Result<JournalDatabases>::success(databases);
+}
+
+auto readBlock(MDB_txn* transaction, MDB_dbi database, const BlockId& blockIdentifier,
+               const std::filesystem::path& path) -> Result<BlockRecord> {
+    auto key = blockKey(blockIdentifier);
+    MDB_val value{};
+    const auto result = mdb_get(transaction, database, &key, &value);
+    if (result == MDB_NOTFOUND) {
+        return Result<BlockRecord>::failure(
+            makeError(NotebookErrorCode::blockNotFound, path, "Block does not exist"));
+    }
+    if (result != MDB_SUCCESS) {
+        return Result<BlockRecord>::failure(errorFromLmdb(path, result, "read Block"));
+    }
+    return decodeBlock(value, blockIdentifier, path);
+}
+
+auto writeBlock(MDB_txn* transaction, MDB_dbi database, const BlockRecord& block,
+                const std::filesystem::path& path) -> std::optional<NotebookError> {
+    auto key = blockKey(block.metadata.id);
+    auto encoded = encodeBlock(block);
+    MDB_val value{encoded.size(), encoded.data()};
+    const auto result = mdb_put(transaction, database, &key, &value, 0);
+    if (result != MDB_SUCCESS) {
+        return errorFromLmdb(path, result, "write Block");
+    }
+    return std::nullopt;
+}
+
+auto incrementRevision(MDB_txn* transaction, MDB_dbi metadata, const std::filesystem::path& path)
+    -> std::optional<NotebookError> {
+    constexpr std::string_view keyText = "manifest";
+    MDB_val key{keyText.size(), const_cast<char*>(keyText.data())};
+    MDB_val value{};
+    auto result = mdb_get(transaction, metadata, &key, &value);
+    if (result != MDB_SUCCESS) {
+        return errorFromLmdb(path, result, "read Notebook revision");
+    }
+    auto manifest = decodeManifest(value, path);
+    if (!manifest) {
+        return manifest.error();
+    }
+    auto updatedManifest = std::move(manifest).value();
+    ++updatedManifest.revision;
+    auto encoded = encodeManifest(updatedManifest);
+    MDB_val updated{encoded.size(), encoded.data()};
+    result = mdb_put(transaction, metadata, &key, &updated, 0);
+    if (result != MDB_SUCCESS) {
+        return errorFromLmdb(path, result, "write Notebook revision");
+    }
+    return std::nullopt;
+}
+
+auto typeIndexKey(BlockType type, const BlockId& blockIdentifier) -> std::array<std::uint8_t, 17> {
+    std::array<std::uint8_t, 17> key{};
+    key[0] = static_cast<std::uint8_t>(type);
+    std::memcpy(key.data() + 1, blockIdentifier.bytes.data(), blockIdentifier.bytes.size());
+    return key;
+}
+
+auto containmentParentKey(const BlockId& parent, std::uint64_t rank)
+    -> std::array<std::uint8_t, 24> {
+    std::array<std::uint8_t, 24> key{};
+    std::memcpy(key.data(), parent.bytes.data(), parent.bytes.size());
+    for (std::size_t index = 0; index < 8; ++index) {
+        key[16 + index] = static_cast<std::uint8_t>(rank >> ((7U - index) * 8U));
+    }
+    return key;
+}
+
+auto rankFromParentKey(const MDB_val& key) -> std::uint64_t {
+    const auto* bytes = static_cast<const std::uint8_t*>(key.mv_data);
+    return readU64(bytes + 16);
+}
+
+auto writeTypeIndex(MDB_txn* transaction, MDB_dbi database, BlockType type,
+                    const BlockId& blockIdentifier, const std::filesystem::path& path)
+    -> std::optional<NotebookError> {
+    auto encoded = typeIndexKey(type, blockIdentifier);
+    MDB_val key{encoded.size(), encoded.data()};
+    MDB_val value{0, nullptr};
+    const auto result = mdb_put(transaction, database, &key, &value, MDB_NOOVERWRITE);
+    if (result != MDB_SUCCESS) {
+        return errorFromLmdb(path, result, "index Block type");
+    }
+    return std::nullopt;
+}
+
 } // namespace
+
+class NotebookSubscription::Impl {
+  public:
+    Impl(std::weak_ptr<SubscriptionState> state, std::size_t identifier)
+        : state_(std::move(state)), identifier_(identifier) {}
+
+    ~Impl() {
+        if (const auto state = state_.lock()) {
+            std::scoped_lock lock(state->mutex);
+            state->callbacks.erase(identifier_);
+        }
+    }
+
+  private:
+    std::weak_ptr<SubscriptionState> state_;
+    std::size_t identifier_;
+};
 
 class NotebookSession::Impl {
   public:
+    Impl()
+        : commitAdapter(std::make_unique<LmdbJournalCommitAdapter>()),
+          subscriptions(std::make_shared<SubscriptionState>()) {}
+
     ~Impl() {
         closeUnlocked();
     }
@@ -439,7 +833,7 @@ class NotebookSession::Impl {
         }
 
         environment = openedEnvironment;
-        info = NotebookInfo{manifest.value().id, path, schemaVersion};
+        info = NotebookInfo{manifest.value().id, path, schemaVersion, manifest.value().revision};
         return Result<NotebookInfo>::success(*info);
     }
 
@@ -456,24 +850,417 @@ class NotebookSession::Impl {
         }
     }
 
+    auto readJournalPage(JournalDate date) const -> Result<JournalPage> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(errorFromLmdb(path, result, "begin Journal read"));
+        }
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(databases.error());
+        }
+
+        const auto encodedDate = dateKey(date);
+        MDB_val dateKeyValue{encodedDate.size(), const_cast<std::uint8_t*>(encodedDate.data())};
+        MDB_val pageValue{};
+        result = mdb_get(transaction, databases.value().journalByDate, &dateKeyValue, &pageValue);
+        if (result == MDB_NOTFOUND) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::success(JournalPage{date, std::nullopt, {}});
+        }
+        if (result != MDB_SUCCESS || pageValue.mv_size != BlockId{}.bytes.size()) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(
+                result == MDB_SUCCESS ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                                  "invalid Journal date index")
+                                      : errorFromLmdb(path, result, "read Journal date index"));
+        }
+        BlockId pageId;
+        std::memcpy(pageId.bytes.data(), pageValue.mv_data, pageId.bytes.size());
+        auto pageBlock = readBlock(transaction, databases.value().blocks, pageId, path);
+        if (!pageBlock || pageBlock.value().type != BlockType::journalPage ||
+            pageBlock.value().journalDate != date) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(
+                pageBlock ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                      "Journal date points to an invalid Page")
+                          : pageBlock.error());
+        }
+
+        JournalPage page{date, pageBlock.value().metadata, {}};
+        MDB_cursor* cursor = nullptr;
+        result = mdb_cursor_open(transaction, databases.value().containmentByParent, &cursor);
+        if (result != MDB_SUCCESS) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "open Journal containment"));
+        }
+        auto start = containmentParentKey(pageId, 0);
+        MDB_val containmentKey{start.size(), start.data()};
+        MDB_val childValue{};
+        result = mdb_cursor_get(cursor, &containmentKey, &childValue, MDB_SET_RANGE);
+        while (result == MDB_SUCCESS) {
+            if (containmentKey.mv_size != 24 ||
+                std::memcmp(containmentKey.mv_data, pageId.bytes.data(), pageId.bytes.size()) !=
+                    0) {
+                break;
+            }
+            if (childValue.mv_size != BlockId{}.bytes.size()) {
+                mdb_cursor_close(cursor);
+                mdb_txn_abort(transaction);
+                return Result<JournalPage>::failure(makeError(NotebookErrorCode::invalidNotebook,
+                                                              path, "invalid Journal containment"));
+            }
+            BlockId entryId;
+            std::memcpy(entryId.bytes.data(), childValue.mv_data, entryId.bytes.size());
+            auto entryBlock = readBlock(transaction, databases.value().blocks, entryId, path);
+            if (!entryBlock || entryBlock.value().type != BlockType::journalEntry) {
+                mdb_cursor_close(cursor);
+                mdb_txn_abort(transaction);
+                return Result<JournalPage>::failure(
+                    entryBlock ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                           "Journal Page contains a non-Entry Block")
+                               : entryBlock.error());
+            }
+            page.entries.push_back(
+                JournalEntry{entryBlock.value().metadata, entryBlock.value().authoredText});
+            result = mdb_cursor_get(cursor, &containmentKey, &childValue, MDB_NEXT);
+        }
+        mdb_cursor_close(cursor);
+        mdb_txn_abort(transaction);
+        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "read Journal containment"));
+        }
+        return Result<JournalPage>::success(std::move(page));
+    }
+
+    auto insertEntry(JournalDate date, std::optional<BlockId> afterEntry, std::string authoredText)
+        -> Result<JournalPage> {
+        lastCommandCommitted = false;
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "begin Journal update"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<JournalPage> {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        const auto now = currentTimestamp();
+        const auto encodedDate = dateKey(date);
+        MDB_val dateIndexKey{encodedDate.size(), const_cast<std::uint8_t*>(encodedDate.data())};
+        MDB_val pageValue{};
+        result = mdb_get(transaction, databases.value().journalByDate, &dateIndexKey, &pageValue);
+        BlockRecord pageBlock;
+        if (result == MDB_NOTFOUND) {
+            if (afterEntry) {
+                return fail(makeError(NotebookErrorCode::invalidInsertionPoint, path,
+                                      "insertion point is not on this Journal Page"));
+            }
+            pageBlock = BlockRecord{
+                BlockType::journalPage, BlockMetadata{generateBlockId(), now, now}, date, {}};
+            if (auto error = writeBlock(transaction, databases.value().blocks, pageBlock, path)) {
+                return fail(std::move(*error));
+            }
+            if (auto error = writeTypeIndex(transaction, databases.value().blocksByType,
+                                            pageBlock.type, pageBlock.metadata.id, path)) {
+                return fail(std::move(*error));
+            }
+            MDB_val pageIdValue{pageBlock.metadata.id.bytes.size(),
+                                pageBlock.metadata.id.bytes.data()};
+            result = mdb_put(transaction, databases.value().journalByDate, &dateIndexKey,
+                             &pageIdValue, MDB_NOOVERWRITE);
+            if (result != MDB_SUCCESS) {
+                return fail(errorFromLmdb(path, result, "index Journal date"));
+            }
+        } else {
+            if (result != MDB_SUCCESS || pageValue.mv_size != BlockId{}.bytes.size()) {
+                return fail(result == MDB_SUCCESS
+                                ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                            "invalid Journal date index")
+                                : errorFromLmdb(path, result, "read Journal date index"));
+            }
+            BlockId pageId;
+            std::memcpy(pageId.bytes.data(), pageValue.mv_data, pageId.bytes.size());
+            auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
+            if (!loaded || loaded.value().type != BlockType::journalPage) {
+                return fail(loaded ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                               "Journal date points to an invalid Page")
+                                   : loaded.error());
+            }
+            pageBlock = loaded.value();
+            pageBlock.metadata.updatedAt = now;
+            if (auto error = writeBlock(transaction, databases.value().blocks, pageBlock, path)) {
+                return fail(std::move(*error));
+            }
+        }
+
+        std::vector<std::pair<BlockId, std::uint64_t>> siblings;
+        MDB_cursor* cursor = nullptr;
+        result = mdb_cursor_open(transaction, databases.value().containmentByParent, &cursor);
+        if (result != MDB_SUCCESS) {
+            return fail(errorFromLmdb(path, result, "open Journal containment"));
+        }
+        auto start = containmentParentKey(pageBlock.metadata.id, 0);
+        MDB_val parentKey{start.size(), start.data()};
+        MDB_val childValue{};
+        result = mdb_cursor_get(cursor, &parentKey, &childValue, MDB_SET_RANGE);
+        while (result == MDB_SUCCESS && parentKey.mv_size == 24 &&
+               std::memcmp(parentKey.mv_data, pageBlock.metadata.id.bytes.data(),
+                           pageBlock.metadata.id.bytes.size()) == 0) {
+            if (childValue.mv_size != BlockId{}.bytes.size()) {
+                mdb_cursor_close(cursor);
+                return fail(makeError(NotebookErrorCode::invalidNotebook, path,
+                                      "invalid Journal containment"));
+            }
+            BlockId child;
+            std::memcpy(child.bytes.data(), childValue.mv_data, child.bytes.size());
+            siblings.emplace_back(child, rankFromParentKey(parentKey));
+            result = mdb_cursor_get(cursor, &parentKey, &childValue, MDB_NEXT);
+        }
+        mdb_cursor_close(cursor);
+        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+            return fail(errorFromLmdb(path, result, "read Journal containment"));
+        }
+
+        std::size_t insertionIndex = siblings.size();
+        if (afterEntry) {
+            const auto found = std::ranges::find_if(
+                siblings, [&](const auto& item) -> bool { return item.first == *afterEntry; });
+            if (found == siblings.end()) {
+                return fail(makeError(NotebookErrorCode::invalidInsertionPoint, path,
+                                      "insertion point is not on this Journal Page"));
+            }
+            insertionIndex = static_cast<std::size_t>(std::distance(siblings.begin(), found)) + 1;
+        }
+        constexpr std::uint64_t rankGap = 1ULL << 32U;
+        std::uint64_t rank = rankGap;
+        if (!siblings.empty()) {
+            if (insertionIndex == siblings.size()) {
+                rank = siblings.back().second + rankGap;
+            } else {
+                const auto lower = insertionIndex == 0 ? 0 : siblings[insertionIndex - 1].second;
+                const auto upper = siblings[insertionIndex].second;
+                rank = lower + ((upper - lower) / 2U);
+            }
+        }
+        const auto needsRebalancing =
+            (!siblings.empty() && insertionIndex == siblings.size() &&
+             rank < siblings.back().second) ||
+            (insertionIndex < siblings.size() &&
+             rank == (insertionIndex == 0 ? 0 : siblings[insertionIndex - 1].second));
+        if (needsRebalancing) {
+            if (siblings.size() >= std::numeric_limits<std::uint64_t>::max() / rankGap) {
+                return fail(makeError(NotebookErrorCode::ioFailure, path,
+                                      "Journal ordering capacity is exhausted"));
+            }
+            for (const auto& [siblingId, oldRank] : siblings) {
+                static_cast<void>(siblingId);
+                auto oldKeyBytes = containmentParentKey(pageBlock.metadata.id, oldRank);
+                MDB_val oldKey{oldKeyBytes.size(), oldKeyBytes.data()};
+                result =
+                    mdb_del(transaction, databases.value().containmentByParent, &oldKey, nullptr);
+                if (result != MDB_SUCCESS) {
+                    return fail(errorFromLmdb(path, result, "rebalance Journal ordering"));
+                }
+            }
+            for (std::size_t index = 0; index < siblings.size(); ++index) {
+                const auto rebalancedRank = (static_cast<std::uint64_t>(index) + 1U) * rankGap;
+                siblings[index].second = rebalancedRank;
+                auto parentBytes = containmentParentKey(pageBlock.metadata.id, rebalancedRank);
+                MDB_val rebalancedParentKey{parentBytes.size(), parentBytes.data()};
+                MDB_val siblingValue{siblings[index].first.bytes.size(),
+                                     siblings[index].first.bytes.data()};
+                result = mdb_put(transaction, databases.value().containmentByParent,
+                                 &rebalancedParentKey, &siblingValue, MDB_NOOVERWRITE);
+                if (result != MDB_SUCCESS) {
+                    return fail(errorFromLmdb(path, result, "rebalance Journal ordering"));
+                }
+                auto siblingKey = blockKey(siblings[index].first);
+                auto childIndex = containmentParentKey(pageBlock.metadata.id, rebalancedRank);
+                MDB_val childIndexValue{childIndex.size(), childIndex.data()};
+                result = mdb_put(transaction, databases.value().containmentByChild, &siblingKey,
+                                 &childIndexValue, 0);
+                if (result != MDB_SUCCESS) {
+                    return fail(errorFromLmdb(path, result, "rebalance Journal parent index"));
+                }
+            }
+            if (insertionIndex == siblings.size()) {
+                rank = siblings.empty() ? rankGap : siblings.back().second + rankGap;
+            } else {
+                const auto lower = insertionIndex == 0 ? 0 : siblings[insertionIndex - 1].second;
+                rank = lower + ((siblings[insertionIndex].second - lower) / 2U);
+            }
+        }
+
+        BlockRecord entryBlock{BlockType::journalEntry, BlockMetadata{generateBlockId(), now, now},
+                               std::nullopt, std::move(authoredText)};
+        if (auto error = writeBlock(transaction, databases.value().blocks, entryBlock, path)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = writeTypeIndex(transaction, databases.value().blocksByType,
+                                        entryBlock.type, entryBlock.metadata.id, path)) {
+            return fail(std::move(*error));
+        }
+        auto encodedParent = containmentParentKey(pageBlock.metadata.id, rank);
+        MDB_val newParentKey{encodedParent.size(), encodedParent.data()};
+        MDB_val entryIdValue{entryBlock.metadata.id.bytes.size(),
+                             entryBlock.metadata.id.bytes.data()};
+        result = mdb_put(transaction, databases.value().containmentByParent, &newParentKey,
+                         &entryIdValue, MDB_NOOVERWRITE);
+        if (result != MDB_SUCCESS) {
+            return fail(errorFromLmdb(path, result, "write Journal ordering"));
+        }
+        auto childKey = blockKey(entryBlock.metadata.id);
+        std::array<std::uint8_t, 24> childIndex{};
+        std::memcpy(childIndex.data(), pageBlock.metadata.id.bytes.data(),
+                    pageBlock.metadata.id.bytes.size());
+        for (std::size_t index = 0; index < 8; ++index) {
+            childIndex[16 + index] = static_cast<std::uint8_t>(rank >> ((7U - index) * 8U));
+        }
+        MDB_val childIndexValue{childIndex.size(), childIndex.data()};
+        result = mdb_put(transaction, databases.value().containmentByChild, &childKey,
+                         &childIndexValue, MDB_NOOVERWRITE);
+        if (result != MDB_SUCCESS) {
+            return fail(errorFromLmdb(path, result, "write Journal parent index"));
+        }
+
+        JournalPage committedPage{date, pageBlock.metadata, {}};
+        committedPage.entries.reserve(siblings.size() + 1);
+        for (std::size_t index = 0; index <= siblings.size(); ++index) {
+            if (index == insertionIndex) {
+                committedPage.entries.push_back(
+                    JournalEntry{entryBlock.metadata, entryBlock.authoredText});
+            }
+            if (index < siblings.size()) {
+                auto sibling =
+                    readBlock(transaction, databases.value().blocks, siblings[index].first, path);
+                if (!sibling || sibling.value().type != BlockType::journalEntry) {
+                    return fail(sibling ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                                    "Journal Page contains a non-Entry Block")
+                                        : sibling.error());
+                }
+                committedPage.entries.push_back(
+                    JournalEntry{sibling.value().metadata, sibling.value().authoredText});
+            }
+        }
+        if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
+            return fail(std::move(*error));
+        }
+        result = commitAdapter->commit(transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "commit Journal Entry"));
+        }
+        incrementCachedRevision();
+        lastCommandCommitted = true;
+        return Result<JournalPage>::success(std::move(committedPage));
+    }
+
+    auto updateEntry(BlockId entryId, std::string authoredText) -> Result<JournalEntry> {
+        lastCommandCommitted = false;
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalEntry>::failure(errorFromLmdb(path, result, "begin Journal edit"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<JournalEntry> {
+            mdb_txn_abort(transaction);
+            return Result<JournalEntry>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        auto loaded = readBlock(transaction, databases.value().blocks, entryId, path);
+        if (!loaded) {
+            return fail(loaded.error());
+        }
+        if (loaded.value().type != BlockType::journalEntry) {
+            return fail(
+                makeError(NotebookErrorCode::blockNotFound, path, "Block is not a Journal Entry"));
+        }
+        auto entry = loaded.value();
+        if (entry.authoredText == authoredText) {
+            mdb_txn_abort(transaction);
+            return Result<JournalEntry>::success(JournalEntry{entry.metadata, entry.authoredText});
+        }
+        entry.authoredText = std::move(authoredText);
+        entry.metadata.updatedAt = currentTimestamp();
+        if (auto error = writeBlock(transaction, databases.value().blocks, entry, path)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
+            return fail(std::move(*error));
+        }
+        result = commitAdapter->commit(transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalEntry>::failure(
+                errorFromLmdb(path, result, "commit Journal edit"));
+        }
+        incrementCachedRevision();
+        lastCommandCommitted = true;
+        return Result<JournalEntry>::success(JournalEntry{entry.metadata, entry.authoredText});
+    }
+
+    void incrementCachedRevision() {
+        auto updated = info.value_or(NotebookInfo{});
+        ++updated.revision;
+        info = std::move(updated);
+    }
+
+    [[nodiscard]] auto committedCallbacks() const -> std::vector<std::function<void()>> {
+        std::scoped_lock lock(subscriptions->mutex);
+        std::vector<std::function<void()>> callbacks;
+        callbacks.reserve(subscriptions->callbacks.size());
+        for (const auto& item : subscriptions->callbacks) {
+            callbacks.push_back(item.second);
+        }
+        return callbacks;
+    }
+
     mutable std::mutex mutex;
     MDB_env* environment{nullptr};
     std::optional<platform::ExclusiveFileLock> lockFile;
     std::optional<platform::ExclusiveFileLock> dataLockFile;
     std::optional<NotebookInfo> info;
+    std::unique_ptr<JournalCommitAdapter> commitAdapter;
+    std::shared_ptr<SubscriptionState> subscriptions;
+    bool lastCommandCommitted{false};
 };
 
-auto NotebookId::toString() const -> std::string {
-    std::ostringstream output;
-    output << std::hex << std::setfill('0');
-    for (std::size_t index = 0; index < bytes.size(); ++index) {
-        if (index == 4 || index == 6 || index == 8 || index == 10) {
-            output << '-';
-        }
-        output << std::setw(2) << std::to_integer<unsigned>(bytes[index]);
-    }
-    return output.str();
+#ifdef HIEDA_TESTING
+void NotebookSessionTestAccess::rejectNextJournalCommit(NotebookSession& session) {
+    std::scoped_lock lock(session.impl_->mutex);
+    session.impl_->commitAdapter = std::make_unique<RejectNextJournalCommitAdapter>();
 }
+#endif
+
+auto NotebookId::toString() const -> std::string {
+    return formatUuid(*this);
+}
+
+auto BlockId::toString() const -> std::string {
+    return formatUuid(*this);
+}
+
+NotebookSubscription::NotebookSubscription() = default;
+NotebookSubscription::~NotebookSubscription() = default;
+NotebookSubscription::NotebookSubscription(NotebookSubscription&&) noexcept = default;
+auto NotebookSubscription::operator=(NotebookSubscription&&) noexcept
+    -> NotebookSubscription& = default;
+NotebookSubscription::NotebookSubscription(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 
 NotebookSession::NotebookSession() : impl_(std::make_unique<Impl>()) {}
 
@@ -600,6 +1387,79 @@ auto NotebookSession::isOpen() const noexcept -> bool {
 auto NotebookSession::current() const -> std::optional<NotebookInfo> {
     std::scoped_lock lock(impl_->mutex);
     return impl_->info;
+}
+
+auto NotebookSession::journalPage(JournalDate date) const -> Result<JournalPage> {
+    std::scoped_lock lock(impl_->mutex);
+    if (!impl_->info) {
+        return Result<JournalPage>::failure(
+            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    if (!validJournalDate(date)) {
+        return Result<JournalPage>::failure(makeError(NotebookErrorCode::invalidJournalDate,
+                                                      impl_->info->path, "invalid Journal date"));
+    }
+    return impl_->readJournalPage(date);
+}
+
+auto NotebookSession::insertJournalEntry(JournalDate date, std::optional<BlockId> afterEntry,
+                                         std::string authoredText) -> Result<JournalPage> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalPage> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validJournalDate(date)) {
+            return Result<JournalPage>::failure(makeError(
+                NotebookErrorCode::invalidJournalDate, impl_->info->path, "invalid Journal date"));
+        }
+        if (!validAuthoredText(authoredText)) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
+                          "Journal Entry text must be one bounded Unicode line"));
+        }
+        auto outcome = impl_->insertEntry(date, afterEntry, std::move(authoredText));
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::updateJournalEntry(BlockId entryId, std::string authoredText)
+    -> Result<JournalEntry> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalEntry> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalEntry>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validAuthoredText(authoredText)) {
+            return Result<JournalEntry>::failure(
+                makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
+                          "Journal Entry text must be one bounded Unicode line"));
+        }
+        auto outcome = impl_->updateEntry(entryId, std::move(authoredText));
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::subscribeToChanges(std::function<void()> callback) -> NotebookSubscription {
+    const auto state = impl_->subscriptions;
+    std::scoped_lock lock(state->mutex);
+    const auto identifier = state->nextIdentifier++;
+    state->callbacks.emplace(identifier, std::move(callback));
+    return NotebookSubscription(std::make_unique<NotebookSubscription::Impl>(state, identifier));
 }
 
 } // namespace hieda::notebook

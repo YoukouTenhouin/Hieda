@@ -1,7 +1,7 @@
 # Hieda
 
-Hieda is a native Qt Quick notebook application. This first implementation slice creates,
-closes, and reopens one portable `.hieda` Notebook at a time.
+Hieda is a native Qt Quick notebook application. It creates, closes, and reopens one portable
+`.hieda` Notebook at a time and provides a durable flat Journal for the current local date.
 
 ## Prerequisites
 
@@ -49,3 +49,10 @@ baseline and builds Qt 6.8.3 from a checksum-verified source archive.
 
 One closed `.hieda` file contains the canonical Notebook. LMDB and Hieda may create disposable
 lock files beside an open Notebook. Do not copy or synchronize a Notebook while it is open.
+
+## Journal editing
+
+Opening a Notebook shows the Journal Page for the current local date. Submit a new Entry with
+Enter or the Add Entry button. Focusing an existing Entry selects its insertion position; edits
+are committed with Enter or when focus leaves the field. Journal text is exact single-line
+Unicode, and a failed save restores the last durably committed text.
