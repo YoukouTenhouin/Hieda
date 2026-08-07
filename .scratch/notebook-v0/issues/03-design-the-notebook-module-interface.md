@@ -1,7 +1,7 @@
 # Design the Notebook module interface
 
 Type: prototype
-Status: open
+Status: resolved
 
 ## Question
 
@@ -9,3 +9,4 @@ What small, toolkit-neutral C++ interface should the deep Notebook module presen
 
 ## Comments
 
+Resolved by [ADR 0001](../../../docs/adr/0001-notebook-module-interface.md). The external seam is a thread-safe synchronous `NotebookSession` with typed expected failures, owned values, capability-specific methods, and post-commit RAII observers. Prototype: `44bb318391bdc5d0930114a55f2c4298ccdfd9b1` on `prototype/notebook-session-interface`.

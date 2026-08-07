@@ -28,6 +28,9 @@ Produce an implementation-ready specification and delivery route for a single-us
 
 - [Establish LMDB operational constraints](issues/01-establish-lmdb-operational-constraints.md) — LMDB fits the portable Notebook model when wrapped behind owned transactions, synchronous durability, safe snapshot, map-growth, and portable-encoding rules.
 - [Evaluate full-text index options](issues/02-evaluate-full-text-index-options.md) — SQLite FTS5 with ICU tokenization is the preferred rebuildable search sidecar; LMDB remains the sole canonical store.
+- [Design the Notebook module interface](issues/03-design-the-notebook-module-interface.md) — one thread-safe synchronous `NotebookSession` is the toolkit-neutral seam.
+- [Design persistence schema and migrations](issues/07-design-persistence-schema-and-migrations.md) — bounded LMDB databases use portable TLV records and shadow-copy migrations.
+- [Choose the build and dependency strategy](issues/13-choose-the-build-and-dependency-strategy.md) — C++20, Qt 6.8+, system dependencies, CMake/Ninja, CTest, and CPack TGZ.
 
 ## Not yet specified
 
