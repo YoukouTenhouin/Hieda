@@ -1,0 +1,8 @@
+/build/
+/.cmake/
+/CMakeCache.txt
+/CMakeFiles/
+/.cache/
+compile_commands.json
+*.user
+*.swp

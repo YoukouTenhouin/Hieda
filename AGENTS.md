@@ -13,7 +13,14 @@ Document any intentional departure from this layout in this file or the main REA
 
 ## Build, Test, and Development Commands
 
-No build system or package manager is configured yet. When introducing one, add its manifest and lockfile together, and document the canonical commands here and in `README.md`. Prefer a small, stable command surface, such as `make build`, `make test`, and `make lint`, even when those targets wrap language-specific tools. Contributors should not assume a command succeeds until the required configuration is committed.
+The project uses CMake with Ninja and system-provided dependencies. The canonical commands are:
+
+- `make build` configures and builds the development preset.
+- `make test` builds and runs the complete CTest suite.
+- `make lint` verifies clang-format and runs clang-tidy with warnings as errors.
+- `make package` creates a release TGZ and smoke-tests its installed executable.
+
+Run one test with `ctest --test-dir build/dev -R '<test name>' --output-on-failure`. Required packages and supported tool versions are documented in `README.md`.
 
 ## Coding Style & Naming Conventions
 
@@ -28,7 +35,7 @@ Avoid committing generated output, dependency caches, editor settings, or creden
 
 ## Testing Guidelines
 
-Every behavior change should include automated coverage. Place tests in `tests/` or use the language ecosystem's established colocated convention. Name tests after observable behavior, for example `test_rejects_expired_token`. Include regression tests with bug fixes. Once a test framework is selected, document how to run the full suite and a single test.
+Every behavior change should include automated coverage. Place tests in `tests/` or use the language ecosystem's established colocated convention. Name tests after observable behavior, for example `test_rejects_expired_token`. Include regression tests with bug fixes. Catch2 tests are discovered by CTest; keep behavioral tests at the public Notebook interface and use temporary real Notebook files for persistence coverage.
 
 ## Commit & Pull Request Guidelines
 
