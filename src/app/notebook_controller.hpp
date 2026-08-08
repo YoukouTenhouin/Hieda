@@ -90,8 +90,10 @@ class NotebookController final : public QObject {
     Q_INVOKABLE auto moveJournalEntryDown(const QString& entryId, const QString& authoredText,
                                           int cursorPosition) -> QVariantMap;
     Q_INVOKABLE auto deleteJournalEntry(const QString& entryId) -> QVariantMap;
-    Q_INVOKABLE auto undoJournalEdit() -> QVariantMap;
-    Q_INVOKABLE auto redoJournalEdit() -> QVariantMap;
+    Q_INVOKABLE auto undoJournalEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)
+        -> QVariantMap;
+    Q_INVOKABLE auto redoJournalEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)
+        -> QVariantMap;
     void requestJournalDateRollover(const QDate& date);
     Q_INVOKABLE void completeJournalDateRollover();
 
@@ -104,6 +106,8 @@ class NotebookController final : public QObject {
     auto eventFilter(QObject* watched, QEvent* event) -> bool override;
 
   private:
+    enum class JournalHistoryDirection : std::uint8_t { undo, redo };
+
     void accept(const hieda::notebook::NotebookInfo& info);
     void reject(const hieda::notebook::NotebookError& error);
     void rejectSave(const hieda::notebook::NotebookError& error);
@@ -111,7 +115,8 @@ class NotebookController final : public QObject {
     auto moveJournalEntry(const QString& entryId, const QString& authoredText,
                           hieda::notebook::JournalEntryMove movement, int cursorPosition)
         -> QVariantMap;
-    auto applyJournalHistory(bool redo) -> QVariantMap;
+    auto applyJournalHistory(JournalHistoryDirection direction, const QString& preferredEntryId,
+                             int cursorPosition) -> QVariantMap;
     void scheduleMidnightRefresh();
 
     hieda::notebook::NotebookSession session_;

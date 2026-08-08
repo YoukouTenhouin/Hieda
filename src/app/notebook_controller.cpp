@@ -558,58 +558,83 @@ auto NotebookController::deleteJournalEntry(const QString& entryId) -> QVariantM
     }
 }
 
-auto NotebookController::undoJournalEdit() -> QVariantMap {
-    return applyJournalHistory(false);
+auto NotebookController::undoJournalEdit(const QString& preferredEntryId, int cursorPosition)
+    -> QVariantMap {
+    return applyJournalHistory(JournalHistoryDirection::undo, preferredEntryId, cursorPosition);
 }
 
-auto NotebookController::redoJournalEdit() -> QVariantMap {
-    return applyJournalHistory(true);
+auto NotebookController::redoJournalEdit(const QString& preferredEntryId, int cursorPosition)
+    -> QVariantMap {
+    return applyJournalHistory(JournalHistoryDirection::redo, preferredEntryId, cursorPosition);
 }
 
-auto NotebookController::applyJournalHistory(bool redo) -> QVariantMap {
-    std::vector<QString> oldIds;
-    std::vector<QString> oldTexts;
-    oldIds.reserve(static_cast<std::size_t>(journalEntries_.rowCount()));
-    oldTexts.reserve(static_cast<std::size_t>(journalEntries_.rowCount()));
+auto NotebookController::applyJournalHistory(JournalHistoryDirection direction,
+                                             const QString& preferredEntryId, int cursorPosition)
+    -> QVariantMap {
+    struct EntrySnapshot {
+        QString id;
+        QString text;
+    };
+    std::vector<EntrySnapshot> oldEntries;
+    oldEntries.reserve(static_cast<std::size_t>(journalEntries_.rowCount()));
     for (int row = 0; row < journalEntries_.rowCount(); ++row) {
-        oldIds.push_back(journalEntries_.entryId(row));
-        oldTexts.push_back(journalEntries_.entryText(row));
+        oldEntries.push_back({journalEntries_.entryId(row), journalEntries_.entryText(row)});
     }
     try {
-        auto result = redo ? session_.redoJournalEdit(domainJournalDate(journalDate_))
-                           : session_.undoJournalEdit(domainJournalDate(journalDate_));
+        auto result = direction == JournalHistoryDirection::redo
+                          ? session_.redoJournalEdit(domainJournalDate(journalDate_))
+                          : session_.undoJournalEdit(domainJournalDate(journalDate_));
         if (!result) {
             rejectSave(result.error());
             return journalOutcome(false);
         }
         const auto& entries = result.value().entries;
         auto focusRow = -1;
+        auto preferredSurvived = false;
+        const auto preferredId = blockId(preferredEntryId);
+        if (preferredId) {
+            const auto preferred = std::ranges::find_if(
+                entries, [&](const auto& entry) { return entry.metadata.id == *preferredId; });
+            if (preferred != entries.end()) {
+                focusRow = static_cast<int>(std::distance(entries.begin(), preferred));
+                preferredSurvived = true;
+            }
+        }
         for (std::size_t row = 0; row < entries.size(); ++row) {
+            if (focusRow >= 0) {
+                break;
+            }
             const auto id = displayId(entries[row].metadata.id);
-            const auto old = std::ranges::find(oldIds, id);
-            if (old == oldIds.end()) {
+            const auto old = std::ranges::find_if(
+                oldEntries, [&](const auto& entry) -> bool { return entry.id == id; });
+            if (old == oldEntries.end()) {
                 focusRow = static_cast<int>(row);
                 break;
             }
-            const auto oldRow = static_cast<std::size_t>(std::distance(oldIds.begin(), old));
+            const auto oldRow = static_cast<std::size_t>(std::distance(oldEntries.begin(), old));
             const auto text =
                 QString::fromUtf8(entries[row].authoredText.data(),
                                   static_cast<qsizetype>(entries[row].authoredText.size()));
-            if (oldRow != row || oldTexts[oldRow] != text) {
+            if (oldRow != row || old->text != text) {
                 focusRow = static_cast<int>(row);
                 break;
             }
         }
         if (focusRow < 0 && !entries.empty()) {
             focusRow = std::min(static_cast<int>(entries.size()) - 1,
-                                std::max(0, static_cast<int>(oldIds.size()) - 1));
+                                std::max(0, static_cast<int>(oldEntries.size()) - 1));
         }
         journalEntries_.setEntries(entries);
-        const auto cursor =
-            focusRow >= 0
-                ? static_cast<int>(std::min<qsizetype>(journalEntries_.entryText(focusRow).size(),
-                                                       std::numeric_limits<int>::max()))
-                : 0;
+        auto cursor = 0;
+        if (focusRow >= 0) {
+            const auto desiredCursor = preferredSurvived
+                                           ? std::max(0, cursorPosition)
+                                           : static_cast<int>(std::min<qsizetype>(
+                                                 journalEntries_.entryText(focusRow).size(),
+                                                 std::numeric_limits<int>::max()));
+            cursor = static_cast<int>(
+                std::min<qsizetype>(desiredCursor, journalEntries_.entryText(focusRow).size()));
+        }
         error_.clear();
         emit stateChanged();
         emit journalChanged();

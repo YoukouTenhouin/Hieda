@@ -183,6 +183,48 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
     REQUIRE(childEditor != nullptr);
     childEditor->forceActiveFocus();
     REQUIRE(waitUntil([childEditor]() -> bool { return childEditor->hasActiveFocus(); }));
+    childEditor->setProperty("cursorPosition", 5);
+    QTest::keyClick(window, Qt::Key_X);
+    REQUIRE(QMetaObject::invokeMethod(childEntry, "openContextMenu"));
+    auto* indentMenuItem =
+        childEntry->findChild<QQuickItem*>(QStringLiteral("journalIndentMenuItem-1"));
+    REQUIRE(indentMenuItem != nullptr);
+    REQUIRE(waitUntil([indentMenuItem]() -> bool { return indentMenuItem->isVisible(); }));
+    const auto menuItemCenter = indentMenuItem->mapToScene(
+        QPointF(indentMenuItem->width() / 2, indentMenuItem->height() / 2));
+    QTest::mouseClick(indentMenuItem->window(), Qt::LeftButton, Qt::NoModifier,
+                      menuItemCenter.toPoint());
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.journalEntries()
+                       ->data(controller.journalEntries()->index(1, 0),
+                              JournalEntryModel::DepthRole)
+                       .toInt() == 1 &&
+               controller.journalEntries()
+                       ->data(controller.journalEntries()->index(1, 0),
+                              JournalEntryModel::AuthoredTextRole)
+                       .toString() == QStringLiteral("childx");
+    }));
+#ifdef Q_OS_MACOS
+    constexpr auto undoModifier = Qt::MetaModifier;
+#else
+    constexpr auto undoModifier = Qt::ControlModifier;
+#endif
+    QTest::keyClick(window, Qt::Key_Z, undoModifier);
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.journalEntries()
+                       ->data(controller.journalEntries()->index(1, 0),
+                              JournalEntryModel::DepthRole)
+                       .toInt() == 0 &&
+               controller.journalEntries()
+                       ->data(controller.journalEntries()->index(1, 0),
+                              JournalEntryModel::AuthoredTextRole)
+                       .toString() == QStringLiteral("child");
+    }));
+    childEntry = entryAt(1);
+    REQUIRE(childEntry != nullptr);
+    childEditor = childEntry->findChild<QQuickItem*>(QStringLiteral("journalEntryEditor-1"));
+    REQUIRE(childEditor != nullptr);
+    childEditor->forceActiveFocus();
     QTest::keyClick(window, Qt::Key_Tab);
     REQUIRE(waitUntil([&controller]() -> bool {
         return controller.journalEntries()
@@ -230,11 +272,7 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
                    ->data(controller.journalEntries()->index(1, 0), JournalEntryModel::DepthRole)
                    .toInt() == 0;
     }));
-#ifdef Q_OS_MACOS
-    constexpr auto structureModifier = Qt::MetaModifier;
-#else
-    constexpr auto structureModifier = Qt::ControlModifier;
-#endif
+    constexpr auto structureModifier = undoModifier;
     QTest::keyClick(window, Qt::Key_Down, structureModifier | Qt::ShiftModifier);
     REQUIRE(waitUntil(
         [&controller, &childId]() -> bool { return controller.journalEntryId(2) == childId; }));
@@ -292,6 +330,7 @@ TEST_CASE("the Journal editor groups typing and routes standard undo and redo") 
 #else
     constexpr auto undoModifier = Qt::ControlModifier;
 #endif
+    editor->setProperty("cursorPosition", 3);
     QTest::keyClick(window, Qt::Key_Z, undoModifier);
     REQUIRE(waitUntil([&controller]() -> bool {
         return controller.journalEntries()
@@ -299,6 +338,11 @@ TEST_CASE("the Journal editor groups typing and routes standard undo and redo") 
                           JournalEntryModel::AuthoredTextRole)
                    .toString() == QStringLiteral("before");
     }));
+    REQUIRE(waitUntil([window]() -> bool {
+        return window->activeFocusItem() != nullptr &&
+               window->activeFocusItem()->objectName() == QStringLiteral("journalEntryEditor-0");
+    }));
+    CHECK(window->activeFocusItem()->property("cursorPosition").toInt() == 3);
     CHECK(redoAction->property("enabled").toBool());
     QTest::keyClick(window, Qt::Key_Z, undoModifier | Qt::ShiftModifier);
     REQUIRE(waitUntil([&controller]() -> bool {
@@ -313,6 +357,7 @@ TEST_CASE("the Journal editor groups typing and routes standard undo and redo") 
                window->activeFocusItem()->objectName() == QStringLiteral("journalEntryEditor-0");
     }));
     QTest::keyClick(window, Qt::Key_Y);
+    const auto textBeforeClose = window->activeFocusItem()->property("text").toString();
     auto* closeAction = root->findChild<QObject*>(QStringLiteral("closeAction"));
     REQUIRE(closeAction != nullptr);
     REQUIRE(QMetaObject::invokeMethod(closeAction, "trigger"));
@@ -322,7 +367,7 @@ TEST_CASE("the Journal editor groups typing and routes standard undo and redo") 
     REQUIRE(controller.journalEntries()->rowCount() == 1);
     CHECK(controller.journalEntries()
               ->data(controller.journalEntries()->index(0, 0), JournalEntryModel::AuthoredTextRole)
-              .toString() == QStringLiteral("beforexy"));
+              .toString() == textBeforeClose);
 }
 
 auto main(int argc, char* argv[]) -> int {

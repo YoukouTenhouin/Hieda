@@ -14,6 +14,7 @@ ApplicationWindow {
     property string draftText: ""
     property var activeJournalEditor: null
     property bool rolloverPending: false
+    property bool deferJournalFocusCommit: false
     readonly property bool hasPendingJournalEdit: activeJournalEditor && activeJournalEditor.hasPendingEdit
 
     signal draftFocusRequested(string afterId)
@@ -64,6 +65,10 @@ ApplicationWindow {
 
     function commitActiveJournalEditor() {
         const editor = activeJournalEditor;
+        if (editor && editor.inputMethodComposing) {
+            editor.forceActiveFocus();
+            return false;
+        }
         activeJournalEditor = null;
         if (editor && editor.hasPendingEdit && !editor.commit(false)) {
             registerJournalEditor(editor);
@@ -73,13 +78,31 @@ ApplicationWindow {
     }
 
     function applyHistory(redo) {
+        const editor = activeJournalEditor;
+        const preferredEntryId = editor ? editor.journalEntryId : "";
+        const cursorPosition = editor ? editor.cursorPosition : 0;
         if (!commitActiveJournalEditor())
             return ;
 
         if (redo ? !notebookController.canRedo : !notebookController.canUndo)
             return ;
 
-        applyJournalOutcome(redo ? notebookController.redoJournalEdit() : notebookController.undoJournalEdit());
+        applyJournalOutcome(redo ? notebookController.redoJournalEdit(preferredEntryId, cursorPosition) : notebookController.undoJournalEdit(preferredEntryId, cursorPosition));
+    }
+
+    function handleHistoryKey(event) {
+        if (!(event.modifiers & window.structureModifier))
+            return false;
+
+        if (event.key === Qt.Key_Z) {
+            window.applyHistory((event.modifiers & Qt.ShiftModifier) !== 0);
+            return true;
+        }
+        if (event.key === Qt.Key_Y) {
+            window.applyHistory(true);
+            return true;
+        }
+        return false;
     }
 
     function journalEditorFinished(editor) {
@@ -354,6 +377,21 @@ ApplicationWindow {
                             entryEditor.cursorPosition = Math.min(cursorPosition === undefined ? entryEditor.length : cursorPosition, entryEditor.length);
                         }
 
+                        function openContextMenu() {
+                            window.deferJournalFocusCommit = true;
+                            entryMenu.popup();
+                        }
+
+                        function beginMenuStructureEdit() {
+                            window.deferJournalFocusCommit = false;
+                            if (entryEditor.inputMethodComposing) {
+                                entryEditor.forceActiveFocus();
+                                return false;
+                            }
+                            window.activeJournalEditor = null;
+                            return true;
+                        }
+
                         function commit() {
                             if (entryEditor.text === entryRoot.authoredText)
                                 return true;
@@ -412,7 +450,7 @@ ApplicationWindow {
 
                                 TapHandler {
                                     acceptedButtons: Qt.RightButton
-                                    onTapped: entryMenu.popup()
+                                    onTapped: entryRoot.openContextMenu()
                                 }
 
                             }
@@ -422,12 +460,28 @@ ApplicationWindow {
                                 id: entryMenu
 
                                 objectName: "journalEntryMenu-" + entryRoot.index
+                                onClosed: {
+                                    if (window.deferJournalFocusCommit) {
+                                        window.deferJournalFocusCommit = false;
+                                        if (window.activeJournalEditor === entryEditor) {
+                                            if (entryEditor.commit(false)) {
+                                                window.journalEditorFinished(entryEditor);
+                                            } else {
+                                                window.registerJournalEditor(entryEditor);
+                                                entryEditor.forceActiveFocus();
+                                            }
+                                        }
+                                    }
+                                }
 
                                 MenuItem {
+                                    objectName: "journalIndentMenuItem-" + entryRoot.index
                                     text: qsTr("Indent")
                                     enabled: entryRoot.canIndent
                                     onTriggered: {
-                                        window.activeJournalEditor = null;
+                                        if (!entryRoot.beginMenuStructureEdit())
+                                            return ;
+
                                         if (!window.applyJournalOutcome(notebookController.indentJournalEntry(entryRoot.entryId, entryEditor.text, entryEditor.cursorPosition)))
                                             window.registerJournalEditor(entryEditor);
                                     }
@@ -437,7 +491,9 @@ ApplicationWindow {
                                     text: qsTr("Outdent")
                                     enabled: entryRoot.canOutdent
                                     onTriggered: {
-                                        window.activeJournalEditor = null;
+                                        if (!entryRoot.beginMenuStructureEdit())
+                                            return ;
+
                                         if (!window.applyJournalOutcome(notebookController.outdentJournalEntry(entryRoot.entryId, entryEditor.text, entryEditor.cursorPosition)))
                                             window.registerJournalEditor(entryEditor);
                                     }
@@ -447,7 +503,9 @@ ApplicationWindow {
                                     text: qsTr("Move Up")
                                     enabled: entryRoot.canMoveUp
                                     onTriggered: {
-                                        window.activeJournalEditor = null;
+                                        if (!entryRoot.beginMenuStructureEdit())
+                                            return ;
+
                                         if (!window.applyJournalOutcome(notebookController.moveJournalEntryUp(entryRoot.entryId, entryEditor.text, entryEditor.cursorPosition)))
                                             window.registerJournalEditor(entryEditor);
                                     }
@@ -457,7 +515,9 @@ ApplicationWindow {
                                     text: qsTr("Move Down")
                                     enabled: entryRoot.canMoveDown
                                     onTriggered: {
-                                        window.activeJournalEditor = null;
+                                        if (!entryRoot.beginMenuStructureEdit())
+                                            return ;
+
                                         if (!window.applyJournalOutcome(notebookController.moveJournalEntryDown(entryRoot.entryId, entryEditor.text, entryEditor.cursorPosition)))
                                             window.registerJournalEditor(entryEditor);
                                     }
@@ -470,6 +530,13 @@ ApplicationWindow {
                                     text: qsTr("Delete Entry")
                                     enabled: entryRoot.canDelete
                                     onTriggered: {
+                                        window.deferJournalFocusCommit = false;
+                                        if (!entryEditor.commit(false)) {
+                                            window.registerJournalEditor(entryEditor);
+                                            entryEditor.forceActiveFocus();
+                                            return ;
+                                        }
+
                                         window.activeJournalEditor = null;
                                         window.applyJournalOutcome(notebookController.deleteJournalEntry(entryRoot.entryId));
                                     }
@@ -482,8 +549,12 @@ ApplicationWindow {
                                 readonly property bool isDraftEditor: false
                                 readonly property int entryRow: entryRoot.index
                                 readonly property bool hasPendingEdit: text !== entryRoot.authoredText
+                                readonly property string journalEntryId: entryRoot.entryId
 
                                 function commit(openNext) {
+                                    if (inputMethodComposing)
+                                        return false;
+
                                     typingCommitTimer.stop();
                                     return entryRoot.commit();
                                 }
@@ -510,17 +581,24 @@ ApplicationWindow {
                                     if (activeFocus) {
                                         window.registerJournalEditor(entryEditor);
                                     } else if (window.activeJournalEditor === entryEditor) {
-                                        entryRoot.commit();
-                                        window.journalEditorFinished(entryEditor);
+                                        if (window.deferJournalFocusCommit)
+                                            return ;
+
+                                        if (entryEditor.inputMethodComposing) {
+                                            Qt.callLater(function() {
+                                                entryEditor.forceActiveFocus();
+                                            });
+                                        } else {
+                                            entryEditor.commit(false);
+                                            window.journalEditorFinished(entryEditor);
+                                        }
                                     }
                                 }
                                 Keys.onPressed: function(event) {
-                                    if ((event.modifiers & window.structureModifier) && event.key === Qt.Key_Z) {
+                                    if (window.handleHistoryKey(event)) {
                                         event.accepted = true;
-                                        window.applyHistory((event.modifiers & Qt.ShiftModifier) !== 0);
-                                    } else if ((event.modifiers & window.structureModifier) && event.key === Qt.Key_Y) {
-                                        event.accepted = true;
-                                        window.applyHistory(true);
+                                    } else if (inputMethodComposing) {
+                                        return ;
                                     } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                                         event.accepted = true;
                                         window.activeJournalEditor = null;
@@ -766,8 +844,12 @@ ApplicationWindow {
                 readonly property bool isDraftEditor: true
                 readonly property int entryRow: draftRoot.anchorRow + 1
                 readonly property bool hasPendingEdit: text.length > 0
+                readonly property string journalEntryId: ""
 
                 function commit(openNext) {
+                    if (inputMethodComposing)
+                        return false;
+
                     return draftRoot.commit(openNext);
                 }
 
@@ -789,17 +871,21 @@ ApplicationWindow {
                     if (activeFocus) {
                         window.registerJournalEditor(draftEditor);
                     } else if (window.activeJournalEditor === draftEditor) {
-                        draftRoot.commit(false);
-                        window.journalEditorFinished(draftEditor);
+                        if (draftEditor.inputMethodComposing) {
+                            Qt.callLater(function() {
+                                draftEditor.forceActiveFocus();
+                            });
+                        } else {
+                            draftEditor.commit(false);
+                            window.journalEditorFinished(draftEditor);
+                        }
                     }
                 }
                 Keys.onPressed: function(event) {
-                    if ((event.modifiers & window.structureModifier) && event.key === Qt.Key_Z) {
+                    if (window.handleHistoryKey(event)) {
                         event.accepted = true;
-                        window.applyHistory((event.modifiers & Qt.ShiftModifier) !== 0);
-                    } else if ((event.modifiers & window.structureModifier) && event.key === Qt.Key_Y) {
-                        event.accepted = true;
-                        window.applyHistory(true);
+                    } else if (inputMethodComposing) {
+                        return ;
                     } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                         event.accepted = true;
                         if (window.rolloverPending) {
