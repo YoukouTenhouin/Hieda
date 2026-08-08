@@ -9,6 +9,7 @@
 #include <QClipboard>
 #include <QElapsedTimer>
 #include <QInputMethodEvent>
+#include <QKeyEvent>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -38,6 +39,14 @@ auto waitUntil(const Predicate& predicate,
     return predicate();
 }
 
+void sendKeyClickWithoutProcessingEvents(QQuickWindow* window, Qt::Key key,
+                                         Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+    QKeyEvent press(QEvent::KeyPress, key, modifiers);
+    QKeyEvent release(QEvent::KeyRelease, key, modifiers);
+    QCoreApplication::sendEvent(window, &press);
+    QCoreApplication::sendEvent(window, &release);
+}
+
 } // namespace
 
 TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
@@ -54,6 +63,7 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     controller.navigateToPage(projectId);
 
     QQmlEngine engine;
+    QSignalSpy qmlWarnings(&engine, &QQmlEngine::warnings);
     engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
     QQmlComponent component(&engine,
                             QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
@@ -70,9 +80,11 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     REQUIRE(root->findChild<QObject*>(QStringLiteral("goToPageAction")) != nullptr);
     REQUIRE(root->findChild<QObject*>(QStringLiteral("renamePageAction")) != nullptr);
     auto* pagePicker = root->findChild<QQuickItem*>(QStringLiteral("pagePicker"));
+    auto* pageFilterField = root->findChild<QQuickItem*>(QStringLiteral("pageFilterField"));
     REQUIRE(pagePicker != nullptr);
-    CHECK(pagePicker->property("editable").toBool());
-    pagePicker->setProperty("editText", QStringLiteral("second"));
+    REQUIRE(pageFilterField != nullptr);
+    CHECK_FALSE(pagePicker->property("editable").toBool());
+    pageFilterField->setProperty("text", QStringLiteral("project"));
     REQUIRE(
         waitUntil([pagePicker]() -> bool { return pagePicker->property("count").toInt() == 1; }));
 
@@ -80,6 +92,8 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(window != nullptr);
     REQUIRE(outlineList != nullptr);
+    window->setWidth(1254);
+    window->setHeight(863);
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
@@ -152,6 +166,8 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     auto* pageDelegate = qobject_cast<QQuickItem*>(pageDelegateValue.value<QObject*>());
     REQUIRE(pageDelegate != nullptr);
     CHECK(pageDelegate->property("highlighted").toBool());
+    CHECK(pageDelegate->mapToItem(sidebar, QPointF(pageDelegate->width(), 0)).x() <=
+          sidebar->width());
 
     REQUIRE(QMetaObject::invokeMethod(renameAction, "trigger"));
     REQUIRE(
@@ -171,10 +187,12 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     REQUIRE(goToAction != nullptr);
     REQUIRE(goToDialog != nullptr);
     REQUIRE(openSelected != nullptr);
+    qmlWarnings.clear();
     REQUIRE(QMetaObject::invokeMethod(goToAction, "trigger"));
-    pagePicker->setProperty("editText", QStringLiteral("second"));
+    pageFilterField->setProperty("text", QStringLiteral("second"));
     REQUIRE(
         waitUntil([pagePicker]() -> bool { return pagePicker->property("count").toInt() == 1; }));
+    CHECK(qmlWarnings.count() == 0);
     REQUIRE(QMetaObject::invokeMethod(openSelected, "clicked"));
     REQUIRE(waitUntil([&controller, projectId]() -> bool {
         return !controller.isJournalPage() && controller.currentPageId() != projectId;
@@ -207,9 +225,15 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     auto* todayButton = root->findChild<QQuickItem*>(QStringLiteral("todayJournalButton"));
     auto* previousButton = root->findChild<QQuickItem*>(QStringLiteral("previousJournalButton"));
     auto* nextButton = root->findChild<QQuickItem*>(QStringLiteral("nextJournalButton"));
+    auto* newPageButton = root->findChild<QQuickItem*>(QStringLiteral("newPageButton"));
     REQUIRE(todayButton != nullptr);
     REQUIRE(previousButton != nullptr);
     REQUIRE(nextButton != nullptr);
+    REQUIRE(newPageButton != nullptr);
+    CHECK(previousButton->mapToItem(sidebar, QPointF{}).x() >= 0);
+    CHECK(nextButton->mapToItem(sidebar, QPointF(nextButton->width(), 0)).x() <= sidebar->width());
+    CHECK(newPageButton->mapToItem(sidebar, QPointF(newPageButton->width(), 0)).x() <=
+          sidebar->width());
     REQUIRE(QMetaObject::invokeMethod(todayButton, "clicked"));
     REQUIRE(waitUntil([&controller]() -> bool { return controller.isJournalPage(); }));
     const auto today = controller.journalDate();
@@ -222,6 +246,73 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     CHECK(controller.outlineEntries()
               ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("committed before rename"));
+}
+
+TEST_CASE("the Page editor preserves consecutive outline key presses") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(
+        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("page-keys.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("keys"), QStringLiteral("Keys")));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("a")) == 0);
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("b")) == 1);
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("c")) == 2);
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    REQUIRE(window != nullptr);
+    REQUIRE(outlineList != nullptr);
+    window->show();
+    window->requestActivate();
+    REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
+
+    const auto entryAt = [outlineList](int row) -> QQuickItem* {
+        QVariant value;
+        if (!QMetaObject::invokeMethod(outlineList, "entryItemAt", Q_RETURN_ARG(QVariant, value),
+                                       Q_ARG(QVariant, row))) {
+            return nullptr;
+        }
+        return qobject_cast<QQuickItem*>(value.value<QObject*>());
+    };
+    auto* firstEntry = entryAt(0);
+    REQUIRE(firstEntry != nullptr);
+    auto* firstEditor = firstEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    REQUIRE(firstEditor != nullptr);
+    firstEditor->forceActiveFocus();
+    REQUIRE(waitUntil([firstEditor]() -> bool { return firstEditor->hasActiveFocus(); }));
+
+    sendKeyClickWithoutProcessingEvents(window, Qt::Key_Down);
+    sendKeyClickWithoutProcessingEvents(window, Qt::Key_Down);
+    REQUIRE(waitUntil([window]() -> bool {
+        return window->activeFocusItem() != nullptr &&
+               window->activeFocusItem()->objectName() == QStringLiteral("outlineEntryEditor-2");
+    }));
+
+    auto* secondEntry = entryAt(1);
+    REQUIRE(secondEntry != nullptr);
+    auto* secondEditor =
+        secondEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
+    REQUIRE(secondEditor != nullptr);
+    secondEditor->forceActiveFocus();
+    REQUIRE(waitUntil([secondEditor]() -> bool { return secondEditor->hasActiveFocus(); }));
+    sendKeyClickWithoutProcessingEvents(window, Qt::Key_Tab);
+    REQUIRE(controller.outlineEntries()
+                ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::DepthRole)
+                .toInt() == 1);
+    sendKeyClickWithoutProcessingEvents(window, Qt::Key_Backtab, Qt::ShiftModifier);
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.outlineEntries()
+                   ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::DepthRole)
+                   .toInt() == 0;
+    }));
 }
 
 TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings") {

@@ -40,29 +40,33 @@ ApplicationWindow {
         beginDraft("");
     }
 
-    function focusEntry(row, cursorPosition) {
+    function focusOutlineEntryWhenAvailable(row, focusAction) {
         if (row < 0 || row >= outlineList.count)
             return ;
 
         outlineList.positionViewAtIndex(row, ListView.Contain);
+        const currentItem = outlineList.itemAtIndex(row);
+        if (currentItem) {
+            focusAction(currentItem);
+            return ;
+        }
         Qt.callLater(function() {
             const item = outlineList.itemAtIndex(row);
             if (item)
-                item.focusEditor(cursorPosition);
+                focusAction(item);
 
         });
     }
 
+    function focusEntry(row, cursorPosition) {
+        focusOutlineEntryWhenAvailable(row, function(item) {
+            item.focusEditor(cursorPosition);
+        });
+    }
+
     function focusEntryBoundary(row, firstLine, horizontalPosition) {
-        if (row < 0 || row >= outlineList.count)
-            return ;
-
-        outlineList.positionViewAtIndex(row, ListView.Contain);
-        Qt.callLater(function() {
-            const item = outlineList.itemAtIndex(row);
-            if (item)
-                item.focusEditorAtBoundary(firstLine, horizontalPosition);
-
+        focusOutlineEntryWhenAvailable(row, function(item) {
+            item.focusEditorAtBoundary(firstLine, horizontalPosition);
         });
     }
 
@@ -481,13 +485,18 @@ ApplicationWindow {
         anchors.centerIn: parent
         standardButtons: Dialog.Close
         ColumnLayout {
+            TextField {
+                id: pageFilterField
+                objectName: "pageFilterField"
+                Layout.fillWidth: true
+                placeholderText: qsTr("Filter Pages")
+            }
             ComboBox {
                 id: pagePicker
                 objectName: "pagePicker"
                 Layout.fillWidth: true
-                editable: true
                 model: notebookController.pageChoices.filter(function(choice) {
-                    return choice.toLowerCase().includes(pagePicker.editText.toLowerCase());
+                    return choice.toLowerCase().includes(pageFilterField.text.toLowerCase());
                 })
             }
             Button {
@@ -624,9 +633,11 @@ ApplicationWindow {
                             text: qsTr("Current: %1").arg(Qt.formatDate(notebookController.journalDate, Locale.ShortFormat))
                             font.bold: true
                         }
-                        RowLayout {
+                        ColumnLayout {
+                            Layout.fillWidth: true
                             Button {
                                 objectName: "previousJournalButton"
+                                Layout.fillWidth: true
                                 text: qsTr("Previous")
                                 onClicked: {
                                     if (window.commitActiveOutlineEditor())
@@ -635,6 +646,7 @@ ApplicationWindow {
                             }
                             Button {
                                 objectName: "todayJournalButton"
+                                Layout.fillWidth: true
                                 text: qsTr("Today")
                                 highlighted: notebookController.isJournalPage && Qt.formatDate(notebookController.journalDate, "yyyy-MM-dd") === Qt.formatDate(new Date(), "yyyy-MM-dd")
                                 onClicked: {
@@ -644,6 +656,7 @@ ApplicationWindow {
                             }
                             Button {
                                 objectName: "nextJournalButton"
+                                Layout.fillWidth: true
                                 text: qsTr("Next")
                                 onClicked: {
                                     if (window.commitActiveOutlineEditor())
@@ -676,7 +689,11 @@ ApplicationWindow {
                                 }
                             }
                         }
-                        Button { action: newPageAction; Layout.fillWidth: true }
+                        Button {
+                            objectName: "newPageButton"
+                            action: newPageAction
+                            Layout.fillWidth: true
+                        }
                     }
                 }
 
