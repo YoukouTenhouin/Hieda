@@ -52,7 +52,10 @@ lock files beside an open Notebook. Do not copy or synchronize a Notebook while 
 
 ## Journal editing
 
-Opening a Notebook shows the Journal Page for the current local date. Submit a new Entry with
-Enter or the Add Entry button. Focusing an existing Entry selects its insertion position; edits
-are committed with Enter or when focus leaves the field. Journal text is exact single-line
-Unicode, and a failed save restores the last durably committed text.
+Opening a Notebook shows the Journal Page for the current local date as a document-like list of
+bullets. The trailing bullet is a temporary draft. Enter commits authored text and continues with
+a new draft directly below it; an untouched draft is never persisted. Existing bullets commit
+with Enter or when focus leaves them, and Escape cancels the current edit. Up and Down move between
+bullets. Long text wraps visually, but Journal text remains exact single-line Unicode. A failed
+edit restores the last durably committed text, while a failed new Entry keeps its draft available
+for retry or copying.

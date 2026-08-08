@@ -110,12 +110,18 @@ TEST_CASE("the Qt adapter presents and durably edits today's flat Journal") {
     REQUIRE(firstRow == 0);
     const auto firstIndex = model->index(firstRow, 0);
     const auto firstId = model->data(firstIndex, JournalEntryModel::EntryIdRole).toString();
+    QPersistentModelIndex persistentFirst(firstIndex);
     CHECK(model->data(firstIndex, JournalEntryModel::AuthoredTextRole).toString() ==
           QStringLiteral("first"));
 
     REQUIRE(controller.insertJournalEntry(QStringLiteral("third")) == 1);
     REQUIRE(controller.insertJournalEntry(QString::fromUtf8("第二 🎴"), firstId) == 1);
     REQUIRE(model->rowCount() == 3);
+    CHECK(controller.journalEntryId(1) ==
+          model->data(model->index(1, 0), JournalEntryModel::EntryIdRole).toString());
+    CHECK(controller.journalEntryId(-1).isEmpty());
+    CHECK(persistentFirst.isValid());
+    CHECK(persistentFirst.row() == 0);
     CHECK(model->data(model->index(1, 0), JournalEntryModel::AuthoredTextRole).toString() ==
           QString::fromUtf8("第二 🎴"));
 

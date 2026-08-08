@@ -21,6 +21,7 @@ class JournalEntryModel final : public QAbstractListModel {
     [[nodiscard]] auto data(const QModelIndex& index, int role) const -> QVariant override;
     [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;
     void setEntries(std::vector<hieda::notebook::JournalEntry> entries);
+    void insertEntry(int row, hieda::notebook::JournalEntry entry);
     void updateEntry(const hieda::notebook::JournalEntry& entry);
     [[nodiscard]] auto entryId(int row) const -> QString;
 
@@ -54,6 +55,7 @@ class NotebookController final : public QObject {
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     Q_INVOKABLE auto insertJournalEntry(const QString& authoredText,
                                         const QString& afterEntryId = {}) -> int;
+    [[nodiscard]] Q_INVOKABLE auto journalEntryId(int row) const -> QString;
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     Q_INVOKABLE auto updateJournalEntry(const QString& entryId, const QString& authoredText)
         -> bool;

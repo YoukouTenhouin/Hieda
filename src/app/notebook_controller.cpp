@@ -89,6 +89,15 @@ void JournalEntryModel::setEntries(std::vector<hieda::notebook::JournalEntry> en
     endResetModel();
 }
 
+void JournalEntryModel::insertEntry(int row, hieda::notebook::JournalEntry entry) {
+    if (row < 0 || row > rowCount()) {
+        return;
+    }
+    beginInsertRows({}, row, row);
+    entries_.insert(entries_.begin() + row, std::move(entry));
+    endInsertRows();
+}
+
 void JournalEntryModel::updateEntry(const hieda::notebook::JournalEntry& entry) {
     const auto found = std::ranges::find_if(entries_, [&](const auto& current) -> bool {
         return current.metadata.id == entry.metadata.id;
@@ -197,7 +206,21 @@ auto NotebookController::insertJournalEntry(const QString& authoredText,
     }
     const auto utf8 = authoredText.toUtf8();
     try {
-        const auto beforeCount = journalEntries_.rowCount();
+        auto insertedRow = journalEntries_.rowCount();
+        if (after) {
+            insertedRow = -1;
+            for (int row = 0; row < journalEntries_.rowCount(); ++row) {
+                if (journalEntries_.entryId(row) == afterEntryId) {
+                    insertedRow = row + 1;
+                    break;
+                }
+            }
+            if (insertedRow < 0) {
+                error_ = tr("The selected Journal Entry is no longer on this Page.");
+                emit stateChanged();
+                return -1;
+            }
+        }
         const auto result = session_.insertJournalEntry(
             domainJournalDate(journalDate_), after,
             std::string(utf8.constData(), static_cast<std::size_t>(utf8.size())));
@@ -205,23 +228,28 @@ auto NotebookController::insertJournalEntry(const QString& authoredText,
             rejectSave(result.error());
             return -1;
         }
-        journalEntries_.setEntries(result.value().entries);
+        const auto& entries = result.value().entries;
+        const auto insertedIndex = static_cast<std::size_t>(insertedRow);
+        if (insertedIndex >= entries.size()) {
+            error_ = tr("Hieda encountered an unexpected Notebook error.");
+            emit stateChanged();
+            loadJournalDate(journalDate_);
+            return -1;
+        }
+        journalEntries_.insertEntry(insertedRow, entries[insertedIndex]);
         error_.clear();
         emit stateChanged();
         emit journalChanged();
-        if (!after) {
-            return beforeCount;
-        }
-        for (int row = 0; row < journalEntries_.rowCount(); ++row) {
-            if (journalEntries_.entryId(row) == afterEntryId) {
-                return row + 1;
-            }
-        }
+        return insertedRow;
     } catch (const hieda::notebook::NotebookException&) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
     }
     return -1;
+}
+
+auto NotebookController::journalEntryId(int row) const -> QString {
+    return journalEntries_.entryId(row);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)

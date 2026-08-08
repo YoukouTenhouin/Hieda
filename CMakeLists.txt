@@ -182,6 +182,7 @@ endif()
 
 if(BUILD_TESTING)
     find_package(Catch2 3 REQUIRED)
+    find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
     add_executable(notebook_session_test tests/notebook_session_test.cpp)
     target_include_directories(notebook_session_test PRIVATE src/notebook)
     target_link_libraries(notebook_session_test PRIVATE Hieda::Notebook Catch2::Catch2WithMain ${HIEDA_LMDB_TARGET})
@@ -195,7 +196,17 @@ if(BUILD_TESTING)
     target_link_libraries(notebook_controller_test PRIVATE hieda_qt_adapter Catch2::Catch2WithMain)
     catch_discover_tests(notebook_controller_test)
     add_test(NAME hieda_app_smoke COMMAND hieda --smoke-test)
+    add_executable(journal_editor_ui_test tests/journal_editor_ui_test.cpp)
+    target_compile_definitions(journal_editor_ui_test
+        PRIVATE HIEDA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_link_libraries(journal_editor_ui_test
+        PRIVATE hieda_qt_adapter Catch2::Catch2 Qt6::Qml Qt6::Quick Qt6::Test Qt6::Widgets
+    )
+    add_test(NAME journal_editor_ui_test COMMAND journal_editor_ui_test)
     if(NOT APPLE)
-        set_tests_properties(hieda_app_smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+        set_tests_properties(hieda_app_smoke journal_editor_ui_test
+            PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        )
     endif()
 endif()
