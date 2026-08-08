@@ -77,7 +77,8 @@ ApplicationWindow {
         return true;
     }
 
-    function applyHistory(redo) {
+    function applyHistory(action) {
+        const redo = action === redoAction;
         const editor = activeJournalEditor;
         const preferredEntryId = editor ? editor.journalEntryId : "";
         const cursorPosition = editor ? editor.cursorPosition : 0;
@@ -95,11 +96,11 @@ ApplicationWindow {
             return false;
 
         if (event.key === Qt.Key_Z) {
-            window.applyHistory((event.modifiers & Qt.ShiftModifier) !== 0);
+            window.applyHistory((event.modifiers & Qt.ShiftModifier) !== 0 ? redoAction : undoAction);
             return true;
         }
         if (event.key === Qt.Key_Y) {
-            window.applyHistory(true);
+            window.applyHistory(redoAction);
             return true;
         }
         return false;
@@ -203,7 +204,7 @@ ApplicationWindow {
         icon.name: "edit-undo"
         shortcut: StandardKey.Undo
         enabled: notebookController.hasOpenNotebook && (notebookController.canUndo || window.hasPendingJournalEdit)
-        onTriggered: window.applyHistory(false)
+        onTriggered: window.applyHistory(undoAction)
     }
 
     Action {
@@ -214,7 +215,7 @@ ApplicationWindow {
         icon.name: "edit-redo"
         shortcut: StandardKey.Redo
         enabled: notebookController.hasOpenNotebook && notebookController.canRedo && !window.hasPendingJournalEdit
-        onTriggered: window.applyHistory(true)
+        onTriggered: window.applyHistory(redoAction)
     }
 
     FileDialog {
