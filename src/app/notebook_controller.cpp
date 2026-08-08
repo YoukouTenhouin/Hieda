@@ -58,7 +58,7 @@ auto displayId(const hieda::notebook::BlockId& blockIdentifier) -> QString {
     return QString::fromStdString(blockIdentifier.toString());
 }
 
-auto journalOutcome(bool succeeded, int row = -1, int cursorPosition = 0) -> QVariantMap {
+auto outlineOutcome(bool succeeded, int row = -1, int cursorPosition = 0) -> QVariantMap {
     return {{QStringLiteral("succeeded"), succeeded},
             {QStringLiteral("row"), row},
             {QStringLiteral("cursorPosition"), cursorPosition}};
@@ -76,13 +76,13 @@ auto pageAsJournalEntries(const std::vector<hieda::notebook::PageEntry>& pageEnt
 
 } // namespace
 
-JournalEntryModel::JournalEntryModel(QObject* parent) : QAbstractListModel(parent) {}
+OutlineEntryModel::OutlineEntryModel(QObject* parent) : QAbstractListModel(parent) {}
 
-auto JournalEntryModel::rowCount(const QModelIndex& parent) const -> int {
+auto OutlineEntryModel::rowCount(const QModelIndex& parent) const -> int {
     return parent.isValid() ? 0 : static_cast<int>(entries_.size());
 }
 
-auto JournalEntryModel::data(const QModelIndex& index, int role) const -> QVariant {
+auto OutlineEntryModel::data(const QModelIndex& index, int role) const -> QVariant {
     if (!index.isValid() || index.row() < 0 ||
         static_cast<std::size_t>(index.row()) >= entries_.size()) {
         return {};
@@ -136,7 +136,7 @@ auto JournalEntryModel::data(const QModelIndex& index, int role) const -> QVaria
     return {};
 }
 
-auto JournalEntryModel::roleNames() const -> QHash<int, QByteArray> {
+auto OutlineEntryModel::roleNames() const -> QHash<int, QByteArray> {
     return {{EntryIdRole, "entryId"},
             {AuthoredTextRole, "authoredText"},
             {ParentEntryIdRole, "parentEntryId"},
@@ -149,13 +149,13 @@ auto JournalEntryModel::roleNames() const -> QHash<int, QByteArray> {
             {CanDeleteRole, "canDelete"}};
 }
 
-void JournalEntryModel::setEntries(std::vector<hieda::notebook::JournalEntry> entries) {
+void OutlineEntryModel::setEntries(std::vector<hieda::notebook::JournalEntry> entries) {
     beginResetModel();
     entries_ = std::move(entries);
     endResetModel();
 }
 
-void JournalEntryModel::insertEntry(int row, hieda::notebook::JournalEntry entry) {
+void OutlineEntryModel::insertEntry(int row, hieda::notebook::JournalEntry entry) {
     if (row < 0 || row > rowCount()) {
         return;
     }
@@ -169,7 +169,7 @@ void JournalEntryModel::insertEntry(int row, hieda::notebook::JournalEntry entry
     }
 }
 
-void JournalEntryModel::updateEntry(const hieda::notebook::JournalEntry& entry) {
+void OutlineEntryModel::updateEntry(const hieda::notebook::JournalEntry& entry) {
     const auto found = std::ranges::find_if(entries_, [&](const auto& current) -> bool {
         return current.metadata.id == entry.metadata.id;
     });
@@ -182,14 +182,14 @@ void JournalEntryModel::updateEntry(const hieda::notebook::JournalEntry& entry) 
     emit dataChanged(changed, changed, {AuthoredTextRole});
 }
 
-auto JournalEntryModel::entryId(int row) const -> QString {
+auto OutlineEntryModel::entryId(int row) const -> QString {
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return {};
     }
     return displayId(entries_[static_cast<std::size_t>(row)].metadata.id);
 }
 
-auto JournalEntryModel::entryText(int row) const -> QString {
+auto OutlineEntryModel::entryText(int row) const -> QString {
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return {};
     }
@@ -197,7 +197,7 @@ auto JournalEntryModel::entryText(int row) const -> QString {
     return QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
 }
 
-auto JournalEntryModel::entryParentId(int row) const -> QString {
+auto OutlineEntryModel::entryParentId(int row) const -> QString {
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return {};
     }
@@ -205,7 +205,7 @@ auto JournalEntryModel::entryParentId(int row) const -> QString {
     return parent ? displayId(*parent) : QString{};
 }
 
-auto JournalEntryModel::entryDepth(int row) const -> int {
+auto OutlineEntryModel::entryDepth(int row) const -> int {
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return 0;
     }
@@ -221,7 +221,7 @@ auto JournalEntryModel::entryDepth(int row) const -> int {
     return depth;
 }
 
-auto JournalEntryModel::subtreeEnd(int row) const -> int {
+auto OutlineEntryModel::subtreeEnd(int row) const -> int {
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return row;
     }
@@ -233,14 +233,14 @@ auto JournalEntryModel::subtreeEnd(int row) const -> int {
     return end;
 }
 
-auto JournalEntryModel::rowForId(const hieda::notebook::BlockId& identifier) const -> int {
+auto OutlineEntryModel::rowForId(const hieda::notebook::BlockId& identifier) const -> int {
     const auto found = std::ranges::find_if(
         entries_, [&](const auto& entry) -> bool { return entry.metadata.id == identifier; });
     return found == entries_.end() ? -1 : static_cast<int>(std::distance(entries_.begin(), found));
 }
 
 NotebookController::NotebookController(QObject* parent)
-    : QObject(parent), journalEntries_(this), midnightTimer_(this) {
+    : QObject(parent), outlineEntries_(this), midnightTimer_(this) {
     midnightTimer_.setSingleShot(true);
     connect(&midnightTimer_, &QTimer::timeout, this, [this]() -> void {
         if (hasOpenNotebook() && isJournalPage()) {
@@ -269,8 +269,8 @@ auto NotebookController::errorMessage() const -> QString {
 auto NotebookController::journalDate() const -> QDate {
     return journalDate_;
 }
-auto NotebookController::journalEntries() -> QAbstractItemModel* {
-    return &journalEntries_;
+auto NotebookController::outlineEntries() -> QAbstractItemModel* {
+    return &outlineEntries_;
 }
 auto NotebookController::canUndo() const -> bool {
     if (!session_.isOpen() || !journalDate_.isValid()) {
@@ -305,10 +305,13 @@ auto NotebookController::currentPageTitle() const -> QString {
 auto NotebookController::pageChoices() const -> QStringList {
     return pageChoices_;
 }
-auto NotebookController::pageIdAt(int index) const -> QString {
+auto NotebookController::pageIdAt(qsizetype index) const -> QString {
     return index >= 0 && static_cast<std::size_t>(index) < pageIds_.size()
                ? displayId(pageIds_[static_cast<std::size_t>(index)])
                : QString{};
+}
+auto NotebookController::pageIdForChoice(const QString& choice) const -> QString {
+    return pageIdAt(pageChoices_.indexOf(choice));
 }
 
 void NotebookController::createNotebook(const QUrl& url) {
@@ -351,19 +354,19 @@ void NotebookController::closeNotebook() {
     currentPageTitle_.clear();
     pageChoices_.clear();
     pageIds_.clear();
-    journalEntries_.setEntries({});
+    outlineEntries_.setEntries({});
     emit stateChanged();
     emit journalChanged();
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::insertJournalEntry(const QString& authoredText,
+auto NotebookController::insertOutlineEntry(const QString& authoredText,
                                             const QString& afterEntryId) -> int {
     std::optional<hieda::notebook::BlockId> after;
     if (!afterEntryId.isEmpty()) {
         after = blockId(afterEntryId);
         if (!after) {
-            error_ = tr("The selected Journal Entry is no longer available.");
+            error_ = tr("The selected Entry is no longer available.");
             emit stateChanged();
             return -1;
         }
@@ -371,13 +374,13 @@ auto NotebookController::insertJournalEntry(const QString& authoredText,
     const auto utf8 = authoredText.toUtf8();
     try {
         std::vector<QString> existingIds;
-        existingIds.reserve(static_cast<std::size_t>(journalEntries_.rowCount()));
-        for (int row = 0; row < journalEntries_.rowCount(); ++row) {
-            existingIds.push_back(journalEntries_.entryId(row));
+        existingIds.reserve(static_cast<std::size_t>(outlineEntries_.rowCount()));
+        for (int row = 0; row < outlineEntries_.rowCount(); ++row) {
+            existingIds.push_back(outlineEntries_.entryId(row));
         }
         if (after) {
             if (std::ranges::find(existingIds, afterEntryId) == existingIds.end()) {
-                error_ = tr("The selected Journal Entry is no longer on this Page.");
+                error_ = tr("The selected Entry is no longer on this Page.");
                 emit stateChanged();
                 return -1;
             }
@@ -411,7 +414,7 @@ auto NotebookController::insertJournalEntry(const QString& authoredText,
             return -1;
         }
         const auto insertedRow = static_cast<int>(std::distance(entries.begin(), inserted));
-        journalEntries_.insertEntry(insertedRow, *inserted);
+        outlineEntries_.insertEntry(insertedRow, *inserted);
         error_.clear();
         emit stateChanged();
         emit journalChanged();
@@ -423,16 +426,16 @@ auto NotebookController::insertJournalEntry(const QString& authoredText,
     return -1;
 }
 
-auto NotebookController::journalEntryId(int row) const -> QString {
-    return journalEntries_.entryId(row);
+auto NotebookController::outlineEntryId(int row) const -> QString {
+    return outlineEntries_.entryId(row);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::updateJournalEntry(const QString& entryId, const QString& authoredText)
+auto NotebookController::updateOutlineEntry(const QString& entryId, const QString& authoredText)
     -> bool {
     const auto id = blockId(entryId);
     if (!id) {
-        error_ = tr("That Journal Entry is no longer available.");
+        error_ = tr("That Entry is no longer available.");
         emit stateChanged();
         return false;
     }
@@ -447,7 +450,7 @@ auto NotebookController::updateJournalEntry(const QString& entryId, const QStrin
                 loadPage(pageId);
                 return false;
             }
-            journalEntries_.updateEntry(
+            outlineEntries_.updateEntry(
                 {result.value().metadata, result.value().authoredText, result.value().parentEntry});
         } else {
             const auto result = session_.updateJournalEntry(*id, text);
@@ -456,7 +459,7 @@ auto NotebookController::updateJournalEntry(const QString& entryId, const QStrin
                 loadJournalDate(journalDate_);
                 return false;
             }
-            journalEntries_.updateEntry(result.value());
+            outlineEntries_.updateEntry(result.value());
         }
         error_.clear();
         emit stateChanged();
@@ -469,24 +472,24 @@ auto NotebookController::updateJournalEntry(const QString& entryId, const QStrin
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::splitJournalEntry(const QString& entryId, const QString& authoredText,
+auto NotebookController::splitOutlineEntry(const QString& entryId, const QString& authoredText,
                                            int cursorPosition) -> QVariantMap {
     const auto id = blockId(entryId);
     if (!id) {
-        error_ = tr("That Journal Entry is no longer available.");
+        error_ = tr("That Entry is no longer available.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
-    const auto row = journalEntries_.rowForId(*id);
+    const auto row = outlineEntries_.rowForId(*id);
     if (row < 0 || cursorPosition < 0 || cursorPosition > authoredText.size()) {
         error_ = tr("The split cursor is no longer valid.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
     std::vector<QString> existingIds;
-    existingIds.reserve(static_cast<std::size_t>(journalEntries_.rowCount()));
-    for (int current = 0; current < journalEntries_.rowCount(); ++current) {
-        existingIds.push_back(journalEntries_.entryId(current));
+    existingIds.reserve(static_cast<std::size_t>(outlineEntries_.rowCount()));
+    for (int current = 0; current < outlineEntries_.rowCount(); ++current) {
+        existingIds.push_back(outlineEntries_.entryId(current));
     }
     const auto prefix = authoredText.left(cursorPosition).toUtf8();
     const auto utf8 = authoredText.toUtf8();
@@ -498,7 +501,7 @@ auto NotebookController::splitJournalEntry(const QString& entryId, const QString
                 session_.splitPageEntry(*id, text, static_cast<std::size_t>(prefix.size()));
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = pageAsJournalEntries(result.value().entries);
         } else {
@@ -506,14 +509,14 @@ auto NotebookController::splitJournalEntry(const QString& entryId, const QString
                 session_.splitJournalEntry(*id, text, static_cast<std::size_t>(prefix.size()));
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = result.value().entries;
         }
-        journalEntries_.setEntries(std::move(entries));
+        outlineEntries_.setEntries(std::move(entries));
         auto insertedRow = -1;
-        for (int current = 0; current < journalEntries_.rowCount(); ++current) {
-            const auto candidate = journalEntries_.entryId(current);
+        for (int current = 0; current < outlineEntries_.rowCount(); ++current) {
+            const auto candidate = outlineEntries_.entryId(current);
             if (std::ranges::find(existingIds, candidate) == existingIds.end()) {
                 insertedRow = current;
                 break;
@@ -522,33 +525,33 @@ auto NotebookController::splitJournalEntry(const QString& entryId, const QString
         error_.clear();
         emit stateChanged();
         emit journalChanged();
-        return journalOutcome(insertedRow >= 0, insertedRow, 0);
+        return outlineOutcome(insertedRow >= 0, insertedRow, 0);
     } catch (const hieda::notebook::NotebookException&) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::joinJournalEntry(const QString& entryId, const QString& authoredText)
+auto NotebookController::joinOutlineEntry(const QString& entryId, const QString& authoredText)
     -> QVariantMap {
     const auto id = blockId(entryId);
     if (!id) {
-        error_ = tr("That Journal Entry is no longer available.");
+        error_ = tr("That Entry is no longer available.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
-    const auto row = journalEntries_.rowForId(*id);
+    const auto row = outlineEntries_.rowForId(*id);
     if (row <= 0) {
-        error_ = tr("That Journal Entry cannot be joined.");
+        error_ = tr("That Entry cannot be joined.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
-    const auto targetIdText = journalEntries_.entryId(row - 1);
+    const auto targetIdText = outlineEntries_.entryId(row - 1);
     const auto targetId = blockId(targetIdText);
     const auto cursor = static_cast<int>(std::min<qsizetype>(
-        journalEntries_.entryText(row - 1).size(), std::numeric_limits<int>::max()));
+        outlineEntries_.entryText(row - 1).size(), std::numeric_limits<int>::max()));
     const auto utf8 = authoredText.toUtf8();
     try {
         std::vector<hieda::notebook::JournalEntry> entries;
@@ -557,39 +560,39 @@ auto NotebookController::joinJournalEntry(const QString& entryId, const QString&
             const auto result = session_.joinPageEntry(*id, text);
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = pageAsJournalEntries(result.value().entries);
         } else {
             const auto result = session_.joinJournalEntry(*id, text);
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = result.value().entries;
         }
-        journalEntries_.setEntries(std::move(entries));
-        const auto targetRow = targetId ? journalEntries_.rowForId(*targetId) : -1;
+        outlineEntries_.setEntries(std::move(entries));
+        const auto targetRow = targetId ? outlineEntries_.rowForId(*targetId) : -1;
         error_.clear();
         emit stateChanged();
         emit journalChanged();
-        return journalOutcome(targetRow >= 0, targetRow, cursor);
+        return outlineOutcome(targetRow >= 0, targetRow, cursor);
     } catch (const hieda::notebook::NotebookException&) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::moveJournalEntry(const QString& entryId, const QString& authoredText,
+auto NotebookController::moveOutlineEntry(const QString& entryId, const QString& authoredText,
                                           hieda::notebook::JournalEntryMove movement,
                                           int cursorPosition) -> QVariantMap {
     const auto id = blockId(entryId);
     if (!id) {
-        error_ = tr("That Journal Entry is no longer available.");
+        error_ = tr("That Entry is no longer available.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
     const auto utf8 = authoredText.toUtf8();
     try {
@@ -600,118 +603,118 @@ auto NotebookController::moveJournalEntry(const QString& entryId, const QString&
             const auto result = session_.movePageEntry(*id, pageMove, text);
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = pageAsJournalEntries(result.value().entries);
         } else {
             const auto result = session_.moveJournalEntry(*id, movement, text);
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = result.value().entries;
         }
-        journalEntries_.setEntries(std::move(entries));
-        const auto row = journalEntries_.rowForId(*id);
+        outlineEntries_.setEntries(std::move(entries));
+        const auto row = outlineEntries_.rowForId(*id);
         error_.clear();
         emit stateChanged();
         emit journalChanged();
-        return journalOutcome(row >= 0, row, cursorPosition);
+        return outlineOutcome(row >= 0, row, cursorPosition);
     } catch (const hieda::notebook::NotebookException&) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::indentJournalEntry(const QString& entryId, const QString& authoredText,
+auto NotebookController::indentOutlineEntry(const QString& entryId, const QString& authoredText,
                                             int cursorPosition) -> QVariantMap {
-    return moveJournalEntry(entryId, authoredText, hieda::notebook::JournalEntryMove::indent,
+    return moveOutlineEntry(entryId, authoredText, hieda::notebook::JournalEntryMove::indent,
                             cursorPosition);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::outdentJournalEntry(const QString& entryId, const QString& authoredText,
+auto NotebookController::outdentOutlineEntry(const QString& entryId, const QString& authoredText,
                                              int cursorPosition) -> QVariantMap {
-    return moveJournalEntry(entryId, authoredText, hieda::notebook::JournalEntryMove::outdent,
+    return moveOutlineEntry(entryId, authoredText, hieda::notebook::JournalEntryMove::outdent,
                             cursorPosition);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::moveJournalEntryUp(const QString& entryId, const QString& authoredText,
+auto NotebookController::moveOutlineEntryUp(const QString& entryId, const QString& authoredText,
                                             int cursorPosition) -> QVariantMap {
-    return moveJournalEntry(entryId, authoredText, hieda::notebook::JournalEntryMove::up,
+    return moveOutlineEntry(entryId, authoredText, hieda::notebook::JournalEntryMove::up,
                             cursorPosition);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::moveJournalEntryDown(const QString& entryId, const QString& authoredText,
+auto NotebookController::moveOutlineEntryDown(const QString& entryId, const QString& authoredText,
                                               int cursorPosition) -> QVariantMap {
-    return moveJournalEntry(entryId, authoredText, hieda::notebook::JournalEntryMove::down,
+    return moveOutlineEntry(entryId, authoredText, hieda::notebook::JournalEntryMove::down,
                             cursorPosition);
 }
 
-auto NotebookController::deleteJournalEntry(const QString& entryId) -> QVariantMap {
+auto NotebookController::deleteOutlineEntry(const QString& entryId) -> QVariantMap {
     const auto id = blockId(entryId);
     if (!id) {
-        error_ = tr("That Journal Entry is no longer available.");
+        error_ = tr("That Entry is no longer available.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
-    const auto oldRow = journalEntries_.rowForId(*id);
+    const auto oldRow = outlineEntries_.rowForId(*id);
     try {
         std::vector<hieda::notebook::JournalEntry> entries;
         if (currentPageId_) {
             const auto result = session_.deletePageEntry(*id);
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = pageAsJournalEntries(result.value().entries);
         } else {
             const auto result = session_.deleteJournalEntry(*id);
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = result.value().entries;
         }
-        journalEntries_.setEntries(std::move(entries));
-        const auto focusRow = std::min(oldRow, journalEntries_.rowCount() - 1);
+        outlineEntries_.setEntries(std::move(entries));
+        const auto focusRow = std::min(oldRow, outlineEntries_.rowCount() - 1);
         const auto cursor =
             focusRow >= 0
-                ? static_cast<int>(std::min<qsizetype>(journalEntries_.entryText(focusRow).size(),
+                ? static_cast<int>(std::min<qsizetype>(outlineEntries_.entryText(focusRow).size(),
                                                        std::numeric_limits<int>::max()))
                 : 0;
         error_.clear();
         emit stateChanged();
         emit journalChanged();
-        return journalOutcome(true, focusRow, cursor);
+        return outlineOutcome(true, focusRow, cursor);
     } catch (const hieda::notebook::NotebookException&) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
 }
 
-auto NotebookController::journalSelectionText(const QStringList& entryIds) const -> QString {
+auto NotebookController::outlineSelectionText(const QStringList& entryIds) const -> QString {
     if (entryIds.empty()) {
         return {};
     }
-    std::vector<bool> selected(static_cast<std::size_t>(journalEntries_.rowCount()), false);
+    std::vector<bool> selected(static_cast<std::size_t>(outlineEntries_.rowCount()), false);
     auto minimumDepth = std::numeric_limits<int>::max();
     for (const auto& entryId : entryIds) {
         const auto id = blockId(entryId);
-        const auto row = id ? journalEntries_.rowForId(*id) : -1;
+        const auto row = id ? outlineEntries_.rowForId(*id) : -1;
         if (row < 0) {
             return {};
         }
-        const auto depth = journalEntries_.entryDepth(row);
+        const auto depth = outlineEntries_.entryDepth(row);
         minimumDepth = std::min(minimumDepth, depth);
         selected[static_cast<std::size_t>(row)] = true;
-        for (auto candidate = row + 1; candidate < journalEntries_.rowCount(); ++candidate) {
-            const auto candidateDepth = journalEntries_.entryDepth(candidate);
+        for (auto candidate = row + 1; candidate < outlineEntries_.rowCount(); ++candidate) {
+            const auto candidateDepth = outlineEntries_.entryDepth(candidate);
             if (candidateDepth <= depth) {
                 break;
             }
@@ -720,16 +723,16 @@ auto NotebookController::journalSelectionText(const QStringList& entryIds) const
     }
 
     QStringList output;
-    for (auto row = 0; row < journalEntries_.rowCount(); ++row) {
+    for (auto row = 0; row < outlineEntries_.rowCount(); ++row) {
         if (!selected[static_cast<std::size_t>(row)]) {
             continue;
         }
-        const auto depth = journalEntries_.entryDepth(row);
+        const auto depth = outlineEntries_.entryDepth(row);
         const auto indentation =
             QString(static_cast<qsizetype>(depth - minimumDepth) * 2, QLatin1Char(' '));
         const auto continuationIndent = indentation + QStringLiteral("  ");
         const auto lines =
-            journalEntries_.entryText(row).split(QLatin1Char('\n'), Qt::KeepEmptyParts);
+            outlineEntries_.entryText(row).split(QLatin1Char('\n'), Qt::KeepEmptyParts);
         output.push_back(indentation + QStringLiteral("\u2022 ") + lines.front());
         for (qsizetype line = 1; line < lines.size(); ++line) {
             output.push_back(continuationIndent + lines[line]);
@@ -738,29 +741,29 @@ auto NotebookController::journalSelectionText(const QStringList& entryIds) const
     return output.join(QLatin1Char('\n'));
 }
 
-auto NotebookController::journalEntrySelection(int anchorRow, int extentRow) const -> QVariantMap {
-    if (anchorRow < 0 || extentRow < 0 || anchorRow >= journalEntries_.rowCount() ||
-        extentRow >= journalEntries_.rowCount()) {
+auto NotebookController::outlineEntrySelection(int anchorRow, int extentRow) const -> QVariantMap {
+    if (anchorRow < 0 || extentRow < 0 || anchorRow >= outlineEntries_.rowCount() ||
+        extentRow >= outlineEntries_.rowCount()) {
         return {{QStringLiteral("roots"), QStringList{}},
                 {QStringLiteral("entries"), QStringList{}}};
     }
     const auto first = std::min(anchorRow, extentRow);
     auto end =
-        std::max(journalEntries_.subtreeEnd(anchorRow), journalEntries_.subtreeEnd(extentRow));
+        std::max(outlineEntries_.subtreeEnd(anchorRow), outlineEntries_.subtreeEnd(extentRow));
     for (auto row = first; row < end; ++row) {
-        end = std::max(end, journalEntries_.subtreeEnd(row));
+        end = std::max(end, outlineEntries_.subtreeEnd(row));
     }
 
     QStringList entries;
     entries.reserve(end - first);
     for (auto row = first; row < end; ++row) {
-        entries.push_back(journalEntries_.entryId(row));
+        entries.push_back(outlineEntries_.entryId(row));
     }
     QStringList roots;
     for (auto row = first; row < end; ++row) {
-        const auto parent = journalEntries_.entryParentId(row);
+        const auto parent = outlineEntries_.entryParentId(row);
         if (parent.isEmpty() || !entries.contains(parent)) {
-            roots.push_back(journalEntries_.entryId(row));
+            roots.push_back(outlineEntries_.entryId(row));
         }
     }
     return {{QStringLiteral("roots"), roots}, {QStringLiteral("entries"), entries}};
@@ -772,23 +775,23 @@ void NotebookController::copyTextToClipboard(const QString& text) {
     }
 }
 
-auto NotebookController::deleteJournalSubtrees(const QStringList& entryIds) -> QVariantMap {
+auto NotebookController::deleteOutlineSubtrees(const QStringList& entryIds) -> QVariantMap {
     std::vector<hieda::notebook::BlockId> ids;
     ids.reserve(static_cast<std::size_t>(entryIds.size()));
-    auto firstRow = journalEntries_.rowCount();
+    auto firstRow = outlineEntries_.rowCount();
     for (const auto& entryId : entryIds) {
         const auto id = blockId(entryId);
-        const auto row = id ? journalEntries_.rowForId(*id) : -1;
+        const auto row = id ? outlineEntries_.rowForId(*id) : -1;
         if (!id || row < 0) {
-            error_ = tr("A selected Journal Entry is no longer available.");
+            error_ = tr("A selected Entry is no longer available.");
             emit stateChanged();
-            return journalOutcome(false);
+            return outlineOutcome(false);
         }
         ids.push_back(*id);
         firstRow = std::min(firstRow, row);
     }
     if (ids.empty()) {
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
     try {
         std::vector<hieda::notebook::JournalEntry> entries;
@@ -796,49 +799,49 @@ auto NotebookController::deleteJournalSubtrees(const QStringList& entryIds) -> Q
             const auto result = session_.deletePageSubtrees(std::move(ids));
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = pageAsJournalEntries(result.value().entries);
         } else {
             const auto result = session_.deleteJournalSubtrees(std::move(ids));
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = result.value().entries;
         }
-        journalEntries_.setEntries(std::move(entries));
+        outlineEntries_.setEntries(std::move(entries));
         auto focusRow = -1;
         auto cursor = 0;
-        if (journalEntries_.rowCount() > 0) {
-            focusRow = std::min(firstRow, journalEntries_.rowCount() - 1);
+        if (outlineEntries_.rowCount() > 0) {
+            focusRow = std::min(firstRow, outlineEntries_.rowCount() - 1);
             if (focusRow < firstRow) {
                 cursor = static_cast<int>(std::min<qsizetype>(
-                    journalEntries_.entryText(focusRow).size(), std::numeric_limits<int>::max()));
+                    outlineEntries_.entryText(focusRow).size(), std::numeric_limits<int>::max()));
             }
         }
         error_.clear();
         emit stateChanged();
         emit journalChanged();
-        return journalOutcome(true, focusRow, cursor);
+        return outlineOutcome(true, focusRow, cursor);
     } catch (const hieda::notebook::NotebookException&) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
 }
 
-auto NotebookController::undoJournalEdit(const QString& preferredEntryId, int cursorPosition)
+auto NotebookController::undoOutlineEdit(const QString& preferredEntryId, int cursorPosition)
     -> QVariantMap {
-    return applyJournalHistory(JournalHistoryDirection::undo, preferredEntryId, cursorPosition);
+    return applyOutlineHistory(OutlineHistoryDirection::undo, preferredEntryId, cursorPosition);
 }
 
-auto NotebookController::redoJournalEdit(const QString& preferredEntryId, int cursorPosition)
+auto NotebookController::redoOutlineEdit(const QString& preferredEntryId, int cursorPosition)
     -> QVariantMap {
-    return applyJournalHistory(JournalHistoryDirection::redo, preferredEntryId, cursorPosition);
+    return applyOutlineHistory(OutlineHistoryDirection::redo, preferredEntryId, cursorPosition);
 }
 
-auto NotebookController::applyJournalHistory(JournalHistoryDirection direction,
+auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
                                              const QString& preferredEntryId, int cursorPosition)
     -> QVariantMap {
     struct EntrySnapshot {
@@ -846,28 +849,28 @@ auto NotebookController::applyJournalHistory(JournalHistoryDirection direction,
         QString text;
     };
     std::vector<EntrySnapshot> oldEntries;
-    oldEntries.reserve(static_cast<std::size_t>(journalEntries_.rowCount()));
-    for (int row = 0; row < journalEntries_.rowCount(); ++row) {
-        oldEntries.push_back({journalEntries_.entryId(row), journalEntries_.entryText(row)});
+    oldEntries.reserve(static_cast<std::size_t>(outlineEntries_.rowCount()));
+    for (int row = 0; row < outlineEntries_.rowCount(); ++row) {
+        oldEntries.push_back({outlineEntries_.entryId(row), outlineEntries_.entryText(row)});
     }
     try {
         std::vector<hieda::notebook::JournalEntry> entries;
         if (currentPageId_) {
-            auto result = direction == JournalHistoryDirection::redo
+            auto result = direction == OutlineHistoryDirection::redo
                               ? session_.redoPageEdit(*currentPageId_)
                               : session_.undoPageEdit(*currentPageId_);
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = pageAsJournalEntries(result.value().entries);
         } else {
-            auto result = direction == JournalHistoryDirection::redo
+            auto result = direction == OutlineHistoryDirection::redo
                               ? session_.redoJournalEdit(domainJournalDate(journalDate_))
                               : session_.undoJournalEdit(domainJournalDate(journalDate_));
             if (!result) {
                 rejectSave(result.error());
-                return journalOutcome(false);
+                return outlineOutcome(false);
             }
             entries = result.value().entries;
         }
@@ -907,25 +910,25 @@ auto NotebookController::applyJournalHistory(JournalHistoryDirection direction,
             focusRow = std::min(static_cast<int>(entries.size()) - 1,
                                 std::max(0, static_cast<int>(oldEntries.size()) - 1));
         }
-        journalEntries_.setEntries(entries);
+        outlineEntries_.setEntries(entries);
         auto cursor = 0;
         if (focusRow >= 0) {
             const auto desiredCursor = preferredSurvived
                                            ? std::max(0, cursorPosition)
                                            : static_cast<int>(std::min<qsizetype>(
-                                                 journalEntries_.entryText(focusRow).size(),
+                                                 outlineEntries_.entryText(focusRow).size(),
                                                  std::numeric_limits<int>::max()));
             cursor = static_cast<int>(
-                std::min<qsizetype>(desiredCursor, journalEntries_.entryText(focusRow).size()));
+                std::min<qsizetype>(desiredCursor, outlineEntries_.entryText(focusRow).size()));
         }
         error_.clear();
         emit stateChanged();
         emit journalChanged();
-        return journalOutcome(true, focusRow, cursor);
+        return outlineOutcome(true, focusRow, cursor);
     } catch (const hieda::notebook::NotebookException&) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
-        return journalOutcome(false);
+        return outlineOutcome(false);
     }
 }
 
@@ -1075,28 +1078,28 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         error_ = tr("Choose a valid Journal date.");
         break;
     case NotebookErrorCode::invalidAuthoredText:
-        error_ = tr("A Journal Entry must contain one line of Unicode text.");
+        error_ = tr("A Entry must contain one line of Unicode text.");
         break;
     case NotebookErrorCode::blockNotFound:
-        error_ = tr("That Journal Entry is no longer available.");
+        error_ = tr("That Entry is no longer available.");
         break;
     case NotebookErrorCode::invalidInsertionPoint:
-        error_ = tr("The selected Journal Entry is no longer on this Page.");
+        error_ = tr("The selected Entry is no longer on this Page.");
         break;
     case NotebookErrorCode::invalidCursorPosition:
         error_ = tr("The split cursor is no longer valid.");
         break;
     case NotebookErrorCode::invalidStructuralMove:
-        error_ = tr("That Journal Entry cannot move in that direction.");
+        error_ = tr("That Entry cannot move in that direction.");
         break;
     case NotebookErrorCode::blockHasChildren:
         error_ = tr("Move or delete an Entry's children first.");
         break;
     case NotebookErrorCode::undoUnavailable:
-        error_ = tr("There is no Journal edit to undo.");
+        error_ = tr("There is no outline edit to undo.");
         break;
     case NotebookErrorCode::redoUnavailable:
-        error_ = tr("There is no Journal edit to redo.");
+        error_ = tr("There is no outline edit to redo.");
         break;
     case NotebookErrorCode::invalidPageName:
         error_ = tr("A Page name must use 1–64 lowercase letters, digits, '-' or '_'.");
@@ -1107,13 +1110,16 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
     case NotebookErrorCode::pageNameConflict:
         error_ = tr("That Page name is already in use.");
         break;
+    case NotebookErrorCode::pageNotFound:
+        error_ = tr("That Page is no longer available.");
+        break;
     }
     emit stateChanged();
 }
 
 void NotebookController::rejectSave(const hieda::notebook::NotebookError& error) {
     if (error.code == hieda::notebook::NotebookErrorCode::ioFailure) {
-        error_ = tr("Hieda could not safely save that Journal change.");
+        error_ = tr("Hieda could not safely save that outline change.");
         emit stateChanged();
         return;
     }
@@ -1131,7 +1137,7 @@ void NotebookController::loadJournalDate(const QDate& date) {
         currentPageId_.reset();
         currentPageName_.clear();
         currentPageTitle_.clear();
-        journalEntries_.setEntries(result.value().entries);
+        outlineEntries_.setEntries(result.value().entries);
         emit journalChanged();
         emit stateChanged();
     } catch (const hieda::notebook::NotebookException&) {
@@ -1150,7 +1156,7 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
         currentPageId_ = pageId;
         currentPageName_ = QString::fromUtf8(result.value().name);
         currentPageTitle_ = QString::fromUtf8(result.value().displayTitle);
-        journalEntries_.setEntries(pageAsJournalEntries(result.value().entries));
+        outlineEntries_.setEntries(pageAsJournalEntries(result.value().entries));
         error_.clear();
         emit journalChanged();
         emit stateChanged();

@@ -1477,9 +1477,11 @@ class NotebookSession::Impl {
         auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
         if (!loaded || loaded.value().type != BlockType::page) {
             mdb_txn_abort(transaction);
+            if (!loaded && loaded.error().code != NotebookErrorCode::blockNotFound) {
+                return Result<Page>::failure(loaded.error());
+            }
             return Result<Page>::failure(
-                loaded ? makeError(NotebookErrorCode::blockNotFound, path, "Block is not a Page")
-                       : loaded.error());
+                makeError(NotebookErrorCode::pageNotFound, path, "Block is not a Page"));
         }
         auto outline = loadOutline(transaction, databases.value(), std::move(loaded).value());
         mdb_txn_abort(transaction);
@@ -1616,9 +1618,10 @@ class NotebookSession::Impl {
         }
         auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
         if (!loaded || loaded.value().type != BlockType::page) {
-            return fail(
-                loaded ? makeError(NotebookErrorCode::blockNotFound, path, "Block is not a Page")
-                       : loaded.error());
+            if (!loaded && loaded.error().code != NotebookErrorCode::blockNotFound) {
+                return fail(loaded.error());
+            }
+            return fail(makeError(NotebookErrorCode::pageNotFound, path, "Block is not a Page"));
         }
         auto block = std::move(loaded).value();
         if (block.pageName != name) {
@@ -1683,7 +1686,7 @@ class NotebookSession::Impl {
         auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
         if (!loaded || loaded.value().type != BlockType::page) {
             return fail(
-                loaded ? makeError(NotebookErrorCode::blockNotFound, path, "Block is not a Page")
+                loaded ? makeError(NotebookErrorCode::pageNotFound, path, "Block is not a Page")
                        : loaded.error());
         }
         auto loadedOutline = loadOutline(transaction, databases.value(), std::move(loaded).value());
@@ -1819,7 +1822,7 @@ class NotebookSession::Impl {
         }
         auto pageBlock = readBlock(transaction, databases.value().blocks, target.metadata.id, path);
         if (!pageBlock || pageBlock.value().type != BlockType::page) {
-            return fail(pageBlock ? makeError(NotebookErrorCode::blockNotFound, path,
+            return fail(pageBlock ? makeError(NotebookErrorCode::pageNotFound, path,
                                               "Page no longer exists")
                                   : pageBlock.error());
         }
@@ -3185,45 +3188,51 @@ auto NotebookSession::updatePageEntry(BlockId entryId, std::string authoredText)
 
 auto NotebookSession::splitPageEntry(BlockId entryId, std::string authoredText,
                                      std::size_t cursorByteOffset) -> Result<Page> {
-    std::scoped_lock lock(impl_->mutex);
-    if (!impl_->info) {
-        return Result<Page>::failure(
-            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
-    }
-    if (!validAuthoredText(authoredText)) {
-        return Result<Page>::failure(makeError(NotebookErrorCode::invalidAuthoredText,
-                                               impl_->info->path, "invalid Page Entry text"));
-    }
-    auto pageId = impl_->pageIdForEntry(entryId);
-    if (!pageId) {
-        return Result<Page>::failure(pageId.error());
-    }
-    auto before = impl_->readPage(pageId.value());
-    auto outcome = impl_->pageAfterOutline(impl_->editOutline(
-        entryId, OutlineEditKind::split, cursorByteOffset, std::move(authoredText)));
-    if (before && outcome) {
-        impl_->recordPageHistory(std::move(before).value(), outcome.value());
-    }
-    return outcome;
+    return runPageCommand([&]() -> Result<Page> {
+        if (!impl_->info) {
+            return Result<Page>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validAuthoredText(authoredText)) {
+            return Result<Page>::failure(makeError(NotebookErrorCode::invalidAuthoredText,
+                                                   impl_->info->path, "invalid Page Entry text"));
+        }
+        auto pageId = impl_->pageIdForEntry(entryId);
+        if (!pageId) {
+            return Result<Page>::failure(pageId.error());
+        }
+        auto before = impl_->readPage(pageId.value());
+        auto outcome = impl_->pageAfterOutline(impl_->editOutline(
+            entryId, OutlineEditKind::split, cursorByteOffset, std::move(authoredText)));
+        if (before && outcome) {
+            impl_->recordPageHistory(std::move(before).value(), outcome.value());
+        }
+        return outcome;
+    });
 }
 
 auto NotebookSession::joinPageEntry(BlockId entryId, std::string authoredText) -> Result<Page> {
-    std::scoped_lock lock(impl_->mutex);
-    if (!impl_->info) {
-        return Result<Page>::failure(
-            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
-    }
-    auto pageId = impl_->pageIdForEntry(entryId);
-    if (!pageId) {
-        return Result<Page>::failure(pageId.error());
-    }
-    auto before = impl_->readPage(pageId.value());
-    auto outcome = impl_->pageAfterOutline(
-        impl_->editOutline(entryId, OutlineEditKind::join, 0, std::move(authoredText)));
-    if (before && outcome) {
-        impl_->recordPageHistory(std::move(before).value(), outcome.value());
-    }
-    return outcome;
+    return runPageCommand([&]() -> Result<Page> {
+        if (!impl_->info) {
+            return Result<Page>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validAuthoredText(authoredText)) {
+            return Result<Page>::failure(makeError(NotebookErrorCode::invalidAuthoredText,
+                                                   impl_->info->path, "invalid Page Entry text"));
+        }
+        auto pageId = impl_->pageIdForEntry(entryId);
+        if (!pageId) {
+            return Result<Page>::failure(pageId.error());
+        }
+        auto before = impl_->readPage(pageId.value());
+        auto outcome = impl_->pageAfterOutline(
+            impl_->editOutline(entryId, OutlineEditKind::join, 0, std::move(authoredText)));
+        if (before && outcome) {
+            impl_->recordPageHistory(std::move(before).value(), outcome.value());
+        }
+        return outcome;
+    });
 }
 
 auto NotebookSession::movePageEntry(BlockId entryId, PageEntryMove movement,
@@ -3236,93 +3245,120 @@ auto NotebookSession::movePageEntry(BlockId entryId, PageEntryMove movement,
     } else if (movement == PageEntryMove::down) {
         edit = OutlineEditKind::down;
     }
-    std::scoped_lock lock(impl_->mutex);
-    if (!impl_->info) {
-        return Result<Page>::failure(
-            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
-    }
-    auto pageId = impl_->pageIdForEntry(entryId);
-    if (!pageId) {
-        return Result<Page>::failure(pageId.error());
-    }
-    auto before = impl_->readPage(pageId.value());
-    auto outcome =
-        impl_->pageAfterOutline(impl_->editOutline(entryId, edit, 0, std::move(authoredText)));
-    if (before && outcome) {
-        impl_->recordPageHistory(std::move(before).value(), outcome.value());
-    }
-    return outcome;
+    return runPageCommand([&]() -> Result<Page> {
+        if (!impl_->info) {
+            return Result<Page>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validAuthoredText(authoredText)) {
+            return Result<Page>::failure(makeError(NotebookErrorCode::invalidAuthoredText,
+                                                   impl_->info->path, "invalid Page Entry text"));
+        }
+        auto pageId = impl_->pageIdForEntry(entryId);
+        if (!pageId) {
+            return Result<Page>::failure(pageId.error());
+        }
+        auto before = impl_->readPage(pageId.value());
+        auto outcome =
+            impl_->pageAfterOutline(impl_->editOutline(entryId, edit, 0, std::move(authoredText)));
+        if (before && outcome) {
+            impl_->recordPageHistory(std::move(before).value(), outcome.value());
+        }
+        return outcome;
+    });
 }
 
 auto NotebookSession::deletePageEntry(BlockId entryId) -> Result<Page> {
-    std::scoped_lock lock(impl_->mutex);
-    if (!impl_->info) {
-        return Result<Page>::failure(
-            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
-    }
-    auto pageId = impl_->pageIdForEntry(entryId);
-    if (!pageId) {
-        return Result<Page>::failure(pageId.error());
-    }
-    auto before = impl_->readPage(pageId.value());
-    auto outcome = impl_->pageAfterOutline(impl_->editOutline(entryId, OutlineEditKind::erase));
-    if (before && outcome) {
-        impl_->recordPageHistory(std::move(before).value(), outcome.value());
-    }
-    return outcome;
+    return runPageCommand([&]() -> Result<Page> {
+        if (!impl_->info) {
+            return Result<Page>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        auto pageId = impl_->pageIdForEntry(entryId);
+        if (!pageId) {
+            return Result<Page>::failure(pageId.error());
+        }
+        auto before = impl_->readPage(pageId.value());
+        auto outcome = impl_->pageAfterOutline(impl_->editOutline(entryId, OutlineEditKind::erase));
+        if (before && outcome) {
+            impl_->recordPageHistory(std::move(before).value(), outcome.value());
+        }
+        return outcome;
+    });
 }
 
 auto NotebookSession::deletePageSubtrees(std::vector<BlockId> entryIds) -> Result<Page> {
-    std::scoped_lock lock(impl_->mutex);
-    if (!impl_->info) {
-        return Result<Page>::failure(
-            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
-    }
-    if (entryIds.empty()) {
-        return Result<Page>::failure(makeError(NotebookErrorCode::invalidStructuralMove,
-                                               impl_->info->path, "no Page Entry selected"));
-    }
-    auto pageId = impl_->pageIdForEntry(entryIds.front());
-    if (!pageId) {
-        return Result<Page>::failure(pageId.error());
-    }
-    auto before = impl_->readPage(pageId.value());
-    auto outcome = impl_->pageAfterOutline(impl_->deleteSubtrees(entryIds));
-    if (before && outcome) {
-        impl_->recordPageHistory(std::move(before).value(), outcome.value());
-    }
-    return outcome;
+    return runPageCommand([&]() -> Result<Page> {
+        if (!impl_->info) {
+            return Result<Page>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (entryIds.empty()) {
+            return Result<Page>::failure(makeError(NotebookErrorCode::invalidStructuralMove,
+                                                   impl_->info->path, "no Page Entry selected"));
+        }
+        auto pageId = impl_->pageIdForEntry(entryIds.front());
+        if (!pageId) {
+            return Result<Page>::failure(pageId.error());
+        }
+        auto before = impl_->readPage(pageId.value());
+        auto outcome = impl_->pageAfterOutline(impl_->deleteSubtrees(entryIds));
+        if (before && outcome) {
+            impl_->recordPageHistory(std::move(before).value(), outcome.value());
+        }
+        return outcome;
+    });
 }
 
-auto NotebookSession::pageEditCapabilities(BlockId pageId) const
-    -> Result<JournalEditCapabilities> {
+auto NotebookSession::pageEditCapabilities(BlockId pageId) const -> Result<EditCapabilities> {
     std::scoped_lock lock(impl_->mutex);
     if (!impl_->info) {
-        return Result<JournalEditCapabilities>::failure(
+        return Result<EditCapabilities>::failure(
             makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    auto existing = impl_->readPage(pageId);
+    if (!existing) {
+        return Result<EditCapabilities>::failure(existing.error());
     }
     const auto& implementation = std::as_const(*impl_);
     const auto* history = implementation.pageHistory(pageId);
-    return Result<JournalEditCapabilities>::success({history != nullptr && !history->undo.empty(),
-                                                     history != nullptr && !history->redo.empty()});
+    return Result<EditCapabilities>::success({history != nullptr && !history->undo.empty(),
+                                              history != nullptr && !history->redo.empty()});
 }
 
 auto NotebookSession::undoPageEdit(BlockId pageId) -> Result<Page> {
-    std::scoped_lock lock(impl_->mutex);
-    if (!impl_->info) {
-        return Result<Page>::failure(
-            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
-    }
-    return impl_->applyPageHistory(pageId, false);
+    return runPageCommand([&]() -> Result<Page> {
+        auto existing = impl_->readPage(pageId);
+        return existing ? impl_->applyPageHistory(pageId, false)
+                        : Result<Page>::failure(existing.error());
+    });
 }
 
 auto NotebookSession::redoPageEdit(BlockId pageId) -> Result<Page> {
-    std::scoped_lock lock(impl_->mutex);
-    if (!impl_->info) {
-        return Result<Page>::failure(
-            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
-    }
-    return impl_->applyPageHistory(pageId, true);
+    return runPageCommand([&]() -> Result<Page> {
+        auto existing = impl_->readPage(pageId);
+        return existing ? impl_->applyPageHistory(pageId, true)
+                        : Result<Page>::failure(existing.error());
+    });
+}
+
+auto NotebookSession::runPageCommand(std::function<Result<Page>()> command) -> Result<Page> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<Page> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<Page>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        impl_->lastCommandCommitted = false;
+        auto outcome = command();
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
 }
 
 auto NotebookSession::journalPage(JournalDate date) const -> Result<JournalPage> {
@@ -3515,21 +3551,20 @@ auto NotebookSession::deleteJournalSubtrees(std::vector<BlockId> entryIds) -> Re
     return result;
 }
 
-auto NotebookSession::journalEditCapabilities(JournalDate date) const
-    -> Result<JournalEditCapabilities> {
+auto NotebookSession::journalEditCapabilities(JournalDate date) const -> Result<EditCapabilities> {
     std::scoped_lock lock(impl_->mutex);
     if (!impl_->info) {
-        return Result<JournalEditCapabilities>::failure(
+        return Result<EditCapabilities>::failure(
             makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
     }
     if (!validJournalDate(date)) {
-        return Result<JournalEditCapabilities>::failure(makeError(
+        return Result<EditCapabilities>::failure(makeError(
             NotebookErrorCode::invalidJournalDate, impl_->info->path, "invalid Journal date"));
     }
     const auto& implementation = std::as_const(*impl_);
     const auto* history = implementation.pageHistory(date);
-    return Result<JournalEditCapabilities>::success({history != nullptr && !history->undo.empty(),
-                                                     history != nullptr && !history->redo.empty()});
+    return Result<EditCapabilities>::success({history != nullptr && !history->undo.empty(),
+                                              history != nullptr && !history->redo.empty()});
 }
 
 auto NotebookSession::undoJournalEdit(JournalDate date) -> Result<JournalPage> {

@@ -413,6 +413,72 @@ TEST_CASE("titled Pages preserve unique names identity and contents across renam
     CHECK(session.pages().value().front().name == "renamed_project");
 }
 
+TEST_CASE("Page Entries provide complete outline commands isolated history and notifications") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "page-outline.hieda"));
+    const auto firstPage = session.createPage("first", "First").value();
+    const auto secondPage = session.createPage("second", "Second").value();
+    auto notifications = 0;
+    const auto subscription =
+        session.subscribeToChanges([&notifications]() -> void { ++notifications; });
+
+    auto outline = session.insertPageEntry(firstPage.metadata.id, std::nullopt, "parent").value();
+    const auto parentId = outline.entries.front().metadata.id;
+    outline = session.insertPageEntry(firstPage.metadata.id, parentId, "child").value();
+    const auto childId = outline.entries.back().metadata.id;
+    outline = session.insertPageEntry(firstPage.metadata.id, childId, "tail").value();
+    const auto tailId = outline.entries.back().metadata.id;
+    REQUIRE(session.updatePageEntry(childId, "child updated"));
+    outline = session.splitPageEntry(childId, "child updated", 5).value();
+    const auto splitId = outline.entries[2].metadata.id;
+    outline = session.joinPageEntry(splitId, " updated").value();
+    CHECK(outline.entries[1].authoredText == "child updated");
+    outline =
+        session.movePageEntry(childId, hieda::notebook::PageEntryMove::indent, "child updated")
+            .value();
+    CHECK(outline.entries[1].parentEntry == parentId);
+    outline =
+        session.movePageEntry(childId, hieda::notebook::PageEntryMove::outdent, "child updated")
+            .value();
+    CHECK_FALSE(outline.entries[1].parentEntry);
+    outline = session.movePageEntry(childId, hieda::notebook::PageEntryMove::down, "child updated")
+                  .value();
+    CHECK(outline.entries.back().metadata.id == childId);
+    outline =
+        session.movePageEntry(childId, hieda::notebook::PageEntryMove::up, "child updated").value();
+    CHECK(outline.entries[1].metadata.id == childId);
+    outline = session.deletePageEntry(tailId).value();
+    REQUIRE(outline.entries.size() == 2);
+    outline = session.deletePageSubtrees({parentId}).value();
+    REQUIRE(outline.entries.size() == 1);
+    CHECK(outline.entries.front().metadata.id == childId);
+    CHECK(notifications == 12);
+
+    const auto invalid =
+        session.movePageEntry(childId, hieda::notebook::PageEntryMove::up, "invalid\rtext");
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().code == hieda::notebook::NotebookErrorCode::invalidAuthoredText);
+    CHECK(notifications == 12);
+    REQUIRE(session.undoPageEdit(firstPage.metadata.id));
+    REQUIRE(session.redoPageEdit(firstPage.metadata.id));
+    CHECK(notifications == 14);
+
+    REQUIRE(session.insertPageEntry(secondPage.metadata.id, std::nullopt, "independent"));
+    CHECK(session.pageEditCapabilities(firstPage.metadata.id).value().canUndo);
+    CHECK(session.pageEditCapabilities(secondPage.metadata.id).value().canUndo);
+    REQUIRE(session.undoPageEdit(secondPage.metadata.id));
+    CHECK(session.page(firstPage.metadata.id).value().entries.size() == 1);
+
+    hieda::notebook::BlockId missingPage;
+    missingPage.bytes.front() = std::byte{1};
+    const auto missing = session.page(missingPage);
+    REQUIRE_FALSE(missing);
+    CHECK(missing.error().code == hieda::notebook::NotebookErrorCode::pageNotFound);
+    CHECK_FALSE(session.createPage("bad_title", "line\nbreak"));
+    CHECK_FALSE(session.createPage("bad_utf8", std::string("\xC3", 1)));
+}
+
 TEST_CASE("flat Journal Entries preserve identity Unicode text and insertion order") {
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath = temporaryDirectory.path() / "journal.hieda";
@@ -1034,8 +1100,7 @@ TEST_CASE("Journal edits undo and redo as coherent user actions") {
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "undo-redo.hieda"));
 
-    CHECK(session.journalEditCapabilities(date).value() ==
-          hieda::notebook::JournalEditCapabilities{});
+    CHECK(session.journalEditCapabilities(date).value() == hieda::notebook::EditCapabilities{});
     auto page = session.insertJournalEntry(date, std::nullopt, "parent").value();
     const auto parentId = page.entries.front().metadata.id;
     page = session.insertJournalEntry(date, parentId, "child").value();
@@ -1165,7 +1230,7 @@ TEST_CASE("Journal history is Page-local and clears when the Notebook closes") {
     session.close();
     REQUIRE(session.open(path));
     CHECK(session.journalEditCapabilities(firstDate).value() ==
-          hieda::notebook::JournalEditCapabilities{});
+          hieda::notebook::EditCapabilities{});
     const auto unavailable = session.undoJournalEdit(firstDate);
     REQUIRE_FALSE(unavailable);
     CHECK(unavailable.error().code == hieda::notebook::NotebookErrorCode::undoUnavailable);

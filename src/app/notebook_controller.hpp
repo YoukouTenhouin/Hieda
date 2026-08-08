@@ -12,7 +12,7 @@
 #include <QUrl>
 #include <QVariantMap>
 
-class JournalEntryModel final : public QAbstractListModel {
+class OutlineEntryModel final : public QAbstractListModel {
     Q_OBJECT
 
   public:
@@ -29,7 +29,7 @@ class JournalEntryModel final : public QAbstractListModel {
         CanDeleteRole,
     };
 
-    explicit JournalEntryModel(QObject* parent = nullptr);
+    explicit OutlineEntryModel(QObject* parent = nullptr);
     [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const -> int override;
     [[nodiscard]] auto data(const QModelIndex& index, int role) const -> QVariant override;
     [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;
@@ -54,7 +54,7 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QString notebookName READ notebookName NOTIFY stateChanged)
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
     Q_PROPERTY(QDate journalDate READ journalDate NOTIFY journalChanged)
-    Q_PROPERTY(QAbstractItemModel* journalEntries READ journalEntries CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* outlineEntries READ outlineEntries CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
     Q_PROPERTY(bool isJournalPage READ isJournalPage NOTIFY journalChanged)
@@ -71,7 +71,7 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto notebookName() const -> QString;
     [[nodiscard]] auto errorMessage() const -> QString;
     [[nodiscard]] auto journalDate() const -> QDate;
-    [[nodiscard]] auto journalEntries() -> QAbstractItemModel*;
+    [[nodiscard]] auto outlineEntries() -> QAbstractItemModel*;
     [[nodiscard]] auto canUndo() const -> bool;
     [[nodiscard]] auto canRedo() const -> bool;
     [[nodiscard]] auto isJournalPage() const -> bool;
@@ -79,7 +79,8 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto currentPageName() const -> QString;
     [[nodiscard]] auto currentPageTitle() const -> QString;
     [[nodiscard]] auto pageChoices() const -> QStringList;
-    [[nodiscard]] Q_INVOKABLE auto pageIdAt(int index) const -> QString;
+    [[nodiscard]] Q_INVOKABLE auto pageIdAt(qsizetype index) const -> QString;
+    [[nodiscard]] Q_INVOKABLE auto pageIdForChoice(const QString& choice) const -> QString;
 
     Q_INVOKABLE void createNotebook(const QUrl& url);
     Q_INVOKABLE void openNotebook(const QUrl& url);
@@ -94,34 +95,34 @@ class NotebookController final : public QObject {
     Q_INVOKABLE void navigateToPreviousJournalDate();
     Q_INVOKABLE void navigateToNextJournalDate();
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    Q_INVOKABLE auto insertJournalEntry(const QString& authoredText,
+    Q_INVOKABLE auto insertOutlineEntry(const QString& authoredText,
                                         const QString& afterEntryId = {}) -> int;
-    [[nodiscard]] Q_INVOKABLE auto journalEntryId(int row) const -> QString;
+    [[nodiscard]] Q_INVOKABLE auto outlineEntryId(int row) const -> QString;
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    Q_INVOKABLE auto updateJournalEntry(const QString& entryId, const QString& authoredText)
+    Q_INVOKABLE auto updateOutlineEntry(const QString& entryId, const QString& authoredText)
         -> bool;
-    Q_INVOKABLE auto splitJournalEntry(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE auto splitOutlineEntry(const QString& entryId, const QString& authoredText,
                                        int cursorPosition) -> QVariantMap;
-    Q_INVOKABLE auto joinJournalEntry(const QString& entryId, const QString& authoredText)
+    Q_INVOKABLE auto joinOutlineEntry(const QString& entryId, const QString& authoredText)
         -> QVariantMap;
-    Q_INVOKABLE auto indentJournalEntry(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE auto indentOutlineEntry(const QString& entryId, const QString& authoredText,
                                         int cursorPosition) -> QVariantMap;
-    Q_INVOKABLE auto outdentJournalEntry(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE auto outdentOutlineEntry(const QString& entryId, const QString& authoredText,
                                          int cursorPosition) -> QVariantMap;
-    Q_INVOKABLE auto moveJournalEntryUp(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE auto moveOutlineEntryUp(const QString& entryId, const QString& authoredText,
                                         int cursorPosition) -> QVariantMap;
-    Q_INVOKABLE auto moveJournalEntryDown(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE auto moveOutlineEntryDown(const QString& entryId, const QString& authoredText,
                                           int cursorPosition) -> QVariantMap;
-    Q_INVOKABLE auto deleteJournalEntry(const QString& entryId) -> QVariantMap;
-    [[nodiscard]] Q_INVOKABLE auto journalSelectionText(const QStringList& entryIds) const
+    Q_INVOKABLE auto deleteOutlineEntry(const QString& entryId) -> QVariantMap;
+    [[nodiscard]] Q_INVOKABLE auto outlineSelectionText(const QStringList& entryIds) const
         -> QString;
-    [[nodiscard]] Q_INVOKABLE auto journalEntrySelection(int anchorRow, int extentRow) const
+    [[nodiscard]] Q_INVOKABLE auto outlineEntrySelection(int anchorRow, int extentRow) const
         -> QVariantMap;
     Q_INVOKABLE static void copyTextToClipboard(const QString& text);
-    Q_INVOKABLE auto deleteJournalSubtrees(const QStringList& entryIds) -> QVariantMap;
-    Q_INVOKABLE auto undoJournalEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)
+    Q_INVOKABLE auto deleteOutlineSubtrees(const QStringList& entryIds) -> QVariantMap;
+    Q_INVOKABLE auto undoOutlineEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)
         -> QVariantMap;
-    Q_INVOKABLE auto redoJournalEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)
+    Q_INVOKABLE auto redoOutlineEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)
         -> QVariantMap;
     void requestJournalDateRollover(const QDate& date);
     Q_INVOKABLE void completeJournalDateRollover();
@@ -135,7 +136,7 @@ class NotebookController final : public QObject {
     auto eventFilter(QObject* watched, QEvent* event) -> bool override;
 
   private:
-    enum class JournalHistoryDirection : std::uint8_t { undo, redo };
+    enum class OutlineHistoryDirection : std::uint8_t { undo, redo };
 
     void accept(const hieda::notebook::NotebookInfo& info);
     void reject(const hieda::notebook::NotebookError& error);
@@ -143,10 +144,10 @@ class NotebookController final : public QObject {
     void loadJournalDate(const QDate& date);
     void loadPage(const hieda::notebook::BlockId& pageId);
     void refreshPages();
-    auto moveJournalEntry(const QString& entryId, const QString& authoredText,
+    auto moveOutlineEntry(const QString& entryId, const QString& authoredText,
                           hieda::notebook::JournalEntryMove movement, int cursorPosition)
         -> QVariantMap;
-    auto applyJournalHistory(JournalHistoryDirection direction, const QString& preferredEntryId,
+    auto applyOutlineHistory(OutlineHistoryDirection direction, const QString& preferredEntryId,
                              int cursorPosition) -> QVariantMap;
     void scheduleMidnightRefresh();
 
@@ -161,6 +162,6 @@ class NotebookController final : public QObject {
     QString currentPageTitle_;
     QStringList pageChoices_;
     std::vector<hieda::notebook::BlockId> pageIds_;
-    JournalEntryModel journalEntries_;
+    OutlineEntryModel outlineEntries_;
     QTimer midnightTimer_;
 };

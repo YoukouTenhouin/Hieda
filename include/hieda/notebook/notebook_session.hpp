@@ -115,11 +115,11 @@ struct Page {
     auto operator==(const Page&) const -> bool = default;
 };
 
-struct JournalEditCapabilities {
+struct EditCapabilities {
     bool canUndo{false};
     bool canRedo{false};
 
-    auto operator==(const JournalEditCapabilities&) const -> bool = default;
+    auto operator==(const EditCapabilities&) const -> bool = default;
 };
 
 enum class JournalEntryMove : std::uint8_t { indent, outdent, up, down };
@@ -148,6 +148,7 @@ enum class NotebookErrorCode : std::uint8_t {
     invalidPageName,
     invalidPageTitle,
     pageNameConflict,
+    pageNotFound,
 };
 
 struct NotebookError {
@@ -222,8 +223,7 @@ class NotebookSession {
                                      std::string authoredText) -> Result<Page>;
     [[nodiscard]] auto deletePageEntry(BlockId entryId) -> Result<Page>;
     [[nodiscard]] auto deletePageSubtrees(std::vector<BlockId> entryIds) -> Result<Page>;
-    [[nodiscard]] auto pageEditCapabilities(BlockId pageId) const
-        -> Result<JournalEditCapabilities>;
+    [[nodiscard]] auto pageEditCapabilities(BlockId pageId) const -> Result<EditCapabilities>;
     [[nodiscard]] auto undoPageEdit(BlockId pageId) -> Result<Page>;
     [[nodiscard]] auto redoPageEdit(BlockId pageId) -> Result<Page>;
     [[nodiscard]] auto insertJournalEntry(JournalDate date, std::optional<BlockId> afterEntry,
@@ -238,8 +238,7 @@ class NotebookSession {
                                         std::string authoredText) -> Result<JournalPage>;
     [[nodiscard]] auto deleteJournalEntry(BlockId entryId) -> Result<JournalPage>;
     [[nodiscard]] auto deleteJournalSubtrees(std::vector<BlockId> entryIds) -> Result<JournalPage>;
-    [[nodiscard]] auto journalEditCapabilities(JournalDate date) const
-        -> Result<JournalEditCapabilities>;
+    [[nodiscard]] auto journalEditCapabilities(JournalDate date) const -> Result<EditCapabilities>;
     [[nodiscard]] auto undoJournalEdit(JournalDate date) -> Result<JournalPage>;
     [[nodiscard]] auto redoJournalEdit(JournalDate date) -> Result<JournalPage>;
     [[nodiscard]] auto subscribeToChanges(std::function<void()> callback) -> NotebookSubscription;
@@ -249,6 +248,7 @@ class NotebookSession {
     enum class JournalHistoryDirection : std::uint8_t { undo, redo };
     auto applyJournalHistory(JournalDate date, JournalHistoryDirection direction)
         -> Result<JournalPage>;
+    auto runPageCommand(std::function<Result<Page>()> command) -> Result<Page>;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };
