@@ -7,6 +7,7 @@
 #include <QDate>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 #include <QUrl>
 #include <QVariantMap>
@@ -90,6 +91,12 @@ class NotebookController final : public QObject {
     Q_INVOKABLE auto moveJournalEntryDown(const QString& entryId, const QString& authoredText,
                                           int cursorPosition) -> QVariantMap;
     Q_INVOKABLE auto deleteJournalEntry(const QString& entryId) -> QVariantMap;
+    [[nodiscard]] Q_INVOKABLE auto journalSelectionText(const QStringList& entryIds) const
+        -> QString;
+    [[nodiscard]] Q_INVOKABLE auto journalEntrySelection(int anchorRow, int extentRow) const
+        -> QVariantMap;
+    Q_INVOKABLE void copyTextToClipboard(const QString& text) const;
+    Q_INVOKABLE auto deleteJournalSubtrees(const QStringList& entryIds) -> QVariantMap;
     Q_INVOKABLE auto undoJournalEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)
         -> QVariantMap;
     Q_INVOKABLE auto redoJournalEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)

@@ -15,7 +15,12 @@ ApplicationWindow {
     property var activeJournalEditor: null
     property bool rolloverPending: false
     property bool deferJournalFocusCommit: false
+    property var outlineSelectionIds: []
+    property var outlineSelectionRoots: []
+    property int outlineSelectionAnchorRow: -1
+    property int outlineSelectionExtentRow: -1
     readonly property bool hasPendingJournalEdit: activeJournalEditor && activeJournalEditor.hasPendingEdit
+    readonly property int outlineSelectionCount: outlineSelectionIds.length
 
     signal draftFocusRequested(string afterId)
 
@@ -47,10 +52,32 @@ ApplicationWindow {
         });
     }
 
+    function focusEntryBoundary(row, firstLine, horizontalPosition) {
+        if (row < 0 || row >= journalList.count)
+            return ;
+
+        journalList.positionViewAtIndex(row, ListView.Contain);
+        Qt.callLater(function() {
+            const item = journalList.itemAtIndex(row);
+            if (item)
+                item.focusEditorAtBoundary(firstLine, horizontalPosition);
+
+        });
+    }
+
+    function cursorOnFirstVisualLine(editor) {
+        return editor.cursorRectangle.y <= editor.topPadding + 0.5;
+    }
+
+    function cursorOnLastVisualLine(editor) {
+        return editor.cursorRectangle.y + editor.cursorRectangle.height >= editor.contentHeight - editor.bottomPadding - 0.5;
+    }
+
     function applyJournalOutcome(outcome) {
         if (!outcome.succeeded)
             return false;
 
+        clearOutlineSelection();
         draftAfterId = "";
         draftText = "";
         if (outcome.row >= 0)
@@ -61,6 +88,77 @@ ApplicationWindow {
 
     function registerJournalEditor(editor) {
         activeJournalEditor = editor;
+    }
+
+    function clearOutlineSelection() {
+        outlineSelectionIds = [];
+        outlineSelectionRoots = [];
+        outlineSelectionAnchorRow = -1;
+        outlineSelectionExtentRow = -1;
+    }
+
+    function isOutlineSelected(entryId) {
+        return outlineSelectionIds.indexOf(entryId) >= 0;
+    }
+
+    function focusBullet(row) {
+        if (row < 0 || row >= journalList.count)
+            return ;
+
+        journalList.positionViewAtIndex(row, ListView.Contain);
+        const currentItem = journalList.itemAtIndex(row);
+        if (currentItem)
+            currentItem.focusBullet();
+
+        Qt.callLater(function() {
+            const item = journalList.itemAtIndex(row);
+            if (item)
+                item.focusBullet();
+
+        });
+    }
+
+    function selectOutline(row, extendSelection) {
+        if (row < 0 || row >= journalList.count || !commitActiveJournalEditor())
+            return false;
+
+        if (!extendSelection || outlineSelectionAnchorRow < 0)
+            outlineSelectionAnchorRow = row;
+
+        outlineSelectionExtentRow = row;
+        const selection = notebookController.journalEntrySelection(outlineSelectionAnchorRow, row);
+        outlineSelectionRoots = selection.roots;
+        outlineSelectionIds = selection.entries;
+        focusBullet(row);
+        return true;
+    }
+
+    function copyOutlineSelection() {
+        if (outlineSelectionRoots.length === 0)
+            return false;
+
+        const text = notebookController.journalSelectionText(outlineSelectionRoots);
+        if (text.length === 0)
+            return false;
+
+        notebookController.copyTextToClipboard(text);
+        return true;
+    }
+
+    function cutOutlineSelection() {
+        if (!copyOutlineSelection())
+            return ;
+
+        const roots = outlineSelectionRoots;
+        const outcome = notebookController.deleteJournalSubtrees(roots);
+        if (!outcome.succeeded)
+            return ;
+
+        clearOutlineSelection();
+        if (outcome.row >= 0)
+            focusEntry(outcome.row, outcome.cursorPosition);
+        else
+            beginTrailingDraft();
     }
 
     function commitActiveJournalEditor() {
@@ -218,6 +316,67 @@ ApplicationWindow {
         onTriggered: window.applyHistory(redoAction)
     }
 
+    Action {
+        id: cutAction
+
+        objectName: "cutAction"
+        text: qsTr("Cu&t")
+        icon.name: "edit-cut"
+        shortcut: StandardKey.Cut
+        enabled: window.outlineSelectionCount > 0 || (window.activeJournalEditor && window.activeJournalEditor.activeFocus && window.activeJournalEditor.selectedText.length > 0)
+        onTriggered: {
+            if (window.outlineSelectionCount > 0)
+                window.cutOutlineSelection();
+            else if (window.activeJournalEditor)
+                window.activeJournalEditor.cut();
+        }
+    }
+
+    Action {
+        id: copyAction
+
+        objectName: "copyAction"
+        text: qsTr("&Copy")
+        icon.name: "edit-copy"
+        shortcut: StandardKey.Copy
+        enabled: window.outlineSelectionCount > 0 || (window.activeJournalEditor && window.activeJournalEditor.activeFocus && window.activeJournalEditor.selectedText.length > 0)
+        onTriggered: {
+            if (window.outlineSelectionCount > 0)
+                window.copyOutlineSelection();
+            else if (window.activeJournalEditor)
+                window.activeJournalEditor.copy();
+        }
+    }
+
+    Action {
+        id: pasteAction
+
+        objectName: "pasteAction"
+        text: qsTr("&Paste")
+        icon.name: "edit-paste"
+        shortcut: StandardKey.Paste
+        enabled: window.activeJournalEditor && window.activeJournalEditor.activeFocus && window.activeJournalEditor.canPaste
+        onTriggered: window.activeJournalEditor.paste()
+    }
+
+    Action {
+        id: selectAllAction
+
+        objectName: "selectAllAction"
+        text: qsTr("Select &All")
+        shortcut: StandardKey.SelectAll
+        enabled: notebookController.hasOpenNotebook && (journalList.count > 0 || window.activeJournalEditor)
+        onTriggered: {
+            if (window.activeJournalEditor && window.activeJournalEditor.activeFocus) {
+                window.clearOutlineSelection();
+                window.activeJournalEditor.selectAll();
+            } else if (journalList.count > 0) {
+                window.outlineSelectionAnchorRow = 0;
+                window.selectOutline(journalList.count - 1, true);
+            }
+        }
+    }
+
     FileDialog {
         id: createDialog
 
@@ -333,6 +492,8 @@ ApplicationWindow {
                     currentIndex: -1
                     boundsBehavior: Flickable.StopAtBounds
                     spacing: Math.round(window.uiSpacing * 0.35)
+                    Accessible.role: Accessible.List
+                    Accessible.name: qsTr("Journal Entries")
 
                     ScrollBar.vertical: ScrollBar {
                     }
@@ -369,13 +530,26 @@ ApplicationWindow {
                         required property bool canMoveDown
                         required property bool canDelete
                         required property int index
+                        readonly property bool outlineSelected: window.isOutlineSelected(entryId)
                         readonly property real outlineIndent: depth * window.uiSpacing * 3
                         readonly property var contextMenu: entryMenu
                         readonly property real editorHeight: Math.max(entryEditor.contentHeight, entryEditor.font.pixelSize * 1.45) + (window.uiSpacing * 0.7)
 
                         function focusEditor(cursorPosition) {
+                            window.clearOutlineSelection();
                             entryEditor.forceActiveFocus();
                             entryEditor.cursorPosition = Math.min(cursorPosition === undefined ? entryEditor.length : cursorPosition, entryEditor.length);
+                        }
+
+                        function focusEditorAtBoundary(firstLine, horizontalPosition) {
+                            window.clearOutlineSelection();
+                            entryEditor.forceActiveFocus();
+                            const verticalPosition = firstLine ? entryEditor.topPadding : Math.max(entryEditor.topPadding, entryEditor.contentHeight - entryEditor.bottomPadding);
+                            entryEditor.cursorPosition = entryEditor.positionAt(horizontalPosition, verticalPosition);
+                        }
+
+                        function focusBullet() {
+                            entryBullet.forceActiveFocus();
                         }
 
                         function openContextMenu() {
@@ -422,8 +596,8 @@ ApplicationWindow {
                             x: entryRoot.outlineIndent
                             width: parent.width - x
                             height: entryRoot.editorHeight
-                            color: palette.alternateBase
-                            opacity: entryHover.hovered || entryEditor.activeFocus ? 0.35 : 0
+                            color: entryRoot.outlineSelected ? palette.highlight : palette.alternateBase
+                            opacity: entryRoot.outlineSelected ? 0.45 : (entryHover.hovered || entryEditor.activeFocus ? 0.35 : 0)
                         }
 
                         HoverHandler {
@@ -436,22 +610,60 @@ ApplicationWindow {
                             height: entryRoot.editorHeight
                             spacing: window.uiSpacing
 
-                            Label {
+                            FocusScope {
+                                id: entryBullet
+
                                 objectName: "journalEntryBullet-" + entryRoot.index
                                 Layout.alignment: Qt.AlignTop
-                                Layout.preferredWidth: Math.round(font.pixelSize * 1.25)
-                                horizontalAlignment: Text.AlignHCenter
-                                text: "\u2022"
-                                color: palette.text
+                                Layout.preferredWidth: Math.round(bulletLabel.font.pixelSize * 1.25)
+                                Layout.preferredHeight: bulletLabel.implicitHeight
+                                activeFocusOnTab: true
+                                focus: entryRoot.outlineSelected && entryRoot.index === window.outlineSelectionExtentRow
+                                Accessible.role: Accessible.ListItem
+                                Accessible.name: qsTr("Select Journal Entry %1").arg(entryRoot.index + 1)
+                                Accessible.description: qsTr("Outline level %1%2").arg(entryRoot.depth + 1).arg(entryRoot.hasChildren ? qsTr(", contains child entries") : "")
+                                Accessible.selectable: true
+                                Accessible.selected: entryRoot.outlineSelected
+                                Accessible.focusable: true
+                                Accessible.focused: activeFocus
+                                Accessible.onPressAction: window.selectOutline(entryRoot.index, false)
 
-                                TapHandler {
-                                    acceptedButtons: Qt.LeftButton
-                                    onTapped: entryRoot.focusEditor(entryEditor.cursorPosition)
+                                Label {
+                                    id: bulletLabel
+
+                                    anchors.fill: parent
+                                    horizontalAlignment: Text.AlignHCenter
+                                    text: "\u2022"
+                                    color: palette.text
+                                    Accessible.ignored: true
                                 }
 
-                                TapHandler {
-                                    acceptedButtons: Qt.RightButton
-                                    onTapped: entryRoot.openContextMenu()
+                                Keys.onPressed: function(event) {
+                                    if ((event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Up) {
+                                        event.accepted = true;
+                                        window.selectOutline(Math.max(0, entryRoot.index - 1), true);
+                                    } else if ((event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Down) {
+                                        event.accepted = true;
+                                        window.selectOutline(Math.min(journalList.count - 1, entryRoot.index + 1), true);
+                                    } else if (event.key === Qt.Key_Escape) {
+                                        event.accepted = true;
+                                        window.clearOutlineSelection();
+                                        journalList.forceActiveFocus();
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    onClicked: function(mouse) {
+                                        if (mouse.button === Qt.RightButton) {
+                                            if (!entryRoot.outlineSelected)
+                                                window.selectOutline(entryRoot.index, false);
+                                            entryRoot.openContextMenu();
+                                        } else {
+                                            window.selectOutline(entryRoot.index, (mouse.modifiers & Qt.ShiftModifier) !== 0);
+                                        }
+                                    }
                                 }
 
                             }
@@ -476,9 +688,20 @@ ApplicationWindow {
                                 }
 
                                 MenuItem {
+                                    action: cutAction
+                                }
+
+                                MenuItem {
+                                    action: copyAction
+                                }
+
+                                MenuSeparator {
+                                }
+
+                                MenuItem {
                                     objectName: "journalIndentMenuItem-" + entryRoot.index
                                     text: qsTr("Indent")
-                                    enabled: entryRoot.canIndent
+                                    enabled: entryRoot.canIndent && window.outlineSelectionRoots.length <= 1
                                     onTriggered: {
                                         if (!entryRoot.beginMenuStructureEdit())
                                             return ;
@@ -490,7 +713,7 @@ ApplicationWindow {
 
                                 MenuItem {
                                     text: qsTr("Outdent")
-                                    enabled: entryRoot.canOutdent
+                                    enabled: entryRoot.canOutdent && window.outlineSelectionRoots.length <= 1
                                     onTriggered: {
                                         if (!entryRoot.beginMenuStructureEdit())
                                             return ;
@@ -502,7 +725,7 @@ ApplicationWindow {
 
                                 MenuItem {
                                     text: qsTr("Move Up")
-                                    enabled: entryRoot.canMoveUp
+                                    enabled: entryRoot.canMoveUp && window.outlineSelectionRoots.length <= 1
                                     onTriggered: {
                                         if (!entryRoot.beginMenuStructureEdit())
                                             return ;
@@ -514,7 +737,7 @@ ApplicationWindow {
 
                                 MenuItem {
                                     text: qsTr("Move Down")
-                                    enabled: entryRoot.canMoveDown
+                                    enabled: entryRoot.canMoveDown && window.outlineSelectionRoots.length <= 1
                                     onTriggered: {
                                         if (!entryRoot.beginMenuStructureEdit())
                                             return ;
@@ -570,6 +793,8 @@ ApplicationWindow {
                                 topPadding: 0
                                 bottomPadding: 0
                                 Accessible.name: qsTr("Journal Entry %1").arg(entryRoot.index + 1)
+                                Accessible.description: qsTr("Outline level %1").arg(entryRoot.depth + 1)
+                                Accessible.multiLine: true
                                 onTextChanged: {
                                     if (activeFocus && text !== entryRoot.authoredText && !inputMethodComposing)
                                         typingCommitTimer.restart();
@@ -580,6 +805,7 @@ ApplicationWindow {
                                 }
                                 onActiveFocusChanged: {
                                     if (activeFocus) {
+                                        window.clearOutlineSelection();
                                         window.registerJournalEditor(entryEditor);
                                     } else if (window.activeJournalEditor === entryEditor) {
                                         if (window.deferJournalFocusCommit)
@@ -600,7 +826,7 @@ ApplicationWindow {
                                         event.accepted = true;
                                     } else if (inputMethodComposing) {
                                         return ;
-                                    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) {
                                         event.accepted = true;
                                         window.activeJournalEditor = null;
                                         if (!window.applyJournalOutcome(notebookController.splitJournalEntry(entryRoot.entryId, text, cursorPosition)))
@@ -634,15 +860,15 @@ ApplicationWindow {
                                         event.accepted = true;
                                         text = entryRoot.authoredText;
                                         journalList.forceActiveFocus();
-                                    } else if (event.key === Qt.Key_Up) {
+                                    } else if (event.key === Qt.Key_Up && event.modifiers === Qt.NoModifier && window.cursorOnFirstVisualLine(entryEditor)) {
                                         event.accepted = true;
                                         if (entryRoot.index > 0)
-                                            window.focusEntry(entryRoot.index - 1, cursorPosition);
+                                            window.focusEntryBoundary(entryRoot.index - 1, false, entryEditor.cursorRectangle.x);
 
-                                    } else if (event.key === Qt.Key_Down) {
+                                    } else if (event.key === Qt.Key_Down && event.modifiers === Qt.NoModifier && window.cursorOnLastVisualLine(entryEditor)) {
                                         event.accepted = true;
                                         if (entryRoot.index + 1 < journalList.count)
-                                            window.focusEntry(entryRoot.index + 1, cursorPosition);
+                                            window.focusEntryBoundary(entryRoot.index + 1, true, entryEditor.cursorRectangle.x);
                                         else
                                             window.beginDraft(entryRoot.entryId);
                                     }
@@ -863,6 +1089,7 @@ ApplicationWindow {
                 topPadding: 0
                 bottomPadding: 0
                 Accessible.name: qsTr("New Journal Entry")
+                Accessible.multiLine: true
                 onTextChanged: {
                     if (draftRoot.activeDraft)
                         window.draftText = text;
@@ -870,6 +1097,7 @@ ApplicationWindow {
                 }
                 onActiveFocusChanged: {
                     if (activeFocus) {
+                        window.clearOutlineSelection();
                         window.registerJournalEditor(draftEditor);
                     } else if (window.activeJournalEditor === draftEditor) {
                         if (draftEditor.inputMethodComposing) {
@@ -887,7 +1115,7 @@ ApplicationWindow {
                         event.accepted = true;
                     } else if (inputMethodComposing) {
                         return ;
-                    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) {
                         event.accepted = true;
                         if (window.rolloverPending) {
                             if (draftRoot.commit(false)) {
@@ -902,13 +1130,13 @@ ApplicationWindow {
                         window.draftText = "";
                         window.draftAfterId = "";
                         journalList.forceActiveFocus();
-                    } else if (event.key === Qt.Key_Up) {
+                    } else if (event.key === Qt.Key_Up && event.modifiers === Qt.NoModifier && window.cursorOnFirstVisualLine(draftEditor)) {
                         event.accepted = true;
                         const cursor = cursorPosition;
                         if (draftRoot.commit(false))
                             window.focusEntry(draftRoot.anchorRow, cursor);
 
-                    } else if (event.key === Qt.Key_Down) {
+                    } else if (event.key === Qt.Key_Down && event.modifiers === Qt.NoModifier && window.cursorOnLastVisualLine(draftEditor)) {
                         event.accepted = true;
                         const cursor = cursorPosition;
                         const hadText = text.length > 0;
@@ -957,6 +1185,25 @@ ApplicationWindow {
 
         Menu {
             title: qsTr("&Edit")
+
+            MenuItem {
+                action: cutAction
+            }
+
+            MenuItem {
+                action: copyAction
+            }
+
+            MenuItem {
+                action: pasteAction
+            }
+
+            MenuItem {
+                action: selectAllAction
+            }
+
+            MenuSeparator {
+            }
 
             MenuItem {
                 action: undoAction

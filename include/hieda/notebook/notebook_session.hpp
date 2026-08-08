@@ -188,6 +188,7 @@ class NotebookSession {
     [[nodiscard]] auto moveJournalEntry(BlockId entryId, JournalEntryMove movement,
                                         std::string authoredText) -> Result<JournalPage>;
     [[nodiscard]] auto deleteJournalEntry(BlockId entryId) -> Result<JournalPage>;
+    [[nodiscard]] auto deleteJournalSubtrees(std::vector<BlockId> entryIds) -> Result<JournalPage>;
     [[nodiscard]] auto journalEditCapabilities(JournalDate date) const
         -> Result<JournalEditCapabilities>;
     [[nodiscard]] auto undoJournalEdit(JournalDate date) -> Result<JournalPage>;

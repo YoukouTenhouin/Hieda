@@ -58,9 +58,17 @@ an existing Entry at the cursor; Backspace at the start joins a leaf into the pr
 Entry. Tab and Shift+Tab indent and outdent complete subtrees. Control+Shift+Up/Down on Windows and
 Linux, or Command+Shift+Up/Down on macOS, reorder sibling subtrees. Right-click a bullet for the
 same structural actions and leaf deletion. Entries with children cannot be joined or deleted.
-Escape cancels a text edit, and ordinary Up/Down moves between visible bullets. Long text wraps
-visually, but Journal text remains exact single-line Unicode. A failed edit restores the last
-durably committed state, while a failed new Entry keeps its draft available for retry or copying.
+Escape cancels a text edit. Long text wraps visually. Shift+Enter inserts an LF line break in the
+current Entry; plain Enter still splits the Entry, and multiline clipboard text pastes into one
+Entry. Up/Down moves within multiline or
+wrapped text and crosses to the adjacent visible bullet only from the first or last visual line.
+Journal text remains exact Unicode, and a failed edit restores the last durably committed state,
+while a failed new Entry keeps its draft available for retry or copying.
+
+Click a persisted bullet to select its complete subtree. Shift-click or Shift+Up/Down extends that
+selection across complete subtrees. Copy produces a human-readable indented bullet list; Cut
+removes the selected subtrees as one undoable action. Pasting copied outline text into an editor
+creates literal multiline text rather than reconstructing the outline.
 
 Hieda durably saves an existing Entry after one second without typing and immediately before a
 focus or structural change. Each such typing group and each structural command is one undoable

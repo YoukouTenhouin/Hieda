@@ -146,7 +146,7 @@ TEST_CASE("the Qt adapter restores durable text after a rejected edit") {
     auto* model = controller.journalEntries();
     const auto id = model->data(model->index(0, 0), JournalEntryModel::EntryIdRole).toString();
 
-    CHECK_FALSE(controller.updateJournalEntry(id, QStringLiteral("two\nlines")));
+    CHECK_FALSE(controller.updateJournalEntry(id, QStringLiteral("carriage\rreturn")));
     CHECK(model->data(model->index(0, 0), JournalEntryModel::AuthoredTextRole).toString() ==
           QStringLiteral("durable"));
     CHECK_FALSE(controller.errorMessage().isEmpty());
@@ -222,6 +222,70 @@ TEST_CASE("the Qt adapter exposes and edits nested Journal structure") {
     const auto deleted = controller.deleteJournalEntry(childId);
     REQUIRE(deleted.value(QStringLiteral("succeeded")).toBool());
     CHECK(model->rowCount() == 2);
+}
+
+TEST_CASE("the Qt adapter preserves multiline cursor positions and formats selected subtrees") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "selection-adapter.hieda"));
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("parent\ncontinuation")) == 0);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("child \U0001F3B4")) == 1);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("tail")) == 2);
+    const auto parentId = controller.journalEntryId(0);
+    const auto childId = controller.journalEntryId(1);
+    const auto tailId = controller.journalEntryId(2);
+    REQUIRE(controller.indentJournalEntry(childId, QStringLiteral("child \U0001F3B4"), 8)
+                .value(QStringLiteral("succeeded"))
+                .toBool());
+
+    const auto parentSelection = controller.journalEntrySelection(0, 0);
+    CHECK(parentSelection.value(QStringLiteral("roots")).toStringList() == QStringList{parentId});
+    CHECK(parentSelection.value(QStringLiteral("entries")).toStringList() ==
+          QStringList{parentId, childId});
+    const auto extendedSelection = controller.journalEntrySelection(0, 2);
+    CHECK(extendedSelection.value(QStringLiteral("roots")).toStringList() ==
+          QStringList{parentId, tailId});
+    CHECK(extendedSelection.value(QStringLiteral("entries")).toStringList() ==
+          QStringList{parentId, childId, tailId});
+
+    CHECK(controller.journalSelectionText({parentId, childId, tailId}) ==
+          QStringLiteral("\u2022 parent\n  continuation\n  \u2022 child \U0001F3B4\n\u2022 tail"));
+
+    const auto split =
+        controller.splitJournalEntry(parentId, QStringLiteral("parent\ncontinuation"), 7);
+    REQUIRE(split.value(QStringLiteral("succeeded")).toBool());
+    CHECK(controller.journalEntries()
+              ->data(controller.journalEntries()->index(0, 0), JournalEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("parent\n"));
+    CHECK(controller.journalEntries()
+              ->data(controller.journalEntries()->index(2, 0), JournalEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("continuation"));
+}
+
+TEST_CASE("the Qt adapter cuts selected Journal subtrees and returns predictable focus") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "cut-adapter.hieda"));
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("parent")) == 0);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("child")) == 1);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("tail")) == 2);
+    const auto parentId = controller.journalEntryId(0);
+    const auto childId = controller.journalEntryId(1);
+    REQUIRE(controller.indentJournalEntry(childId, QStringLiteral("child"), 5)
+                .value(QStringLiteral("succeeded"))
+                .toBool());
+
+    const auto cut = controller.deleteJournalSubtrees({parentId, childId});
+
+    REQUIRE(cut.value(QStringLiteral("succeeded")).toBool());
+    CHECK(cut.value(QStringLiteral("row")).toInt() == 0);
+    CHECK(cut.value(QStringLiteral("cursorPosition")).toInt() == 0);
+    REQUIRE(controller.journalEntries()->rowCount() == 1);
+    CHECK(controller.journalEntries()
+              ->data(controller.journalEntries()->index(0, 0), JournalEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("tail"));
+    REQUIRE(controller.undoJournalEdit().value(QStringLiteral("succeeded")).toBool());
+    CHECK(controller.journalEntries()->rowCount() == 3);
 }
 
 TEST_CASE("the Qt adapter exposes and applies Journal undo and redo") {

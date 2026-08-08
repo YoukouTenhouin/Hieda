@@ -402,7 +402,7 @@ TEST_CASE("flat Journal Entries preserve identity Unicode text and insertion ord
     CHECK(reopened.value() == expected);
 }
 
-TEST_CASE("editing a Journal Entry acknowledges only valid exact text") {
+TEST_CASE("editing a Journal Entry acknowledges exact multiline Unicode text") {
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath = temporaryDirectory.path() / "edit.hieda";
     const hieda::notebook::JournalDate date{2026, 8, 7};
@@ -420,13 +420,22 @@ TEST_CASE("editing a Journal Entry acknowledges only valid exact text") {
     CHECK(updated.value().metadata.id == entry.metadata.id);
     CHECK(updated.value().metadata.createdAt == entry.metadata.createdAt);
 
-    const auto rejected = session.updateJournalEntry(entry.metadata.id, "two\nlines");
+    const std::string multiline = "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E\nsecond line";
+    const auto multilineUpdate = session.updateJournalEntry(entry.metadata.id, multiline);
+    REQUIRE(multilineUpdate);
+    CHECK(multilineUpdate.value().authoredText == multiline);
+
+    const auto rejected = session.updateJournalEntry(entry.metadata.id, "carriage\rreturn");
     REQUIRE_FALSE(rejected);
     CHECK(rejected.error().code == hieda::notebook::NotebookErrorCode::invalidAuthoredText);
     const auto page = session.journalPage(date);
     REQUIRE(page);
-    CHECK(page.value().entries.front().authoredText == "  after  ");
+    CHECK(page.value().entries.front().authoredText == multiline);
     CHECK(page.value().metadata == pageMetadata);
+
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    CHECK(session.journalPage(date).value().entries.front().authoredText == multiline);
 }
 
 TEST_CASE("Journal commands report closed sessions and invalid insertion points") {
@@ -710,6 +719,74 @@ TEST_CASE("invalid and failed structural edits leave the acknowledged outline in
     CHECK(session.journalPage(date).value() == acknowledged);
 }
 
+TEST_CASE("multiline Journal Entries split exactly at Unicode cursor boundaries") {
+    TemporaryDirectory temporaryDirectory;
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "multiline-split.hieda"));
+    const std::string text = "first line\nA \xF0\x9F\x8E\xB4 second line";
+    const auto inserted = session.insertJournalEntry(date, std::nullopt, text);
+    REQUIRE(inserted);
+    const auto entryId = inserted.value().entries.front().metadata.id;
+    const auto splitOffset = text.find(" second");
+
+    const auto split = session.splitJournalEntry(entryId, text, splitOffset);
+
+    REQUIRE(split);
+    REQUIRE(split.value().entries.size() == 2);
+    CHECK(split.value().entries[0].authoredText == "first line\nA \xF0\x9F\x8E\xB4");
+    CHECK(split.value().entries[1].authoredText == " second line");
+}
+
+TEST_CASE("selected Journal subtrees are cut as one durable undoable action") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "cut-subtrees.hieda";
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    REQUIRE(session.insertJournalEntry(date, std::nullopt, "parent"));
+    auto page = session.insertJournalEntry(date, std::nullopt, "child");
+    REQUIRE(page);
+    page = session.insertJournalEntry(date, std::nullopt, "tail");
+    REQUIRE(page);
+    const auto parentId = page.value().entries[0].metadata.id;
+    const auto childId = page.value().entries[1].metadata.id;
+    const auto tailId = page.value().entries[2].metadata.id;
+    REQUIRE(session.moveJournalEntry(childId, hieda::notebook::JournalEntryMove::indent, "child"));
+    const auto before = session.journalPage(date).value();
+
+    const auto cut = session.deleteJournalSubtrees({parentId, childId});
+
+    REQUIRE(cut);
+    REQUIRE(cut.value().entries.size() == 1);
+    CHECK(cut.value().entries.front().metadata.id == tailId);
+    CHECK(session.undoJournalEdit(date).value() == before);
+    CHECK(session.redoJournalEdit(date).value() == cut.value());
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    CHECK(session.journalPage(date).value() == cut.value());
+}
+
+TEST_CASE("failed Journal subtree deletion preserves content revision and history") {
+    TemporaryDirectory temporaryDirectory;
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "failed-cut-subtrees.hieda"));
+    const auto page = session.insertJournalEntry(date, std::nullopt, "kept").value();
+    const auto entryId = page.entries.front().metadata.id;
+    const auto revision = session.current().value().revision;
+    hieda::notebook::NotebookSessionTestAccess::rejectNextJournalCommit(session);
+
+    const auto failed = session.deleteJournalSubtrees({entryId});
+
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
+    CHECK(session.current().value().revision == revision);
+    CHECK(session.journalPage(date).value() == page);
+    CHECK(session.journalEditCapabilities(date).value().canUndo);
+    CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
+}
+
 TEST_CASE("Journal structural commands match a reference outline model") {
     struct ReferenceEntry {
         hieda::notebook::BlockId id;
@@ -945,7 +1022,7 @@ TEST_CASE("undo restores deleted identity and redo branches clear only after com
     CHECK(page.entries.front() == entry);
     CHECK(session.journalEditCapabilities(date).value().canRedo);
 
-    const auto rejected = session.updateJournalEntry(entry.metadata.id, "two\nlines");
+    const auto rejected = session.updateJournalEntry(entry.metadata.id, "carriage\rreturn");
     REQUIRE_FALSE(rejected);
     CHECK(session.journalEditCapabilities(date).value().canRedo);
     REQUIRE(session.updateJournalEntry(entry.metadata.id, entry.authoredText));

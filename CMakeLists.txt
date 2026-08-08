@@ -69,7 +69,7 @@ add_library(hieda_qt_adapter
     src/app/notebook_controller.hpp
 )
 target_include_directories(hieda_qt_adapter PUBLIC src/app)
-target_link_libraries(hieda_qt_adapter PUBLIC Hieda::Notebook Qt6::Core)
+target_link_libraries(hieda_qt_adapter PUBLIC Hieda::Notebook Qt6::Core PRIVATE Qt6::Gui)
 
 qt_add_executable(hieda src/app/main.cpp)
 if(WIN32)

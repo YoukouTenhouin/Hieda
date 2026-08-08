@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "notebook_controller.hpp"
 
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 
 #include <algorithm>
 #include <limits>
@@ -547,6 +549,144 @@ auto NotebookController::deleteJournalEntry(const QString& entryId) -> QVariantM
                 ? static_cast<int>(std::min<qsizetype>(journalEntries_.entryText(focusRow).size(),
                                                        std::numeric_limits<int>::max()))
                 : 0;
+        error_.clear();
+        emit stateChanged();
+        emit journalChanged();
+        return journalOutcome(true, focusRow, cursor);
+    } catch (const hieda::notebook::NotebookException&) {
+        error_ = tr("Hieda encountered an unexpected Notebook error.");
+        emit stateChanged();
+        return journalOutcome(false);
+    }
+}
+
+auto NotebookController::journalSelectionText(const QStringList& entryIds) const -> QString {
+    if (entryIds.empty()) {
+        return {};
+    }
+    std::vector<bool> selected(static_cast<std::size_t>(journalEntries_.rowCount()), false);
+    auto minimumDepth = std::numeric_limits<int>::max();
+    for (const auto& entryId : entryIds) {
+        const auto id = blockId(entryId);
+        const auto row = id ? journalEntries_.rowForId(*id) : -1;
+        if (row < 0) {
+            return {};
+        }
+        const auto depth =
+            journalEntries_.data(journalEntries_.index(row), JournalEntryModel::DepthRole).toInt();
+        minimumDepth = std::min(minimumDepth, depth);
+        selected[static_cast<std::size_t>(row)] = true;
+        for (auto candidate = row + 1; candidate < journalEntries_.rowCount(); ++candidate) {
+            const auto candidateDepth =
+                journalEntries_.data(journalEntries_.index(candidate), JournalEntryModel::DepthRole)
+                    .toInt();
+            if (candidateDepth <= depth) {
+                break;
+            }
+            selected[static_cast<std::size_t>(candidate)] = true;
+        }
+    }
+
+    QStringList output;
+    for (auto row = 0; row < journalEntries_.rowCount(); ++row) {
+        if (!selected[static_cast<std::size_t>(row)]) {
+            continue;
+        }
+        const auto depth =
+            journalEntries_.data(journalEntries_.index(row), JournalEntryModel::DepthRole).toInt();
+        const auto indentation = QString((depth - minimumDepth) * 2, QLatin1Char(' '));
+        const auto continuationIndent = indentation + QStringLiteral("  ");
+        const auto lines =
+            journalEntries_.entryText(row).split(QLatin1Char('\n'), Qt::KeepEmptyParts);
+        output.push_back(indentation + QStringLiteral("\u2022 ") + lines.front());
+        for (qsizetype line = 1; line < lines.size(); ++line) {
+            output.push_back(continuationIndent + lines[line]);
+        }
+    }
+    return output.join(QLatin1Char('\n'));
+}
+
+auto NotebookController::journalEntrySelection(int anchorRow, int extentRow) const -> QVariantMap {
+    if (anchorRow < 0 || extentRow < 0 || anchorRow >= journalEntries_.rowCount() ||
+        extentRow >= journalEntries_.rowCount()) {
+        return {{QStringLiteral("roots"), QStringList{}},
+                {QStringLiteral("entries"), QStringList{}}};
+    }
+    const auto subtreeEnd = [&](int row) -> int {
+        const auto depth =
+            journalEntries_.data(journalEntries_.index(row), JournalEntryModel::DepthRole).toInt();
+        auto end = row + 1;
+        while (
+            end < journalEntries_.rowCount() &&
+            journalEntries_.data(journalEntries_.index(end), JournalEntryModel::DepthRole).toInt() >
+                depth) {
+            ++end;
+        }
+        return end;
+    };
+    const auto first = std::min(anchorRow, extentRow);
+    auto end = std::max(subtreeEnd(anchorRow), subtreeEnd(extentRow));
+    for (auto row = first; row < end; ++row) {
+        end = std::max(end, subtreeEnd(row));
+    }
+
+    QStringList entries;
+    entries.reserve(end - first);
+    for (auto row = first; row < end; ++row) {
+        entries.push_back(journalEntries_.entryId(row));
+    }
+    QStringList roots;
+    for (auto row = first; row < end; ++row) {
+        const auto parent =
+            journalEntries_.data(journalEntries_.index(row), JournalEntryModel::ParentEntryIdRole)
+                .toString();
+        if (parent.isEmpty() || !entries.contains(parent)) {
+            roots.push_back(journalEntries_.entryId(row));
+        }
+    }
+    return {{QStringLiteral("roots"), roots}, {QStringLiteral("entries"), entries}};
+}
+
+void NotebookController::copyTextToClipboard(const QString& text) const {
+    if (auto* clipboard = QGuiApplication::clipboard(); clipboard != nullptr) {
+        clipboard->setText(text);
+    }
+}
+
+auto NotebookController::deleteJournalSubtrees(const QStringList& entryIds) -> QVariantMap {
+    std::vector<hieda::notebook::BlockId> ids;
+    ids.reserve(static_cast<std::size_t>(entryIds.size()));
+    auto firstRow = journalEntries_.rowCount();
+    for (const auto& entryId : entryIds) {
+        const auto id = blockId(entryId);
+        const auto row = id ? journalEntries_.rowForId(*id) : -1;
+        if (!id || row < 0) {
+            error_ = tr("A selected Journal Entry is no longer available.");
+            emit stateChanged();
+            return journalOutcome(false);
+        }
+        ids.push_back(*id);
+        firstRow = std::min(firstRow, row);
+    }
+    if (ids.empty()) {
+        return journalOutcome(false);
+    }
+    try {
+        const auto result = session_.deleteJournalSubtrees(std::move(ids));
+        if (!result) {
+            rejectSave(result.error());
+            return journalOutcome(false);
+        }
+        journalEntries_.setEntries(result.value().entries);
+        auto focusRow = -1;
+        auto cursor = 0;
+        if (journalEntries_.rowCount() > 0) {
+            focusRow = std::min(firstRow, journalEntries_.rowCount() - 1);
+            if (focusRow < firstRow) {
+                cursor = static_cast<int>(std::min<qsizetype>(
+                    journalEntries_.entryText(focusRow).size(), std::numeric_limits<int>::max()));
+            }
+        }
         error_.clear();
         emit stateChanged();
         emit journalChanged();

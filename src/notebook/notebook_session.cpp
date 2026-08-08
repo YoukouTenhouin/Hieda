@@ -372,7 +372,7 @@ auto validAuthoredText(std::string_view text) -> bool {
     if (text.size() > std::numeric_limits<std::uint32_t>::max()) {
         return false;
     }
-    if (text.find('\n') != std::string_view::npos || text.find('\r') != std::string_view::npos) {
+    if (text.find('\r') != std::string_view::npos) {
         return false;
     }
     std::size_t index = 0;
@@ -2212,6 +2212,135 @@ class NotebookSession::Impl {
                                              outline.page.metadata, std::move(outline.entries)});
     }
 
+    auto deleteSubtrees(const std::vector<BlockId>& entryIds) -> Result<JournalPage> {
+        lastCommandCommitted = false;
+        const auto path = info.value_or(NotebookInfo{}).path;
+        if (entryIds.empty()) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::invalidStructuralMove, path,
+                          "at least one Journal subtree must be selected for deletion"));
+        }
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "begin Journal subtree deletion"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<JournalPage> {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        auto loaded = loadOutlineForEntry(transaction, databases.value(), entryIds.front());
+        if (!loaded) {
+            return fail(loaded.error());
+        }
+        auto outline = std::move(loaded).value();
+        const auto before = outline;
+        const auto isRequested = [&](const BlockId& id) -> bool {
+            return std::ranges::find(entryIds, id) != entryIds.end();
+        };
+        for (const auto& id : entryIds) {
+            if (std::ranges::none_of(outline.entries, [&](const auto& entry) -> bool {
+                    return entry.metadata.id == id;
+                })) {
+                return fail(makeError(NotebookErrorCode::blockNotFound, path,
+                                      "selected Journal Entry is not on the same Page"));
+            }
+        }
+
+        std::vector<BlockId> roots;
+        for (const auto& entry : outline.entries) {
+            if (!isRequested(entry.metadata.id)) {
+                continue;
+            }
+            auto ancestor = entry.parentEntry;
+            bool coveredByAncestor = false;
+            while (ancestor) {
+                if (isRequested(*ancestor)) {
+                    coveredByAncestor = true;
+                    break;
+                }
+                const auto found =
+                    std::ranges::find_if(outline.entries, [&](const auto& candidate) -> bool {
+                        return candidate.metadata.id == *ancestor;
+                    });
+                ancestor = found == outline.entries.end() ? std::nullopt : found->parentEntry;
+            }
+            if (!coveredByAncestor) {
+                roots.push_back(entry.metadata.id);
+            }
+        }
+        const auto isDeleted = [&](const JournalEntry& entry) -> bool {
+            if (std::ranges::find(roots, entry.metadata.id) != roots.end()) {
+                return true;
+            }
+            auto ancestor = entry.parentEntry;
+            while (ancestor) {
+                if (std::ranges::find(roots, *ancestor) != roots.end()) {
+                    return true;
+                }
+                const auto found =
+                    std::ranges::find_if(before.entries, [&](const auto& candidate) -> bool {
+                        return candidate.metadata.id == *ancestor;
+                    });
+                ancestor = found == before.entries.end() ? std::nullopt : found->parentEntry;
+            }
+            return false;
+        };
+
+        const auto now = currentTimestamp();
+        std::vector<std::optional<BlockId>> touchedContainers;
+        for (const auto& entry : before.entries) {
+            if (std::ranges::find(roots, entry.metadata.id) == roots.end()) {
+                continue;
+            }
+            if (std::ranges::find(touchedContainers, entry.parentEntry) ==
+                touchedContainers.end()) {
+                touchedContainers.push_back(entry.parentEntry);
+            }
+        }
+        std::erase_if(outline.entries, isDeleted);
+        for (const auto& parent : touchedContainers) {
+            if (auto error = touchContainer(transaction, databases.value(), outline, parent, now)) {
+                return fail(std::move(*error));
+            }
+        }
+        if (auto error = rewriteContainment(transaction, databases.value(), before, outline)) {
+            return fail(std::move(*error));
+        }
+        for (const auto& entry : before.entries) {
+            if (!isDeleted(entry)) {
+                continue;
+            }
+            auto key = blockKey(entry.metadata.id);
+            result = mdb_del(transaction, databases.value().blocks, &key, nullptr);
+            if (result != MDB_SUCCESS) {
+                return fail(errorFromLmdb(path, result, "delete selected Journal Entry"));
+            }
+            if (auto error = removeTypeIndex(transaction, databases.value().blocksByType,
+                                             BlockType::journalEntry, entry.metadata.id)) {
+                return fail(std::move(*error));
+            }
+        }
+        if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
+            return fail(std::move(*error));
+        }
+        result = commitAdapter->commit(transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "commit Journal subtree deletion"));
+        }
+        incrementCachedRevision();
+        lastCommandCommitted = true;
+        recordHistory(outline.page.journalDate.value_or(JournalDate{}), before, outline);
+        return Result<JournalPage>::success({outline.page.journalDate.value_or(JournalDate{}),
+                                             outline.page.metadata, std::move(outline.entries)});
+    }
+
     void incrementCachedRevision() {
         auto updated = info.value_or(NotebookInfo{});
         ++updated.revision;
@@ -2419,7 +2548,7 @@ auto NotebookSession::insertJournalEntry(JournalDate date, std::optional<BlockId
         if (!validAuthoredText(authoredText)) {
             return Result<JournalPage>::failure(
                 makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
-                          "Journal Entry text must be one bounded Unicode line"));
+                          "Journal Entry text must be bounded Unicode text using LF line breaks"));
         }
         auto outcome = impl_->insertNestedEntry(date, afterEntry, std::move(authoredText));
         if (impl_->lastCommandCommitted) {
@@ -2443,7 +2572,7 @@ auto NotebookSession::updateJournalEntry(BlockId entryId, std::string authoredTe
         if (!validAuthoredText(authoredText)) {
             return Result<JournalEntry>::failure(
                 makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
-                          "Journal Entry text must be one bounded Unicode line"));
+                          "Journal Entry text must be bounded Unicode text using LF line breaks"));
         }
         auto outcome = impl_->updateEntry(entryId, std::move(authoredText));
         if (impl_->lastCommandCommitted) {
@@ -2467,7 +2596,7 @@ auto NotebookSession::splitJournalEntry(BlockId entryId, std::string authoredTex
         if (!validAuthoredText(authoredText)) {
             return Result<JournalPage>::failure(
                 makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
-                          "Journal Entry text must be one bounded Unicode line"));
+                          "Journal Entry text must be bounded Unicode text using LF line breaks"));
         }
         auto outcome = impl_->editOutline(entryId, OutlineEditKind::split, cursorByteOffset,
                                           std::move(authoredText));
@@ -2492,7 +2621,7 @@ auto NotebookSession::joinJournalEntry(BlockId entryId, std::string authoredText
         if (!validAuthoredText(authoredText)) {
             return Result<JournalPage>::failure(
                 makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
-                          "Journal Entry text must be one bounded Unicode line"));
+                          "Journal Entry text must be bounded Unicode text using LF line breaks"));
         }
         auto outcome =
             impl_->editOutline(entryId, OutlineEditKind::join, 0, std::move(authoredText));
@@ -2532,7 +2661,7 @@ auto NotebookSession::moveJournalEntry(BlockId entryId, JournalEntryMove movemen
         if (!validAuthoredText(authoredText)) {
             return Result<JournalPage>::failure(
                 makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
-                          "Journal Entry text must be one bounded Unicode line"));
+                          "Journal Entry text must be bounded Unicode text using LF line breaks"));
         }
         auto outcome = impl_->editOutline(entryId, edit, 0, std::move(authoredText));
         if (impl_->lastCommandCommitted) {
@@ -2553,6 +2682,24 @@ auto NotebookSession::deleteJournalEntry(BlockId entryId) -> Result<JournalPage>
                 makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
         }
         auto outcome = impl_->editOutline(entryId, OutlineEditKind::erase);
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::deleteJournalSubtrees(std::vector<BlockId> entryIds) -> Result<JournalPage> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalPage> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        auto outcome = impl_->deleteSubtrees(entryIds);
         if (impl_->lastCommandCommitted) {
             callbacks = impl_->committedCallbacks();
         }
