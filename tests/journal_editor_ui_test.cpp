@@ -240,6 +240,91 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
         [&controller, &childId]() -> bool { return controller.journalEntryId(2) == childId; }));
 }
 
+TEST_CASE("the Journal editor groups typing and routes standard undo and redo") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(
+        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("undo-ui.hieda"))));
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("before")) == 0);
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    REQUIRE(window != nullptr);
+    window->show();
+    window->requestActivate();
+    REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
+    auto* journalList = root->findChild<QQuickItem*>(QStringLiteral("journalList"));
+    REQUIRE(journalList != nullptr);
+    REQUIRE(
+        waitUntil([journalList]() -> bool { return journalList->property("count").toInt() == 1; }));
+    QVariant entryValue;
+    REQUIRE(QMetaObject::invokeMethod(journalList, "entryItemAt",
+                                      Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)));
+    auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
+    REQUIRE(entry != nullptr);
+    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("journalEntryEditor-0"));
+    REQUIRE(editor != nullptr);
+    editor->forceActiveFocus();
+    editor->setProperty("cursorPosition", 6);
+    QTest::keyClick(window, Qt::Key_X);
+    REQUIRE(waitUntil(
+        [&controller]() -> bool {
+            return controller.journalEntries()
+                       ->data(controller.journalEntries()->index(0, 0),
+                              JournalEntryModel::AuthoredTextRole)
+                       .toString() == QStringLiteral("beforex");
+        },
+        std::chrono::seconds(2)));
+    auto* undoAction = root->findChild<QObject*>(QStringLiteral("undoAction"));
+    auto* redoAction = root->findChild<QObject*>(QStringLiteral("redoAction"));
+    REQUIRE(undoAction != nullptr);
+    REQUIRE(redoAction != nullptr);
+    CHECK(undoAction->property("enabled").toBool());
+#ifdef Q_OS_MACOS
+    constexpr auto undoModifier = Qt::MetaModifier;
+#else
+    constexpr auto undoModifier = Qt::ControlModifier;
+#endif
+    QTest::keyClick(window, Qt::Key_Z, undoModifier);
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.journalEntries()
+                   ->data(controller.journalEntries()->index(0, 0),
+                          JournalEntryModel::AuthoredTextRole)
+                   .toString() == QStringLiteral("before");
+    }));
+    CHECK(redoAction->property("enabled").toBool());
+    QTest::keyClick(window, Qt::Key_Z, undoModifier | Qt::ShiftModifier);
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.journalEntries()
+                   ->data(controller.journalEntries()->index(0, 0),
+                          JournalEntryModel::AuthoredTextRole)
+                   .toString() == QStringLiteral("beforex");
+    }));
+
+    REQUIRE(waitUntil([window]() -> bool {
+        return window->activeFocusItem() != nullptr &&
+               window->activeFocusItem()->objectName() == QStringLiteral("journalEntryEditor-0");
+    }));
+    QTest::keyClick(window, Qt::Key_Y);
+    auto* closeAction = root->findChild<QObject*>(QStringLiteral("closeAction"));
+    REQUIRE(closeAction != nullptr);
+    REQUIRE(QMetaObject::invokeMethod(closeAction, "trigger"));
+    REQUIRE(waitUntil([&controller]() -> bool { return !controller.hasOpenNotebook(); }));
+    controller.openNotebook(
+        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("undo-ui.hieda"))));
+    REQUIRE(controller.journalEntries()->rowCount() == 1);
+    CHECK(controller.journalEntries()
+              ->data(controller.journalEntries()->index(0, 0), JournalEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("beforexy"));
+}
+
 auto main(int argc, char* argv[]) -> int {
     QApplication application(argc, argv);
     return Catch::Session().run(argc, argv);

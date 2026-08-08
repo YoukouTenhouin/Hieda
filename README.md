@@ -61,3 +61,9 @@ same structural actions and leaf deletion. Entries with children cannot be joine
 Escape cancels a text edit, and ordinary Up/Down moves between visible bullets. Long text wraps
 visually, but Journal text remains exact single-line Unicode. A failed edit restores the last
 durably committed state, while a failed new Entry keeps its draft available for retry or copying.
+
+Hieda durably saves an existing Entry after one second without typing and immediately before a
+focus or structural change. Each such typing group and each structural command is one undoable
+action; a structural command also includes its pending text. Use the platform-standard Undo and
+Redo shortcuts or the Edit menu. History is maintained separately for each Journal Page, uses a
+shared 32 MiB memory budget, and clears when the Notebook is closed.

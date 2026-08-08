@@ -90,6 +90,13 @@ struct JournalPage {
     auto operator==(const JournalPage&) const -> bool = default;
 };
 
+struct JournalEditCapabilities {
+    bool canUndo{false};
+    bool canRedo{false};
+
+    auto operator==(const JournalEditCapabilities&) const -> bool = default;
+};
+
 enum class JournalEntryMove : std::uint8_t { indent, outdent, up, down };
 
 enum class NotebookErrorCode : std::uint8_t {
@@ -110,6 +117,8 @@ enum class NotebookErrorCode : std::uint8_t {
     invalidCursorPosition,
     invalidStructuralMove,
     blockHasChildren,
+    undoUnavailable,
+    redoUnavailable,
 };
 
 struct NotebookError {
@@ -179,6 +188,10 @@ class NotebookSession {
     [[nodiscard]] auto moveJournalEntry(BlockId entryId, JournalEntryMove movement,
                                         std::string authoredText) -> Result<JournalPage>;
     [[nodiscard]] auto deleteJournalEntry(BlockId entryId) -> Result<JournalPage>;
+    [[nodiscard]] auto journalEditCapabilities(JournalDate date) const
+        -> Result<JournalEditCapabilities>;
+    [[nodiscard]] auto undoJournalEdit(JournalDate date) -> Result<JournalPage>;
+    [[nodiscard]] auto redoJournalEdit(JournalDate date) -> Result<JournalPage>;
     [[nodiscard]] auto subscribeToChanges(std::function<void()> callback) -> NotebookSubscription;
 
   private:

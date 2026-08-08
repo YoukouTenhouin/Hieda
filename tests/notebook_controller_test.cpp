@@ -223,3 +223,29 @@ TEST_CASE("the Qt adapter exposes and edits nested Journal structure") {
     REQUIRE(deleted.value(QStringLiteral("succeeded")).toBool());
     CHECK(model->rowCount() == 2);
 }
+
+TEST_CASE("the Qt adapter exposes and applies Journal undo and redo") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "undo-adapter.hieda"));
+    CHECK_FALSE(controller.canUndo());
+    CHECK_FALSE(controller.canRedo());
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("first")) == 0);
+    const auto id = controller.journalEntryId(0);
+    REQUIRE(controller.updateJournalEntry(id, QStringLiteral("changed")));
+    CHECK(controller.canUndo());
+
+    const auto undone = controller.undoJournalEdit();
+    REQUIRE(undone.value(QStringLiteral("succeeded")).toBool());
+    CHECK(controller.journalEntries()
+              ->data(controller.journalEntries()->index(0, 0), JournalEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("first"));
+    CHECK(controller.canRedo());
+
+    const auto redone = controller.redoJournalEdit();
+    REQUIRE(redone.value(QStringLiteral("succeeded")).toBool());
+    CHECK(controller.journalEntries()
+              ->data(controller.journalEntries()->index(0, 0), JournalEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("changed"));
+    CHECK_FALSE(controller.canRedo());
+}

@@ -857,3 +857,184 @@ TEST_CASE("generated Journal moves preserve preorder and single-parent propertie
     REQUIRE(session.open(notebookPath));
     CHECK(session.journalPage(date).value() == page);
 }
+
+TEST_CASE("Journal edits undo and redo as coherent user actions") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    REQUIRE(session.create(temporaryDirectory.path() / "undo-redo.hieda"));
+
+    CHECK(session.journalEditCapabilities(date).value() ==
+          hieda::notebook::JournalEditCapabilities{});
+    auto page = session.insertJournalEntry(date, std::nullopt, "parent").value();
+    const auto parentId = page.entries.front().metadata.id;
+    page = session.insertJournalEntry(date, parentId, "child").value();
+    const auto childId = page.entries.back().metadata.id;
+    page =
+        session.moveJournalEntry(childId, hieda::notebook::JournalEntryMove::indent, "edited child")
+            .value();
+    const auto acknowledged = page;
+
+    REQUIRE(session.undoJournalEdit(date));
+    page = session.journalPage(date).value();
+    REQUIRE(page.entries.size() == 2);
+    CHECK(page.entries[1].authoredText == "child");
+    CHECK_FALSE(page.entries[1].parentEntry);
+
+    REQUIRE(session.redoJournalEdit(date));
+    CHECK(session.journalPage(date).value() == acknowledged);
+}
+
+TEST_CASE("every supported Journal command round-trips through history") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    REQUIRE(session.create(temporaryDirectory.path() / "all-history-actions.hieda"));
+    std::vector<hieda::notebook::JournalPage> states;
+    states.push_back(session.journalPage(date).value());
+    const auto remember = [&](hieda::notebook::JournalPage page) -> hieda::notebook::JournalPage {
+        states.push_back(page);
+        return page;
+    };
+
+    auto page = remember(session.insertJournalEntry(date, std::nullopt, "A").value());
+    const auto firstId = page.entries[0].metadata.id;
+    page = remember(session.insertJournalEntry(date, std::nullopt, "BC").value());
+    const auto secondId = page.entries[1].metadata.id;
+    page = remember(session.insertJournalEntry(date, std::nullopt, "D").value());
+    const auto thirdId = page.entries[2].metadata.id;
+    REQUIRE(session.updateJournalEntry(secondId, "B2C"));
+    page = remember(session.journalPage(date).value());
+    page = remember(session.splitJournalEntry(secondId, "B2C", 2).value());
+    const auto splitId = page.entries[2].metadata.id;
+    page = remember(session.joinJournalEntry(splitId, "2C").value());
+    page = remember(
+        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::indent, "B2C")
+            .value());
+    page = remember(
+        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::outdent, "B2C")
+            .value());
+    page = remember(
+        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::down, "B2C").value());
+    page = remember(
+        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::up, "B2C").value());
+    page = remember(session.deleteJournalEntry(thirdId).value());
+    CHECK(page.entries.front().metadata.id == firstId);
+
+    for (std::size_t index = states.size() - 1; index > 0; --index) {
+        CHECK(session.undoJournalEdit(date).value() == states[index - 1]);
+    }
+    CHECK_FALSE(session.journalEditCapabilities(date).value().canUndo);
+    for (std::size_t index = 1; index < states.size(); ++index) {
+        CHECK(session.redoJournalEdit(date).value() == states[index]);
+    }
+    CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
+}
+
+TEST_CASE("undo restores deleted identity and redo branches clear only after committed edits") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    REQUIRE(session.create(temporaryDirectory.path() / "undo-delete.hieda"));
+    auto page = session.insertJournalEntry(date, std::nullopt, "kept").value();
+    const auto entry = page.entries.front();
+    REQUIRE(session.deleteJournalEntry(entry.metadata.id));
+
+    page = session.undoJournalEdit(date).value();
+    REQUIRE(page.entries.size() == 1);
+    CHECK(page.entries.front() == entry);
+    CHECK(session.journalEditCapabilities(date).value().canRedo);
+
+    const auto rejected = session.updateJournalEntry(entry.metadata.id, "two\nlines");
+    REQUIRE_FALSE(rejected);
+    CHECK(session.journalEditCapabilities(date).value().canRedo);
+    REQUIRE(session.updateJournalEntry(entry.metadata.id, entry.authoredText));
+    CHECK(session.journalEditCapabilities(date).value().canRedo);
+    REQUIRE(session.updateJournalEntry(entry.metadata.id, "changed"));
+    CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
+}
+
+TEST_CASE("failed undo leaves acknowledged content revision and history intact") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    REQUIRE(session.create(temporaryDirectory.path() / "failed-undo.hieda"));
+    const auto page = session.insertJournalEntry(date, std::nullopt, "durable").value();
+    const auto revision = session.current()->revision;
+    hieda::notebook::NotebookSessionTestAccess::rejectNextJournalCommit(session);
+
+    const auto failed = session.undoJournalEdit(date);
+
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
+    CHECK(session.journalPage(date).value() == page);
+    CHECK(session.current()->revision == revision);
+    CHECK(session.journalEditCapabilities(date).value().canUndo);
+    CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
+}
+
+TEST_CASE("Journal history is Page-local and clears when the Notebook closes") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "page-history.hieda";
+    hieda::notebook::NotebookSession session;
+    const hieda::notebook::JournalDate firstDate{2026, 8, 8};
+    const hieda::notebook::JournalDate secondDate{2026, 8, 9};
+    REQUIRE(session.create(path));
+    const auto first = session.insertJournalEntry(firstDate, std::nullopt, "first").value();
+    const auto second = session.insertJournalEntry(secondDate, std::nullopt, "second").value();
+
+    const auto virtualPage = session.undoJournalEdit(firstDate).value();
+    CHECK_FALSE(virtualPage.metadata);
+    CHECK(virtualPage.entries.empty());
+    CHECK(session.journalPage(secondDate).value() == second);
+    CHECK(session.journalEditCapabilities(firstDate).value().canRedo);
+    CHECK(session.journalEditCapabilities(secondDate).value().canUndo);
+    const auto restored = session.redoJournalEdit(firstDate).value();
+    CHECK(restored == first);
+
+    session.close();
+    REQUIRE(session.open(path));
+    CHECK(session.journalEditCapabilities(firstDate).value() ==
+          hieda::notebook::JournalEditCapabilities{});
+    const auto unavailable = session.undoJournalEdit(firstDate);
+    REQUIRE_FALSE(unavailable);
+    CHECK(unavailable.error().code == hieda::notebook::NotebookErrorCode::undoUnavailable);
+}
+
+TEST_CASE("failed redo preserves the undone state and redo capability") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    REQUIRE(session.create(temporaryDirectory.path() / "failed-redo.hieda"));
+    const auto committed = session.insertJournalEntry(date, std::nullopt, "durable").value();
+    const auto undone = session.undoJournalEdit(date).value();
+    const auto revision = session.current()->revision;
+    hieda::notebook::NotebookSessionTestAccess::rejectNextJournalCommit(session);
+
+    const auto failed = session.redoJournalEdit(date);
+
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
+    CHECK(session.journalPage(date).value() == undone);
+    CHECK(session.current()->revision == revision);
+    CHECK(session.journalEditCapabilities(date).value().canRedo);
+    CHECK(session.redoJournalEdit(date).value() == committed);
+}
+
+TEST_CASE("Journal history evicts old actions under its memory budget") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    const hieda::notebook::JournalDate date{2026, 8, 8};
+    REQUIRE(session.create(temporaryDirectory.path() / "bounded-history.hieda"));
+    const std::string firstText(17 * 1024 * 1024, 'a');
+    const std::string secondText(17 * 1024 * 1024, 'b');
+    const auto inserted = session.insertJournalEntry(date, std::nullopt, firstText).value();
+    const auto id = inserted.entries.front().metadata.id;
+    REQUIRE(session.updateJournalEntry(id, secondText));
+
+    const auto restored = session.undoJournalEdit(date).value();
+    REQUIRE(restored.entries.size() == 1);
+    CHECK(restored.entries.front().authoredText == firstText);
+    CHECK_FALSE(session.journalEditCapabilities(date).value().canUndo);
+    CHECK(session.journalEditCapabilities(date).value().canRedo);
+}

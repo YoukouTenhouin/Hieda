@@ -51,6 +51,8 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
     Q_PROPERTY(QDate journalDate READ journalDate NOTIFY journalChanged)
     Q_PROPERTY(QAbstractItemModel* journalEntries READ journalEntries CONSTANT)
+    Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
+    Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
 
   public:
     explicit NotebookController(QObject* parent = nullptr);
@@ -61,6 +63,8 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto errorMessage() const -> QString;
     [[nodiscard]] auto journalDate() const -> QDate;
     [[nodiscard]] auto journalEntries() -> QAbstractItemModel*;
+    [[nodiscard]] auto canUndo() const -> bool;
+    [[nodiscard]] auto canRedo() const -> bool;
 
     Q_INVOKABLE void createNotebook(const QUrl& url);
     Q_INVOKABLE void openNotebook(const QUrl& url);
@@ -86,6 +90,8 @@ class NotebookController final : public QObject {
     Q_INVOKABLE auto moveJournalEntryDown(const QString& entryId, const QString& authoredText,
                                           int cursorPosition) -> QVariantMap;
     Q_INVOKABLE auto deleteJournalEntry(const QString& entryId) -> QVariantMap;
+    Q_INVOKABLE auto undoJournalEdit() -> QVariantMap;
+    Q_INVOKABLE auto redoJournalEdit() -> QVariantMap;
     void requestJournalDateRollover(const QDate& date);
     Q_INVOKABLE void completeJournalDateRollover();
 
@@ -105,6 +111,7 @@ class NotebookController final : public QObject {
     auto moveJournalEntry(const QString& entryId, const QString& authoredText,
                           hieda::notebook::JournalEntryMove movement, int cursorPosition)
         -> QVariantMap;
+    auto applyJournalHistory(bool redo) -> QVariantMap;
     void scheduleMidnightRefresh();
 
     hieda::notebook::NotebookSession session_;

@@ -14,6 +14,7 @@ ApplicationWindow {
     property string draftText: ""
     property var activeJournalEditor: null
     property bool rolloverPending: false
+    readonly property bool hasPendingJournalEdit: activeJournalEditor && activeJournalEditor.hasPendingEdit
 
     signal draftFocusRequested(string afterId)
 
@@ -59,6 +60,26 @@ ApplicationWindow {
 
     function registerJournalEditor(editor) {
         activeJournalEditor = editor;
+    }
+
+    function commitActiveJournalEditor() {
+        const editor = activeJournalEditor;
+        activeJournalEditor = null;
+        if (editor && editor.hasPendingEdit && !editor.commit(false)) {
+            registerJournalEditor(editor);
+            return false;
+        }
+        return true;
+    }
+
+    function applyHistory(redo) {
+        if (!commitActiveJournalEditor())
+            return ;
+
+        if (redo ? !notebookController.canRedo : !notebookController.canUndo)
+            return ;
+
+        applyJournalOutcome(redo ? notebookController.redoJournalEdit() : notebookController.undoJournalEdit());
     }
 
     function journalEditorFinished(editor) {
@@ -128,11 +149,15 @@ ApplicationWindow {
     Action {
         id: closeAction
 
+        objectName: "closeAction"
         text: qsTr("&Close Notebook")
         icon.name: "window-close"
         shortcut: StandardKey.Close
         enabled: notebookController.hasOpenNotebook
-        onTriggered: notebookController.closeNotebook()
+        onTriggered: {
+            if (window.commitActiveJournalEditor())
+                notebookController.closeNotebook();
+        }
     }
 
     Action {
@@ -141,7 +166,32 @@ ApplicationWindow {
         text: qsTr("&Quit")
         icon.name: "application-exit"
         shortcut: StandardKey.Quit
-        onTriggered: Qt.quit()
+        onTriggered: {
+            if (window.commitActiveJournalEditor())
+                Qt.quit();
+        }
+    }
+
+    Action {
+        id: undoAction
+
+        objectName: "undoAction"
+        text: qsTr("&Undo")
+        icon.name: "edit-undo"
+        shortcut: StandardKey.Undo
+        enabled: notebookController.hasOpenNotebook && (notebookController.canUndo || window.hasPendingJournalEdit)
+        onTriggered: window.applyHistory(false)
+    }
+
+    Action {
+        id: redoAction
+
+        objectName: "redoAction"
+        text: qsTr("&Redo")
+        icon.name: "edit-redo"
+        shortcut: StandardKey.Redo
+        enabled: notebookController.hasOpenNotebook && notebookController.canRedo && !window.hasPendingJournalEdit
+        onTriggered: window.applyHistory(true)
     }
 
     FileDialog {
@@ -315,6 +365,17 @@ ApplicationWindow {
                             return false;
                         }
 
+                        Timer {
+                            id: typingCommitTimer
+
+                            interval: 1000
+                            repeat: false
+                            onTriggered: {
+                                if (entryEditor.activeFocus && entryEditor.hasPendingEdit && !entryEditor.inputMethodComposing)
+                                    entryRoot.commit();
+                            }
+                        }
+
                         width: journalList.width
                         height: editorHeight + inlineDraft.height
 
@@ -420,6 +481,12 @@ ApplicationWindow {
 
                                 readonly property bool isDraftEditor: false
                                 readonly property int entryRow: entryRoot.index
+                                readonly property bool hasPendingEdit: text !== entryRoot.authoredText
+
+                                function commit(openNext) {
+                                    typingCommitTimer.stop();
+                                    return entryRoot.commit();
+                                }
 
                                 objectName: "journalEntryEditor-" + entryRoot.index
                                 Layout.fillWidth: true
@@ -431,6 +498,14 @@ ApplicationWindow {
                                 topPadding: 0
                                 bottomPadding: 0
                                 Accessible.name: qsTr("Journal Entry %1").arg(entryRoot.index + 1)
+                                onTextChanged: {
+                                    if (activeFocus && text !== entryRoot.authoredText && !inputMethodComposing)
+                                        typingCommitTimer.restart();
+                                }
+                                onInputMethodComposingChanged: {
+                                    if (!inputMethodComposing && activeFocus && hasPendingEdit)
+                                        typingCommitTimer.restart();
+                                }
                                 onActiveFocusChanged: {
                                     if (activeFocus) {
                                         window.registerJournalEditor(entryEditor);
@@ -440,7 +515,13 @@ ApplicationWindow {
                                     }
                                 }
                                 Keys.onPressed: function(event) {
-                                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                    if ((event.modifiers & window.structureModifier) && event.key === Qt.Key_Z) {
+                                        event.accepted = true;
+                                        window.applyHistory((event.modifiers & Qt.ShiftModifier) !== 0);
+                                    } else if ((event.modifiers & window.structureModifier) && event.key === Qt.Key_Y) {
+                                        event.accepted = true;
+                                        window.applyHistory(true);
+                                    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                                         event.accepted = true;
                                         window.activeJournalEditor = null;
                                         if (!window.applyJournalOutcome(notebookController.splitJournalEntry(entryRoot.entryId, text, cursorPosition)))
@@ -684,6 +765,7 @@ ApplicationWindow {
 
                 readonly property bool isDraftEditor: true
                 readonly property int entryRow: draftRoot.anchorRow + 1
+                readonly property bool hasPendingEdit: text.length > 0
 
                 function commit(openNext) {
                     return draftRoot.commit(openNext);
@@ -712,7 +794,13 @@ ApplicationWindow {
                     }
                 }
                 Keys.onPressed: function(event) {
-                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    if ((event.modifiers & window.structureModifier) && event.key === Qt.Key_Z) {
+                        event.accepted = true;
+                        window.applyHistory((event.modifiers & Qt.ShiftModifier) !== 0);
+                    } else if ((event.modifiers & window.structureModifier) && event.key === Qt.Key_Y) {
+                        event.accepted = true;
+                        window.applyHistory(true);
+                    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                         event.accepted = true;
                         if (window.rolloverPending) {
                             if (draftRoot.commit(false)) {
@@ -776,6 +864,19 @@ ApplicationWindow {
 
             MenuItem {
                 action: quitAction
+            }
+
+        }
+
+        Menu {
+            title: qsTr("&Edit")
+
+            MenuItem {
+                action: undoAction
+            }
+
+            MenuItem {
+                action: redoAction
             }
 
         }

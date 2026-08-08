@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <iomanip>
 #include <limits>
@@ -634,6 +635,20 @@ struct LoadedOutline {
     std::vector<JournalEntry> entries;
 };
 
+struct JournalHistoryAction {
+    std::uint64_t sequence{0};
+    JournalDate date;
+    std::optional<LoadedOutline> before;
+    std::optional<LoadedOutline> after;
+    std::size_t estimatedBytes{0};
+};
+
+struct JournalPageHistory {
+    JournalDate date;
+    std::deque<JournalHistoryAction> undo;
+    std::deque<JournalHistoryAction> redo;
+};
+
 enum class OutlineEditKind : std::uint8_t { split, join, indent, outdent, up, down, erase };
 
 auto openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path)
@@ -780,6 +795,9 @@ class NotebookSession::Impl {
         lockFile.reset();
         dataLockFile.reset();
         info.reset();
+        journalHistory.clear();
+        historyBytes = 0;
+        nextHistorySequence = 1;
     }
 
     auto acquireLock(const std::filesystem::path& path) -> std::optional<NotebookError> {
@@ -1128,6 +1146,257 @@ class NotebookSession::Impl {
         block.metadata.updatedAt = now;
         found->metadata.updatedAt = now;
         return writeBlock(transaction, databases.blocks, block, info.value_or(NotebookInfo{}).path);
+    }
+
+    auto loadOutlineForDate(MDB_txn* transaction, const JournalDatabases& databases,
+                            JournalDate date) const -> Result<std::optional<LoadedOutline>> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        const auto encodedDate = dateKey(date);
+        MDB_val key{encodedDate.size(), const_cast<std::uint8_t*>(encodedDate.data())};
+        MDB_val value{};
+        const auto result = mdb_get(transaction, databases.journalByDate, &key, &value);
+        if (result == MDB_NOTFOUND) {
+            return Result<std::optional<LoadedOutline>>::success(std::nullopt);
+        }
+        if (result != MDB_SUCCESS || value.mv_size != BlockId{}.bytes.size()) {
+            return Result<std::optional<LoadedOutline>>::failure(
+                result == MDB_SUCCESS ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                                  "invalid Journal date index")
+                                      : errorFromLmdb(path, result, "read Journal date index"));
+        }
+        BlockId pageId;
+        std::memcpy(pageId.bytes.data(), value.mv_data, pageId.bytes.size());
+        auto page = readBlock(transaction, databases.blocks, pageId, path);
+        if (!page || page.value().type != BlockType::journalPage ||
+            page.value().journalDate != date) {
+            return Result<std::optional<LoadedOutline>>::failure(
+                page ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                 "Journal date points to an invalid Page")
+                     : page.error());
+        }
+        auto outline = loadOutline(transaction, databases, std::move(page).value());
+        if (!outline) {
+            return Result<std::optional<LoadedOutline>>::failure(outline.error());
+        }
+        return Result<std::optional<LoadedOutline>>::success(std::move(outline).value());
+    }
+
+    static auto estimateOutlineBytes(const std::optional<LoadedOutline>& outline) -> std::size_t {
+        if (!outline) {
+            return sizeof(std::optional<LoadedOutline>);
+        }
+        auto bytes = sizeof(LoadedOutline) + outline->page.authoredText.size();
+        for (const auto& entry : outline->entries) {
+            bytes += sizeof(JournalEntry) + entry.authoredText.size();
+        }
+        return bytes;
+    }
+
+    auto pageHistory(JournalDate date) -> JournalPageHistory& {
+        const auto found = std::ranges::find_if(
+            journalHistory, [&](const auto& history) -> bool { return history.date == date; });
+        if (found != journalHistory.end()) {
+            return *found;
+        }
+        return journalHistory.emplace_back(JournalPageHistory{date, {}, {}});
+    }
+
+    auto pageHistory(JournalDate date) const -> const JournalPageHistory* {
+        const auto found = std::ranges::find_if(
+            journalHistory, [&](const auto& history) -> bool { return history.date == date; });
+        return found == journalHistory.end() ? nullptr : &*found;
+    }
+
+    auto historyActionCount() const -> std::size_t {
+        std::size_t count = 0;
+        for (const auto& history : journalHistory) {
+            count += history.undo.size() + history.redo.size();
+        }
+        return count;
+    }
+
+    void enforceHistoryBudget() {
+        constexpr std::size_t historyBudget = 32ULL * 1024ULL * 1024ULL;
+        while (historyBytes > historyBudget && historyActionCount() > 1) {
+            JournalPageHistory* oldestHistory = nullptr;
+            bool oldestIsRedo = false;
+            auto oldestSequence = std::numeric_limits<std::uint64_t>::max();
+            for (auto& history : journalHistory) {
+                if (!history.undo.empty() && history.undo.front().sequence < oldestSequence) {
+                    oldestHistory = &history;
+                    oldestIsRedo = false;
+                    oldestSequence = history.undo.front().sequence;
+                }
+                if (!history.redo.empty() && history.redo.back().sequence < oldestSequence) {
+                    oldestHistory = &history;
+                    oldestIsRedo = true;
+                    oldestSequence = history.redo.back().sequence;
+                }
+            }
+            if (oldestHistory == nullptr) {
+                break;
+            }
+            if (oldestIsRedo) {
+                for (const auto& action : oldestHistory->redo) {
+                    historyBytes -= action.estimatedBytes;
+                }
+                oldestHistory->redo.clear();
+            } else {
+                historyBytes -= oldestHistory->undo.front().estimatedBytes;
+                oldestHistory->undo.pop_front();
+            }
+        }
+    }
+
+    void recordHistory(JournalDate date, std::optional<LoadedOutline> before,
+                       std::optional<LoadedOutline> after) {
+        auto& history = pageHistory(date);
+        for (const auto& action : history.redo) {
+            historyBytes -= action.estimatedBytes;
+        }
+        history.redo.clear();
+        JournalHistoryAction action{nextHistorySequence++, date, std::move(before),
+                                    std::move(after), 0};
+        action.estimatedBytes = sizeof(JournalHistoryAction) + estimateOutlineBytes(action.before) +
+                                estimateOutlineBytes(action.after);
+        historyBytes += action.estimatedBytes;
+        history.undo.push_back(std::move(action));
+        enforceHistoryBudget();
+    }
+
+    auto removeTypeIndex(MDB_txn* transaction, MDB_dbi database, BlockType type,
+                         const BlockId& id) const -> std::optional<NotebookError> {
+        auto bytes = typeIndexKey(type, id);
+        MDB_val key{bytes.size(), bytes.data()};
+        const auto result = mdb_del(transaction, database, &key, nullptr);
+        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+            return errorFromLmdb(info.value_or(NotebookInfo{}).path, result,
+                                 "remove Block type index");
+        }
+        return std::nullopt;
+    }
+
+    auto restoreOutline(MDB_txn* transaction, const JournalDatabases& databases, JournalDate date,
+                        const std::optional<LoadedOutline>& target)
+        -> std::optional<NotebookError> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        auto currentResult = loadOutlineForDate(transaction, databases, date);
+        if (!currentResult) {
+            return currentResult.error();
+        }
+        auto current = std::move(currentResult).value();
+        if (current) {
+            for (const auto& entry : current->entries) {
+                if (auto error = eraseContainment(transaction, databases, entry)) {
+                    return error;
+                }
+                auto key = blockKey(entry.metadata.id);
+                auto result = mdb_del(transaction, databases.blocks, &key, nullptr);
+                if (result != MDB_SUCCESS) {
+                    return errorFromLmdb(path, result, "remove Journal Entry for history");
+                }
+                if (auto error = removeTypeIndex(transaction, databases.blocksByType,
+                                                 BlockType::journalEntry, entry.metadata.id)) {
+                    return error;
+                }
+            }
+            auto pageKey = blockKey(current->page.metadata.id);
+            auto result = mdb_del(transaction, databases.blocks, &pageKey, nullptr);
+            if (result != MDB_SUCCESS) {
+                return errorFromLmdb(path, result, "remove Journal Page for history");
+            }
+            if (auto error = removeTypeIndex(transaction, databases.blocksByType,
+                                             BlockType::journalPage, current->page.metadata.id)) {
+                return error;
+            }
+        }
+        const auto encodedDate = dateKey(date);
+        MDB_val dateKeyValue{encodedDate.size(), const_cast<std::uint8_t*>(encodedDate.data())};
+        auto result = mdb_del(transaction, databases.journalByDate, &dateKeyValue, nullptr);
+        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+            return errorFromLmdb(path, result, "remove Journal date for history");
+        }
+        if (!target) {
+            return std::nullopt;
+        }
+        if (auto error = writeBlock(transaction, databases.blocks, target->page, path)) {
+            return error;
+        }
+        if (auto error = writeTypeIndex(transaction, databases.blocksByType, BlockType::journalPage,
+                                        target->page.metadata.id, path)) {
+            return error;
+        }
+        MDB_val pageValue{target->page.metadata.id.bytes.size(),
+                          const_cast<std::byte*>(target->page.metadata.id.bytes.data())};
+        result = mdb_put(transaction, databases.journalByDate, &dateKeyValue, &pageValue,
+                         MDB_NOOVERWRITE);
+        if (result != MDB_SUCCESS) {
+            return errorFromLmdb(path, result, "restore Journal date for history");
+        }
+        for (const auto& entry : target->entries) {
+            const BlockRecord block{BlockType::journalEntry, entry.metadata, std::nullopt,
+                                    entry.authoredText};
+            if (auto error = writeBlock(transaction, databases.blocks, block, path)) {
+                return error;
+            }
+            if (auto error = writeTypeIndex(transaction, databases.blocksByType,
+                                            BlockType::journalEntry, entry.metadata.id, path)) {
+                return error;
+            }
+        }
+        const LoadedOutline emptyBefore{target->page, {}};
+        return rewriteContainment(transaction, databases, emptyBefore, *target);
+    }
+
+    auto applyHistory(JournalDate date, bool redo) -> Result<JournalPage> {
+        lastCommandCommitted = false;
+        auto& history = pageHistory(date);
+        auto& source = redo ? history.redo : history.undo;
+        if (source.empty()) {
+            return Result<JournalPage>::failure(makeError(
+                redo ? NotebookErrorCode::redoUnavailable : NotebookErrorCode::undoUnavailable,
+                info.value_or(NotebookInfo{}).path,
+                redo ? "no Journal edit is available to redo"
+                     : "no Journal edit is available to undo"));
+        }
+        const auto& action = source.back();
+        const auto target = redo ? action.after : action.before;
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, redo ? "begin Journal redo" : "begin Journal undo"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<JournalPage> {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        if (auto error = restoreOutline(transaction, databases.value(), date, target)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
+            return fail(std::move(*error));
+        }
+        result = commitAdapter->commit(transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, redo ? "commit Journal redo" : "commit Journal undo"));
+        }
+        auto applied = std::move(source.back());
+        source.pop_back();
+        auto& destination = redo ? history.undo : history.redo;
+        destination.push_back(std::move(applied));
+        incrementCachedRevision();
+        lastCommandCommitted = true;
+        if (!target) {
+            return Result<JournalPage>::success({date, std::nullopt, {}});
+        }
+        return Result<JournalPage>::success({date, target->page.metadata, target->entries});
     }
 
     auto readNestedJournalPage(JournalDate date) const -> Result<JournalPage> {
@@ -1511,6 +1780,11 @@ class NotebookSession::Impl {
         if (!databases) {
             return fail(databases.error());
         }
+        auto outlineResult = loadOutlineForEntry(transaction, databases.value(), entryId);
+        if (!outlineResult) {
+            return fail(outlineResult.error());
+        }
+        const auto before = std::move(outlineResult).value();
         auto loaded = readBlock(transaction, databases.value().blocks, entryId, path);
         if (!loaded) {
             return fail(loaded.error());
@@ -1552,6 +1826,12 @@ class NotebookSession::Impl {
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
+        auto after = before;
+        const auto changed = std::ranges::find_if(
+            after.entries, [&](const auto& candidate) { return candidate.metadata.id == entryId; });
+        changed->metadata = entry.metadata;
+        changed->authoredText = entry.authoredText;
+        recordHistory(before.page.journalDate.value_or(JournalDate{}), before, std::move(after));
         return Result<JournalEntry>::success(
             JournalEntry{entry.metadata, entry.authoredText, parentEntry});
     }
@@ -1579,6 +1859,7 @@ class NotebookSession::Impl {
         MDB_val dateIndexKey{encodedDate.size(), const_cast<std::uint8_t*>(encodedDate.data())};
         MDB_val pageValue{};
         result = mdb_get(transaction, databases.value().journalByDate, &dateIndexKey, &pageValue);
+        const auto pageWasCreated = result == MDB_NOTFOUND;
         BlockRecord page;
         if (result == MDB_NOTFOUND) {
             if (afterEntry) {
@@ -1667,6 +1948,8 @@ class NotebookSession::Impl {
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
+        recordHistory(date, pageWasCreated ? std::nullopt : std::optional<LoadedOutline>{before},
+                      outline);
         return Result<JournalPage>::success(
             {date, outline.page.metadata, std::move(outline.entries)});
     }
@@ -1922,6 +2205,7 @@ class NotebookSession::Impl {
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
+        recordHistory(outline.page.journalDate.value_or(JournalDate{}), before, outline);
         return Result<JournalPage>::success({outline.page.journalDate.value_or(JournalDate{}),
                                              outline.page.metadata, std::move(outline.entries)});
     }
@@ -1950,6 +2234,9 @@ class NotebookSession::Impl {
     std::unique_ptr<JournalCommitAdapter> commitAdapter;
     std::shared_ptr<SubscriptionState> subscriptions;
     bool lastCommandCommitted{false};
+    std::vector<JournalPageHistory> journalHistory;
+    std::size_t historyBytes{0};
+    std::uint64_t nextHistorySequence{1};
 };
 
 #ifdef HIEDA_TESTING
@@ -2264,6 +2551,67 @@ auto NotebookSession::deleteJournalEntry(BlockId entryId) -> Result<JournalPage>
                 makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
         }
         auto outcome = impl_->editOutline(entryId, OutlineEditKind::erase);
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::journalEditCapabilities(JournalDate date) const
+    -> Result<JournalEditCapabilities> {
+    std::scoped_lock lock(impl_->mutex);
+    if (!impl_->info) {
+        return Result<JournalEditCapabilities>::failure(
+            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    if (!validJournalDate(date)) {
+        return Result<JournalEditCapabilities>::failure(makeError(
+            NotebookErrorCode::invalidJournalDate, impl_->info->path, "invalid Journal date"));
+    }
+    const auto& implementation = std::as_const(*impl_);
+    const auto* history = implementation.pageHistory(date);
+    return Result<JournalEditCapabilities>::success({history != nullptr && !history->undo.empty(),
+                                                     history != nullptr && !history->redo.empty()});
+}
+
+auto NotebookSession::undoJournalEdit(JournalDate date) -> Result<JournalPage> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalPage> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validJournalDate(date)) {
+            return Result<JournalPage>::failure(makeError(
+                NotebookErrorCode::invalidJournalDate, impl_->info->path, "invalid Journal date"));
+        }
+        auto outcome = impl_->applyHistory(date, false);
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::redoJournalEdit(JournalDate date) -> Result<JournalPage> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalPage> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validJournalDate(date)) {
+            return Result<JournalPage>::failure(makeError(
+                NotebookErrorCode::invalidJournalDate, impl_->info->path, "invalid Journal date"));
+        }
+        auto outcome = impl_->applyHistory(date, true);
         if (impl_->lastCommandCommitted) {
             callbacks = impl_->committedCallbacks();
         }

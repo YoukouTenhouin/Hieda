@@ -232,6 +232,20 @@ auto NotebookController::journalDate() const -> QDate {
 auto NotebookController::journalEntries() -> QAbstractItemModel* {
     return &journalEntries_;
 }
+auto NotebookController::canUndo() const -> bool {
+    if (!session_.isOpen() || !journalDate_.isValid()) {
+        return false;
+    }
+    const auto capabilities = session_.journalEditCapabilities(domainJournalDate(journalDate_));
+    return capabilities && capabilities.value().canUndo;
+}
+auto NotebookController::canRedo() const -> bool {
+    if (!session_.isOpen() || !journalDate_.isValid()) {
+        return false;
+    }
+    const auto capabilities = session_.journalEditCapabilities(domainJournalDate(journalDate_));
+    return capabilities && capabilities.value().canRedo;
+}
 
 void NotebookController::createNotebook(const QUrl& url) {
     const auto path = localPath(url);
@@ -544,6 +558,69 @@ auto NotebookController::deleteJournalEntry(const QString& entryId) -> QVariantM
     }
 }
 
+auto NotebookController::undoJournalEdit() -> QVariantMap {
+    return applyJournalHistory(false);
+}
+
+auto NotebookController::redoJournalEdit() -> QVariantMap {
+    return applyJournalHistory(true);
+}
+
+auto NotebookController::applyJournalHistory(bool redo) -> QVariantMap {
+    std::vector<QString> oldIds;
+    std::vector<QString> oldTexts;
+    oldIds.reserve(static_cast<std::size_t>(journalEntries_.rowCount()));
+    oldTexts.reserve(static_cast<std::size_t>(journalEntries_.rowCount()));
+    for (int row = 0; row < journalEntries_.rowCount(); ++row) {
+        oldIds.push_back(journalEntries_.entryId(row));
+        oldTexts.push_back(journalEntries_.entryText(row));
+    }
+    try {
+        auto result = redo ? session_.redoJournalEdit(domainJournalDate(journalDate_))
+                           : session_.undoJournalEdit(domainJournalDate(journalDate_));
+        if (!result) {
+            rejectSave(result.error());
+            return journalOutcome(false);
+        }
+        const auto& entries = result.value().entries;
+        auto focusRow = -1;
+        for (std::size_t row = 0; row < entries.size(); ++row) {
+            const auto id = displayId(entries[row].metadata.id);
+            const auto old = std::ranges::find(oldIds, id);
+            if (old == oldIds.end()) {
+                focusRow = static_cast<int>(row);
+                break;
+            }
+            const auto oldRow = static_cast<std::size_t>(std::distance(oldIds.begin(), old));
+            const auto text =
+                QString::fromUtf8(entries[row].authoredText.data(),
+                                  static_cast<qsizetype>(entries[row].authoredText.size()));
+            if (oldRow != row || oldTexts[oldRow] != text) {
+                focusRow = static_cast<int>(row);
+                break;
+            }
+        }
+        if (focusRow < 0 && !entries.empty()) {
+            focusRow = std::min(static_cast<int>(entries.size()) - 1,
+                                std::max(0, static_cast<int>(oldIds.size()) - 1));
+        }
+        journalEntries_.setEntries(entries);
+        const auto cursor =
+            focusRow >= 0
+                ? static_cast<int>(std::min<qsizetype>(journalEntries_.entryText(focusRow).size(),
+                                                       std::numeric_limits<int>::max()))
+                : 0;
+        error_.clear();
+        emit stateChanged();
+        emit journalChanged();
+        return journalOutcome(true, focusRow, cursor);
+    } catch (const hieda::notebook::NotebookException&) {
+        error_ = tr("Hieda encountered an unexpected Notebook error.");
+        emit stateChanged();
+        return journalOutcome(false);
+    }
+}
+
 void NotebookController::requestJournalDateRollover(const QDate& date) {
     if (hasOpenNotebook() && date.isValid()) {
         pendingJournalDate_ = date;
@@ -639,6 +716,12 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
     case NotebookErrorCode::blockHasChildren:
         error_ = tr("Move or delete an Entry's children first.");
         break;
+    case NotebookErrorCode::undoUnavailable:
+        error_ = tr("There is no Journal edit to undo.");
+        break;
+    case NotebookErrorCode::redoUnavailable:
+        error_ = tr("There is no Journal edit to redo.");
+        break;
     }
     emit stateChanged();
 }
@@ -662,6 +745,7 @@ void NotebookController::loadJournalDate(const QDate& date) {
         journalDate_ = date;
         journalEntries_.setEntries(result.value().entries);
         emit journalChanged();
+        emit stateChanged();
     } catch (const hieda::notebook::NotebookException&) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
