@@ -787,6 +787,52 @@ TEST_CASE("failed Journal subtree deletion preserves content revision and histor
     CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
 }
 
+TEST_CASE("Journal subtree deletion normalizes duplicates and rejects invalid selections") {
+    TemporaryDirectory temporaryDirectory;
+    const hieda::notebook::JournalDate firstDate{2026, 8, 8};
+    const hieda::notebook::JournalDate secondDate{2026, 8, 9};
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "subtree-selection-validation.hieda"));
+    REQUIRE(session.insertJournalEntry(firstDate, std::nullopt, "parent"));
+    auto firstPage = session.insertJournalEntry(firstDate, std::nullopt, "child").value();
+    const auto parentId = firstPage.entries[0].metadata.id;
+    const auto childId = firstPage.entries[1].metadata.id;
+    REQUIRE(session.moveJournalEntry(childId, hieda::notebook::JournalEntryMove::indent, "child"));
+    const auto foreignPage =
+        session.insertJournalEntry(secondDate, std::nullopt, "foreign").value();
+    const auto foreignId = foreignPage.entries.front().metadata.id;
+    firstPage = session.journalPage(firstDate).value();
+
+    const auto duplicateCut = session.deleteJournalSubtrees({childId, childId});
+    REQUIRE(duplicateCut);
+    REQUIRE(duplicateCut.value().entries.size() == 1);
+    CHECK(duplicateCut.value().entries.front().metadata.id == parentId);
+    REQUIRE(session.undoJournalEdit(firstDate));
+    CHECK(session.journalPage(firstDate).value() == firstPage);
+
+    const auto revision = session.current().value().revision;
+    const auto empty = session.deleteJournalSubtrees({});
+    REQUIRE_FALSE(empty);
+    CHECK(empty.error().code == hieda::notebook::NotebookErrorCode::invalidStructuralMove);
+    hieda::notebook::BlockId missingId;
+    missingId.bytes.front() = std::byte{1};
+    const auto missing = session.deleteJournalSubtrees({parentId, missingId});
+    REQUIRE_FALSE(missing);
+    CHECK(missing.error().code == hieda::notebook::NotebookErrorCode::blockNotFound);
+    const auto crossPage = session.deleteJournalSubtrees({parentId, foreignId});
+    REQUIRE_FALSE(crossPage);
+    CHECK(crossPage.error().code == hieda::notebook::NotebookErrorCode::blockNotFound);
+    CHECK(session.current().value().revision == revision);
+    CHECK(session.journalPage(firstDate).value() == firstPage);
+    CHECK(session.journalPage(secondDate).value() == foreignPage);
+
+    const auto emptied = session.deleteJournalSubtrees({parentId});
+    REQUIRE(emptied);
+    CHECK(emptied.value().metadata.has_value());
+    CHECK(emptied.value().entries.empty());
+    CHECK(session.undoJournalEdit(firstDate).value() == firstPage);
+}
+
 TEST_CASE("Journal structural commands match a reference outline model") {
     struct ReferenceEntry {
         hieda::notebook::BlockId id;

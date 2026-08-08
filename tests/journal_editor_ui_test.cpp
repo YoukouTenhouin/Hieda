@@ -20,6 +20,7 @@
 #include <QUrl>
 #include <QVariant>
 
+#include <array>
 #include <chrono>
 #include <memory>
 
@@ -423,6 +424,13 @@ TEST_CASE("the Journal editor inserts and pastes multiline Unicode before splitt
         return editor->property("text").toString() ==
                QStringLiteral("alpha\n\u03B2\n\u65E5\u672C\u8A9E");
     }));
+    const auto dragStart = editor->mapToScene(QPointF(2, editor->height() * 0.2));
+    const auto dragEnd =
+        editor->mapToScene(QPointF(std::min(editor->width() - 2, 80.0), editor->height() * 0.2));
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, dragStart.toPoint());
+    QTest::mouseMove(window, dragEnd.toPoint());
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, dragEnd.toPoint());
+    CHECK(editor->property("selectionStart").toInt() != editor->property("selectionEnd").toInt());
     REQUIRE(QMetaObject::invokeMethod(editor, "select", Q_ARG(int, 6), Q_ARG(int, 7)));
     auto* copyAction = root->findChild<QObject*>(QStringLiteral("copyAction"));
     auto* cutAction = root->findChild<QObject*>(QStringLiteral("cutAction"));
@@ -445,6 +453,16 @@ TEST_CASE("the Journal editor inserts and pastes multiline Unicode before splitt
                        .toString() == QStringLiteral("alpha\n\u03B2\n\u65E5\u672C\u8A9E");
         },
         std::chrono::seconds(2)));
+
+    const auto textBeforeModifiedEnter = editor->property("text").toString();
+    const std::array<Qt::KeyboardModifiers, 4> modifiedEnterKeys{
+        Qt::ControlModifier, Qt::AltModifier, Qt::MetaModifier,
+        Qt::KeyboardModifiers{Qt::ControlModifier | Qt::ShiftModifier}};
+    for (const auto modifier : modifiedEnterKeys) {
+        QTest::keyClick(window, Qt::Key_Return, modifier);
+        CHECK(journalList->property("count").toInt() == 1);
+        CHECK(editor->property("text").toString() == textBeforeModifiedEnter);
+    }
 
     editor->setProperty("cursorPosition", 6);
     QTest::keyClick(window, Qt::Key_Return);
@@ -513,6 +531,15 @@ TEST_CASE("Journal bullets select and cut complete subtrees with accessible clip
     REQUIRE(waitUntil([root = root.get()]() -> bool {
         return root->property("outlineSelectionCount").toInt() == 2;
     }));
+    QTest::keyClick(window, Qt::Key_Down, Qt::ShiftModifier);
+    REQUIRE(waitUntil([root = root.get()]() -> bool {
+        return root->property("outlineSelectionCount").toInt() == 3;
+    }));
+    QTest::keyClick(window, Qt::Key_Up, Qt::ShiftModifier);
+    REQUIRE(waitUntil([root = root.get()]() -> bool {
+        return root->property("outlineSelectionCount").toInt() == 2;
+    }));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, parentCenter.toPoint());
     const auto tailCenter =
         tailBullet->mapToScene(QPointF(tailBullet->width() / 2, tailBullet->height() / 2));
     QTest::mouseClick(window, Qt::LeftButton, Qt::ShiftModifier, tailCenter.toPoint());
@@ -639,6 +666,8 @@ TEST_CASE("IME preedit commits and cancels without premature Journal persistence
     QInputMethodEvent preedit(QStringLiteral("\u65E5"), {});
     QCoreApplication::sendEvent(firstEditor, &preedit);
     REQUIRE(firstEditor->property("inputMethodComposing").toBool());
+    QTest::keyClick(window, Qt::Key_Return);
+    CHECK(controller.journalEntries()->rowCount() == 2);
     QTest::qWait(1100);
     CHECK(controller.journalEntries()
               ->data(controller.journalEntries()->index(0, 0), JournalEntryModel::AuthoredTextRole)
@@ -668,6 +697,55 @@ TEST_CASE("IME preedit commits and cancels without premature Journal persistence
     REQUIRE_FALSE(firstEditor->property("inputMethodComposing").toBool());
     CHECK(firstEditor->property("text").toString() == QStringLiteral("base\u65E5\u672C\u8A9E"));
     CHECK(controller.journalEntries()->rowCount() == 2);
+}
+
+TEST_CASE("outline selection refuses to discard a rejected pending edit") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("selection-save-ui.hieda"))));
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("durable")) == 0);
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    REQUIRE(window != nullptr);
+    window->show();
+    window->requestActivate();
+    REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
+    auto* journalList = root->findChild<QQuickItem*>(QStringLiteral("journalList"));
+    REQUIRE(journalList != nullptr);
+    REQUIRE(
+        waitUntil([journalList]() -> bool { return journalList->property("count").toInt() == 1; }));
+    QVariant entryValue;
+    REQUIRE(QMetaObject::invokeMethod(journalList, "entryItemAt",
+                                      Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)));
+    auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
+    REQUIRE(entry != nullptr);
+    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("journalEntryEditor-0"));
+    REQUIRE(editor != nullptr);
+    editor->forceActiveFocus();
+    editor->setProperty("text", QStringLiteral("unsaved"));
+    entry->setProperty("entryId", QStringLiteral("missing-entry"));
+    QVariant selected;
+
+    REQUIRE(QMetaObject::invokeMethod(root.get(), "selectOutline", Q_RETURN_ARG(QVariant, selected),
+                                      Q_ARG(QVariant, 0), Q_ARG(QVariant, false)));
+
+    CHECK_FALSE(selected.toBool());
+    CHECK(root->property("outlineSelectionCount").toInt() == 0);
+    CHECK(editor->hasActiveFocus());
+    CHECK(editor->property("text").toString() == QStringLiteral("durable"));
+    CHECK(controller.journalEntries()
+              ->data(controller.journalEntries()->index(0, 0), JournalEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("durable"));
+    CHECK_FALSE(controller.errorMessage().isEmpty());
 }
 
 TEST_CASE("the Journal exposes list structure selection and multiline editing accessibly") {

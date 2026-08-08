@@ -286,6 +286,18 @@ TEST_CASE("the Qt adapter cuts selected Journal subtrees and returns predictable
               .toString() == QStringLiteral("tail"));
     REQUIRE(controller.undoJournalEdit().value(QStringLiteral("succeeded")).toBool());
     CHECK(controller.journalEntries()->rowCount() == 3);
+
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("last parent")) == 3);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("last child")) == 4);
+    const auto lastParentId = controller.journalEntryId(3);
+    const auto lastChildId = controller.journalEntryId(4);
+    REQUIRE(controller.indentJournalEntry(lastChildId, QStringLiteral("last child"), 10)
+                .value(QStringLiteral("succeeded"))
+                .toBool());
+    const auto trailingCut = controller.deleteJournalSubtrees({lastParentId});
+    REQUIRE(trailingCut.value(QStringLiteral("succeeded")).toBool());
+    CHECK(trailingCut.value(QStringLiteral("row")).toInt() == 2);
+    CHECK(trailingCut.value(QStringLiteral("cursorPosition")).toInt() == 4);
 }
 
 TEST_CASE("the Qt adapter exposes and applies Journal undo and redo") {

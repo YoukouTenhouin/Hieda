@@ -38,6 +38,9 @@ class JournalEntryModel final : public QAbstractListModel {
     void updateEntry(const hieda::notebook::JournalEntry& entry);
     [[nodiscard]] auto entryId(int row) const -> QString;
     [[nodiscard]] auto entryText(int row) const -> QString;
+    [[nodiscard]] auto entryParentId(int row) const -> QString;
+    [[nodiscard]] auto entryDepth(int row) const -> int;
+    [[nodiscard]] auto subtreeEnd(int row) const -> int;
     [[nodiscard]] auto rowForId(const hieda::notebook::BlockId& identifier) const -> int;
 
   private:

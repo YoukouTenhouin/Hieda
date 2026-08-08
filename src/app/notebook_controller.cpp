@@ -92,15 +92,7 @@ auto JournalEntryModel::data(const QModelIndex& index, int role) const -> QVaria
     const auto hasChildren = std::ranges::any_of(entries_, [&](const auto& candidate) -> bool {
         return candidate.parentEntry == entry.metadata.id;
     });
-    auto depth = 0;
-    auto ancestor = parent;
-    while (ancestor) {
-        ++depth;
-        const auto found = std::ranges::find_if(entries_, [&](const auto& candidate) -> bool {
-            return candidate.metadata.id == *ancestor;
-        });
-        ancestor = found == entries_.end() ? std::nullopt : found->parentEntry;
-    }
+    const auto depth = entryDepth(index.row());
     bool hasPreviousSibling = false;
     bool hasNextSibling = false;
     for (std::size_t row = 0; row < entries_.size(); ++row) {
@@ -193,6 +185,42 @@ auto JournalEntryModel::entryText(int row) const -> QString {
     }
     const auto& text = entries_[static_cast<std::size_t>(row)].authoredText;
     return QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
+}
+
+auto JournalEntryModel::entryParentId(int row) const -> QString {
+    if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
+        return {};
+    }
+    const auto parent = entries_[static_cast<std::size_t>(row)].parentEntry;
+    return parent ? displayId(*parent) : QString{};
+}
+
+auto JournalEntryModel::entryDepth(int row) const -> int {
+    if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
+        return 0;
+    }
+    auto depth = 0;
+    auto ancestor = entries_[static_cast<std::size_t>(row)].parentEntry;
+    while (ancestor) {
+        ++depth;
+        const auto found = std::ranges::find_if(entries_, [&](const auto& candidate) -> bool {
+            return candidate.metadata.id == *ancestor;
+        });
+        ancestor = found == entries_.end() ? std::nullopt : found->parentEntry;
+    }
+    return depth;
+}
+
+auto JournalEntryModel::subtreeEnd(int row) const -> int {
+    if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
+        return row;
+    }
+    const auto depth = entryDepth(row);
+    auto end = row + 1;
+    while (end < rowCount() && entryDepth(end) > depth) {
+        ++end;
+    }
+    return end;
 }
 
 auto JournalEntryModel::rowForId(const hieda::notebook::BlockId& identifier) const -> int {
@@ -572,14 +600,11 @@ auto NotebookController::journalSelectionText(const QStringList& entryIds) const
         if (row < 0) {
             return {};
         }
-        const auto depth =
-            journalEntries_.data(journalEntries_.index(row), JournalEntryModel::DepthRole).toInt();
+        const auto depth = journalEntries_.entryDepth(row);
         minimumDepth = std::min(minimumDepth, depth);
         selected[static_cast<std::size_t>(row)] = true;
         for (auto candidate = row + 1; candidate < journalEntries_.rowCount(); ++candidate) {
-            const auto candidateDepth =
-                journalEntries_.data(journalEntries_.index(candidate), JournalEntryModel::DepthRole)
-                    .toInt();
+            const auto candidateDepth = journalEntries_.entryDepth(candidate);
             if (candidateDepth <= depth) {
                 break;
             }
@@ -592,8 +617,7 @@ auto NotebookController::journalSelectionText(const QStringList& entryIds) const
         if (!selected[static_cast<std::size_t>(row)]) {
             continue;
         }
-        const auto depth =
-            journalEntries_.data(journalEntries_.index(row), JournalEntryModel::DepthRole).toInt();
+        const auto depth = journalEntries_.entryDepth(row);
         const auto indentation = QString((depth - minimumDepth) * 2, QLatin1Char(' '));
         const auto continuationIndent = indentation + QStringLiteral("  ");
         const auto lines =
@@ -612,22 +636,11 @@ auto NotebookController::journalEntrySelection(int anchorRow, int extentRow) con
         return {{QStringLiteral("roots"), QStringList{}},
                 {QStringLiteral("entries"), QStringList{}}};
     }
-    const auto subtreeEnd = [&](int row) -> int {
-        const auto depth =
-            journalEntries_.data(journalEntries_.index(row), JournalEntryModel::DepthRole).toInt();
-        auto end = row + 1;
-        while (
-            end < journalEntries_.rowCount() &&
-            journalEntries_.data(journalEntries_.index(end), JournalEntryModel::DepthRole).toInt() >
-                depth) {
-            ++end;
-        }
-        return end;
-    };
     const auto first = std::min(anchorRow, extentRow);
-    auto end = std::max(subtreeEnd(anchorRow), subtreeEnd(extentRow));
+    auto end =
+        std::max(journalEntries_.subtreeEnd(anchorRow), journalEntries_.subtreeEnd(extentRow));
     for (auto row = first; row < end; ++row) {
-        end = std::max(end, subtreeEnd(row));
+        end = std::max(end, journalEntries_.subtreeEnd(row));
     }
 
     QStringList entries;
@@ -637,9 +650,7 @@ auto NotebookController::journalEntrySelection(int anchorRow, int extentRow) con
     }
     QStringList roots;
     for (auto row = first; row < end; ++row) {
-        const auto parent =
-            journalEntries_.data(journalEntries_.index(row), JournalEntryModel::ParentEntryIdRole)
-                .toString();
+        const auto parent = journalEntries_.entryParentId(row);
         if (parent.isEmpty() || !entries.contains(parent)) {
             roots.push_back(journalEntries_.entryId(row));
         }

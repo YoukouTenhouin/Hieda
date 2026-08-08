@@ -2240,8 +2240,23 @@ class NotebookSession::Impl {
         }
         auto outline = std::move(loaded).value();
         const auto before = outline;
-        const auto isRequested = [&](const BlockId& id) -> bool {
-            return std::ranges::find(entryIds, id) != entryIds.end();
+        const auto containsId = [](const std::vector<BlockId>& ids, const BlockId& id) -> bool {
+            return std::ranges::find(ids, id) != ids.end();
+        };
+        const auto hasAncestorIn = [&](const JournalEntry& entry,
+                                       const std::vector<BlockId>& ids) -> bool {
+            auto ancestor = entry.parentEntry;
+            while (ancestor) {
+                if (containsId(ids, *ancestor)) {
+                    return true;
+                }
+                const auto found =
+                    std::ranges::find_if(before.entries, [&](const auto& candidate) -> bool {
+                        return candidate.metadata.id == *ancestor;
+                    });
+                ancestor = found == before.entries.end() ? std::nullopt : found->parentEntry;
+            }
+            return false;
         };
         for (const auto& id : entryIds) {
             if (std::ranges::none_of(outline.entries, [&](const auto& entry) -> bool {
@@ -2254,42 +2269,15 @@ class NotebookSession::Impl {
 
         std::vector<BlockId> roots;
         for (const auto& entry : outline.entries) {
-            if (!isRequested(entry.metadata.id)) {
+            if (!containsId(entryIds, entry.metadata.id)) {
                 continue;
             }
-            auto ancestor = entry.parentEntry;
-            bool coveredByAncestor = false;
-            while (ancestor) {
-                if (isRequested(*ancestor)) {
-                    coveredByAncestor = true;
-                    break;
-                }
-                const auto found =
-                    std::ranges::find_if(outline.entries, [&](const auto& candidate) -> bool {
-                        return candidate.metadata.id == *ancestor;
-                    });
-                ancestor = found == outline.entries.end() ? std::nullopt : found->parentEntry;
-            }
-            if (!coveredByAncestor) {
+            if (!hasAncestorIn(entry, entryIds)) {
                 roots.push_back(entry.metadata.id);
             }
         }
         const auto isDeleted = [&](const JournalEntry& entry) -> bool {
-            if (std::ranges::find(roots, entry.metadata.id) != roots.end()) {
-                return true;
-            }
-            auto ancestor = entry.parentEntry;
-            while (ancestor) {
-                if (std::ranges::find(roots, *ancestor) != roots.end()) {
-                    return true;
-                }
-                const auto found =
-                    std::ranges::find_if(before.entries, [&](const auto& candidate) -> bool {
-                        return candidate.metadata.id == *ancestor;
-                    });
-                ancestor = found == before.entries.end() ? std::nullopt : found->parentEntry;
-            }
-            return false;
+            return containsId(roots, entry.metadata.id) || hasAncestorIn(entry, roots);
         };
 
         const auto now = currentTimestamp();

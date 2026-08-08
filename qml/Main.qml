@@ -73,6 +73,10 @@ ApplicationWindow {
         return editor.cursorRectangle.y + editor.cursorRectangle.height >= editor.contentHeight - editor.bottomPadding - 0.5;
     }
 
+    function textModifiers(modifiers) {
+        return modifiers & ~Qt.KeypadModifier;
+    }
+
     function applyJournalOutcome(outcome) {
         if (!outcome.succeeded)
             return false;
@@ -825,12 +829,17 @@ ApplicationWindow {
                                     if (window.handleHistoryKey(event)) {
                                         event.accepted = true;
                                     } else if (inputMethodComposing) {
+                                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                            event.accepted = true;
+
                                         return ;
-                                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) {
+                                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && window.textModifiers(event.modifiers) === Qt.NoModifier) {
                                         event.accepted = true;
                                         window.activeJournalEditor = null;
                                         if (!window.applyJournalOutcome(notebookController.splitJournalEntry(entryRoot.entryId, text, cursorPosition)))
                                             window.registerJournalEditor(entryEditor);
+                                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && window.textModifiers(event.modifiers) !== Qt.ShiftModifier) {
+                                        event.accepted = true;
                                     } else if (event.key === Qt.Key_Backspace && cursorPosition === 0 && selectionStart === selectionEnd) {
                                         event.accepted = true;
                                         window.activeJournalEditor = null;
@@ -1114,8 +1123,11 @@ ApplicationWindow {
                     if (window.handleHistoryKey(event)) {
                         event.accepted = true;
                     } else if (inputMethodComposing) {
+                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                            event.accepted = true;
+
                         return ;
-                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) {
+                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && window.textModifiers(event.modifiers) === Qt.NoModifier) {
                         event.accepted = true;
                         if (window.rolloverPending) {
                             if (draftRoot.commit(false)) {
@@ -1125,6 +1137,8 @@ ApplicationWindow {
                         } else {
                             draftRoot.commit(true);
                         }
+                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && window.textModifiers(event.modifiers) !== Qt.ShiftModifier) {
+                        event.accepted = true;
                     } else if (event.key === Qt.Key_Escape) {
                         event.accepted = true;
                         window.draftText = "";
