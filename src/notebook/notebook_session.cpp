@@ -1348,8 +1348,10 @@ class NotebookSession::Impl {
         return rewriteContainment(transaction, databases, emptyBefore, *target);
     }
 
-    auto applyHistory(JournalDate date, bool redo) -> Result<JournalPage> {
+    auto applyHistory(JournalDate date, NotebookSession::JournalHistoryDirection direction)
+        -> Result<JournalPage> {
         lastCommandCommitted = false;
+        const auto redo = direction == NotebookSession::JournalHistoryDirection::redo;
         auto& history = pageHistory(date);
         auto& source = redo ? history.redo : history.undo;
         if (source.empty()) {
@@ -2578,28 +2580,15 @@ auto NotebookSession::journalEditCapabilities(JournalDate date) const
 }
 
 auto NotebookSession::undoJournalEdit(JournalDate date) -> Result<JournalPage> {
-    std::vector<std::function<void()>> callbacks;
-    auto result = [&]() -> Result<JournalPage> {
-        std::scoped_lock lock(impl_->mutex);
-        if (!impl_->info) {
-            return Result<JournalPage>::failure(
-                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
-        }
-        if (!validJournalDate(date)) {
-            return Result<JournalPage>::failure(makeError(
-                NotebookErrorCode::invalidJournalDate, impl_->info->path, "invalid Journal date"));
-        }
-        auto outcome = impl_->applyHistory(date, false);
-        if (impl_->lastCommandCommitted) {
-            callbacks = impl_->committedCallbacks();
-        }
-        return outcome;
-    }();
-    notifyCallbacks(callbacks);
-    return result;
+    return applyJournalHistory(date, JournalHistoryDirection::undo);
 }
 
 auto NotebookSession::redoJournalEdit(JournalDate date) -> Result<JournalPage> {
+    return applyJournalHistory(date, JournalHistoryDirection::redo);
+}
+
+auto NotebookSession::applyJournalHistory(JournalDate date, JournalHistoryDirection direction)
+    -> Result<JournalPage> {
     std::vector<std::function<void()>> callbacks;
     auto result = [&]() -> Result<JournalPage> {
         std::scoped_lock lock(impl_->mutex);
@@ -2611,7 +2600,7 @@ auto NotebookSession::redoJournalEdit(JournalDate date) -> Result<JournalPage> {
             return Result<JournalPage>::failure(makeError(
                 NotebookErrorCode::invalidJournalDate, impl_->info->path, "invalid Journal date"));
         }
-        auto outcome = impl_->applyHistory(date, true);
+        auto outcome = impl_->applyHistory(date, direction);
         if (impl_->lastCommandCommitted) {
             callbacks = impl_->committedCallbacks();
         }

@@ -196,6 +196,9 @@ class NotebookSession {
 
   private:
     friend class NotebookSessionTestAccess;
+    enum class JournalHistoryDirection : std::uint8_t { undo, redo };
+    auto applyJournalHistory(JournalDate date, JournalHistoryDirection direction)
+        -> Result<JournalPage>;
     class Impl;
     std::unique_ptr<Impl> impl_;
 };
