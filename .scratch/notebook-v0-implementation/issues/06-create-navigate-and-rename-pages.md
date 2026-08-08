@@ -8,10 +8,9 @@
 
 **Status:** ready-for-agent
 
-- [ ] A user can create a titled Page according to the resolved title and collision rules.
-- [ ] A user can navigate among titled Pages and Journal Pages and return to today's Journal Page.
-- [ ] Renaming a Page preserves its stable identity and contained Blocks.
-- [ ] Missing, duplicate, invalid, and conflicting titles produce the agreed user-visible behavior.
-- [ ] Pages and their titles, identity, and Containment survive close and reopen.
-- [ ] Tests cover Page creation, navigation, rename, title edge cases, and identity stability through the Notebook interface.
-
+- [x] A user can create a titled Page according to the resolved title and collision rules.
+- [x] A user can navigate among titled Pages and Journal Pages and return to today's Journal Page.
+- [x] Renaming a Page preserves its stable identity and contained Blocks.
+- [x] Missing, duplicate, invalid, and conflicting titles produce the agreed user-visible behavior.
+- [x] Pages and their titles, identity, and Containment survive close and reopen.
+- [x] Tests cover Page creation, navigation, rename, title edge cases, and identity stability through the Notebook interface.

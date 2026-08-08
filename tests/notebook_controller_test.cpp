@@ -179,6 +179,29 @@ TEST_CASE("the Qt adapter switches Journal dates without materializing empty Pag
     CHECK(rolloverRequests == 3);
 }
 
+TEST_CASE("the Qt adapter creates renames and navigates ordinary Pages") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "pages-adapter.hieda"));
+
+    REQUIRE(controller.createPage(QStringLiteral("project"), QStringLiteral("Project")));
+    CHECK_FALSE(controller.isJournalPage());
+    CHECK(controller.currentPageName() == QStringLiteral("project"));
+    CHECK(controller.currentPageTitle() == QStringLiteral("Project"));
+    CHECK(controller.pageChoices() == QStringList{QStringLiteral("Project — project")});
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("page content")) == 0);
+
+    REQUIRE(
+        controller.renameCurrentPage(QStringLiteral("renamed"), QStringLiteral("Renamed Project")));
+    const auto pageId = controller.currentPageId();
+    controller.navigateToToday();
+    CHECK(controller.isJournalPage());
+    controller.navigateToPage(pageId);
+    CHECK_FALSE(controller.isJournalPage());
+    CHECK(controller.journalEntries()->rowCount() == 1);
+    CHECK(controller.currentPageName() == QStringLiteral("renamed"));
+}
+
 TEST_CASE("the Qt adapter exposes and edits nested Journal structure") {
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;

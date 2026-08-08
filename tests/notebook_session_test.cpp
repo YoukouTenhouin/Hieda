@@ -366,6 +366,53 @@ TEST_CASE("a Journal Page stays virtual until its first Entry is committed") {
     CHECK_FALSE(reopened.value().metadata.has_value());
 }
 
+TEST_CASE("titled Pages preserve unique names identity and contents across rename and reopen") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "pages.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(path));
+
+    const auto created = session.createPage("project_alpha", "Project Alpha");
+    REQUIRE(created);
+    const auto pageId = created.value().metadata.id;
+    REQUIRE(session.createPage("second", "Project Alpha"));
+
+    const auto duplicate = session.createPage("project_alpha", "Another title");
+    REQUIRE_FALSE(duplicate);
+    CHECK(duplicate.error().code == hieda::notebook::NotebookErrorCode::pageNameConflict);
+    CHECK_FALSE(session.createPage("Project", "Invalid name"));
+    CHECK_FALSE(session.createPage("empty-title", ""));
+
+    auto page = session.insertPageEntry(pageId, std::nullopt, "parent").value();
+    page = session.insertPageEntry(pageId, page.entries.front().metadata.id, "child").value();
+    const auto parentId = page.entries.front().metadata.id;
+    const auto childId = page.entries.back().metadata.id;
+    page = session.movePageEntry(childId, hieda::notebook::PageEntryMove::indent, "child").value();
+    CHECK(page.entries.back().parentEntry == parentId);
+    CHECK(session.pageEditCapabilities(pageId).value().canUndo);
+    const auto undone = session.undoPageEdit(pageId);
+    REQUIRE(undone);
+    CHECK_FALSE(undone.value().entries.back().parentEntry);
+    const auto redone = session.redoPageEdit(pageId);
+    REQUIRE(redone);
+    CHECK(redone.value().entries.back().parentEntry == parentId);
+
+    const auto renamed = session.renamePage(pageId, "renamed_project", "Renamed Project");
+    REQUIRE(renamed);
+    CHECK(renamed.value().metadata.id == pageId);
+    CHECK(renamed.value().entries.front().metadata.id == parentId);
+    CHECK(renamed.value().entries.back().metadata.id == childId);
+
+    session.close();
+    REQUIRE(session.open(path));
+    const auto reopened = session.page(pageId);
+    REQUIRE(reopened);
+    CHECK(reopened.value() == renamed.value());
+    REQUIRE(session.pages());
+    CHECK(session.pages().value().size() == 2);
+    CHECK(session.pages().value().front().name == "renamed_project");
+}
+
 TEST_CASE("flat Journal Entries preserve identity Unicode text and insertion order") {
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath = temporaryDirectory.path() / "journal.hieda";
@@ -774,14 +821,14 @@ TEST_CASE("failed Journal subtree deletion preserves content revision and histor
     REQUIRE(session.create(temporaryDirectory.path() / "failed-cut-subtrees.hieda"));
     const auto page = session.insertJournalEntry(date, std::nullopt, "kept").value();
     const auto entryId = page.entries.front().metadata.id;
-    const auto revision = session.current().value().revision;
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextJournalCommit(session);
 
     const auto failed = session.deleteJournalSubtrees({entryId});
 
     REQUIRE_FALSE(failed);
     CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
-    CHECK(session.current().value().revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     CHECK(session.journalPage(date).value() == page);
     CHECK(session.journalEditCapabilities(date).value().canUndo);
     CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
@@ -810,7 +857,7 @@ TEST_CASE("Journal subtree deletion normalizes duplicates and rejects invalid se
     REQUIRE(session.undoJournalEdit(firstDate));
     CHECK(session.journalPage(firstDate).value() == firstPage);
 
-    const auto revision = session.current().value().revision;
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     const auto empty = session.deleteJournalSubtrees({});
     REQUIRE_FALSE(empty);
     CHECK(empty.error().code == hieda::notebook::NotebookErrorCode::invalidStructuralMove);
@@ -822,7 +869,7 @@ TEST_CASE("Journal subtree deletion normalizes duplicates and rejects invalid se
     const auto crossPage = session.deleteJournalSubtrees({parentId, foreignId});
     REQUIRE_FALSE(crossPage);
     CHECK(crossPage.error().code == hieda::notebook::NotebookErrorCode::blockNotFound);
-    CHECK(session.current().value().revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     CHECK(session.journalPage(firstDate).value() == firstPage);
     CHECK(session.journalPage(secondDate).value() == foreignPage);
 
@@ -1083,7 +1130,7 @@ TEST_CASE("failed undo leaves acknowledged content revision and history intact")
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "failed-undo.hieda"));
     const auto page = session.insertJournalEntry(date, std::nullopt, "durable").value();
-    const auto revision = session.current()->revision;
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextJournalCommit(session);
 
     const auto failed = session.undoJournalEdit(date);
@@ -1091,7 +1138,7 @@ TEST_CASE("failed undo leaves acknowledged content revision and history intact")
     REQUIRE_FALSE(failed);
     CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
     CHECK(session.journalPage(date).value() == page);
-    CHECK(session.current()->revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     CHECK(session.journalEditCapabilities(date).value().canUndo);
     CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
 }
@@ -1131,7 +1178,7 @@ TEST_CASE("failed redo preserves the undone state and redo capability") {
     REQUIRE(session.create(temporaryDirectory.path() / "failed-redo.hieda"));
     const auto committed = session.insertJournalEntry(date, std::nullopt, "durable").value();
     const auto undone = session.undoJournalEdit(date).value();
-    const auto revision = session.current()->revision;
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextJournalCommit(session);
 
     const auto failed = session.redoJournalEdit(date);
@@ -1139,7 +1186,7 @@ TEST_CASE("failed redo preserves the undone state and redo capability") {
     REQUIRE_FALSE(failed);
     CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
     CHECK(session.journalPage(date).value() == undone);
-    CHECK(session.current()->revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     CHECK(session.journalEditCapabilities(date).value().canRedo);
     CHECK(session.redoJournalEdit(date).value() == committed);
 }
@@ -1149,8 +1196,8 @@ TEST_CASE("Journal history evicts old actions under its memory budget") {
     hieda::notebook::NotebookSession session;
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "bounded-history.hieda"));
-    const std::string firstText(17 * 1024 * 1024, 'a');
-    const std::string secondText(17 * 1024 * 1024, 'b');
+    const std::string firstText(17ULL * 1024ULL * 1024ULL, 'a');
+    const std::string secondText(17ULL * 1024ULL * 1024ULL, 'b');
     const auto inserted = session.insertJournalEntry(date, std::nullopt, firstText).value();
     const auto id = inserted.entries.front().metadata.id;
     REQUIRE(session.updateJournalEntry(id, secondText));

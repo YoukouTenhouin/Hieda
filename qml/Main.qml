@@ -321,6 +321,34 @@ ApplicationWindow {
     }
 
     Action {
+        id: newPageAction
+        objectName: "newPageAction"
+        text: qsTr("&New Page…")
+        enabled: notebookController.hasOpenNotebook
+        onTriggered: newPageDialog.open()
+    }
+
+    Action {
+        id: goToPageAction
+        objectName: "goToPageAction"
+        text: qsTr("&Go to Page…")
+        enabled: notebookController.hasOpenNotebook
+        onTriggered: goToPageDialog.open()
+    }
+
+    Action {
+        id: renamePageAction
+        objectName: "renamePageAction"
+        text: qsTr("&Rename Page…")
+        enabled: notebookController.hasOpenNotebook && !notebookController.isJournalPage
+        onTriggered: {
+            renamePageName.text = notebookController.currentPageName;
+            renamePageTitle.text = notebookController.currentPageTitle;
+            renamePageDialog.open();
+        }
+    }
+
+    Action {
         id: cutAction
 
         objectName: "cutAction"
@@ -389,6 +417,87 @@ ApplicationWindow {
         defaultSuffix: "hieda"
         nameFilters: [qsTr("Hieda Notebooks (*.hieda)"), qsTr("All files (*)")]
         onAccepted: notebookController.createNotebook(selectedFile)
+    }
+
+    Dialog {
+        id: newPageDialog
+        title: qsTr("New Page")
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: {
+            if (!notebookController.createPage(newPageName.text, newPageTitle.text))
+                open();
+            else {
+                newPageName.clear();
+                newPageTitle.clear();
+            }
+        }
+        ColumnLayout {
+            Label { text: qsTr("Name") }
+            TextField { id: newPageName; objectName: "newPageName"; placeholderText: qsTr("project_name") }
+            Label { text: qsTr("Display title") }
+            TextField { id: newPageTitle; objectName: "newPageTitle" }
+        }
+    }
+
+    Dialog {
+        id: renamePageDialog
+        title: qsTr("Rename Page")
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: {
+            if (!notebookController.renameCurrentPage(renamePageName.text, renamePageTitle.text))
+                open();
+        }
+        ColumnLayout {
+            Label { text: qsTr("Name") }
+            TextField { id: renamePageName; objectName: "renamePageName" }
+            Label { text: qsTr("Display title") }
+            TextField { id: renamePageTitle; objectName: "renamePageTitle" }
+        }
+    }
+
+    Dialog {
+        id: goToPageDialog
+        title: qsTr("Go to Page")
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Close
+        ColumnLayout {
+            ComboBox {
+                id: pagePicker
+                objectName: "pagePicker"
+                Layout.fillWidth: true
+                model: notebookController.pageChoices
+            }
+            Button {
+                text: qsTr("Open selected Page")
+                enabled: pagePicker.currentIndex >= 0
+                onClicked: {
+                    if (window.commitActiveJournalEditor()) {
+                        notebookController.navigateToPage(notebookController.pageIdAt(pagePicker.currentIndex));
+                        goToPageDialog.close();
+                    }
+                }
+            }
+            TextField {
+                id: journalDateField
+                objectName: "journalDateField"
+                placeholderText: qsTr("YYYY-MM-DD")
+            }
+            Button {
+                text: qsTr("Open Journal date")
+                onClicked: {
+                    if (window.commitActiveJournalEditor()) {
+                        notebookController.navigateToJournalDateText(journalDateField.text);
+                        if (notebookController.errorMessage.length === 0)
+                        goToPageDialog.close();
+                    }
+                }
+            }
+        }
     }
 
     FileDialog {
@@ -478,6 +587,47 @@ ApplicationWindow {
 
                 }
 
+                Frame {
+                    id: pageSidebar
+                    objectName: "pageSidebar"
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: Math.min(240, Math.max(180, parent.width * 0.24))
+                    visible: notebookController.hasOpenNotebook
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        Label { text: qsTr("Journal"); font.bold: true }
+                        RowLayout {
+                            Button { text: qsTr("Previous"); onClicked: notebookController.navigateToPreviousJournalDate() }
+                            Button { text: qsTr("Today"); onClicked: notebookController.navigateToToday() }
+                            Button { text: qsTr("Next"); onClicked: notebookController.navigateToNextJournalDate() }
+                        }
+                        Label { text: qsTr("Pages"); font.bold: true }
+                        ListView {
+                            id: pageList
+                            objectName: "pageList"
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            model: notebookController.pageChoices
+                            clip: true
+                            delegate: Button {
+                                required property string modelData
+                                required property int index
+                                width: ListView.view.width
+                                text: modelData
+                                highlighted: notebookController.currentPageId === notebookController.pageIdAt(index)
+                                onClicked: {
+                                    if (window.commitActiveJournalEditor())
+                                        notebookController.navigateToPage(notebookController.pageIdAt(index));
+                                }
+                            }
+                        }
+                        Button { action: newPageAction; Layout.fillWidth: true }
+                    }
+                }
+
                 ListView {
                     id: journalList
 
@@ -488,8 +638,8 @@ ApplicationWindow {
                     objectName: "journalList"
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: Math.min(parent.width - (window.uiSpacing * 8), window.maximumDocumentWidth)
+                    x: pageSidebar.width + Math.max(window.uiSpacing * 2, (parent.width - pageSidebar.width - width) / 2)
+                    width: Math.min(parent.width - pageSidebar.width - (window.uiSpacing * 4), window.maximumDocumentWidth)
                     visible: notebookController.hasOpenNotebook
                     clip: true
                     model: notebookController.journalEntries
@@ -513,10 +663,10 @@ ApplicationWindow {
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.top: parent.top
                             anchors.topMargin: window.uiSpacing * 4
-                            text: Qt.formatDate(notebookController.journalDate, Locale.LongFormat)
+                            text: notebookController.isJournalPage ? Qt.formatDate(notebookController.journalDate, Locale.LongFormat) : notebookController.currentPageTitle
                             font.pixelSize: Math.round(window.font.pixelSize * 1.7)
                             font.weight: Font.DemiBold
-                            Accessible.name: qsTr("Journal Page for %1").arg(text)
+                            Accessible.name: notebookController.isJournalPage ? qsTr("Journal Page for %1").arg(text) : qsTr("Page %1, name %2").arg(text).arg(notebookController.currentPageName)
                         }
 
                     }
@@ -1227,6 +1377,16 @@ ApplicationWindow {
                 action: redoAction
             }
 
+        }
+
+        Menu {
+            title: qsTr("&Page")
+
+            MenuItem { action: newPageAction }
+            MenuItem { action: goToPageAction }
+            MenuItem { action: renamePageAction }
+            MenuSeparator { }
+            MenuItem { text: qsTr("Today"); onTriggered: notebookController.navigateToToday() }
         }
 
     }

@@ -57,6 +57,11 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QAbstractItemModel* journalEntries READ journalEntries CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
+    Q_PROPERTY(bool isJournalPage READ isJournalPage NOTIFY journalChanged)
+    Q_PROPERTY(QString currentPageId READ currentPageId NOTIFY journalChanged)
+    Q_PROPERTY(QString currentPageName READ currentPageName NOTIFY journalChanged)
+    Q_PROPERTY(QString currentPageTitle READ currentPageTitle NOTIFY journalChanged)
+    Q_PROPERTY(QStringList pageChoices READ pageChoices NOTIFY stateChanged)
 
   public:
     explicit NotebookController(QObject* parent = nullptr);
@@ -69,11 +74,25 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto journalEntries() -> QAbstractItemModel*;
     [[nodiscard]] auto canUndo() const -> bool;
     [[nodiscard]] auto canRedo() const -> bool;
+    [[nodiscard]] auto isJournalPage() const -> bool;
+    [[nodiscard]] auto currentPageId() const -> QString;
+    [[nodiscard]] auto currentPageName() const -> QString;
+    [[nodiscard]] auto currentPageTitle() const -> QString;
+    [[nodiscard]] auto pageChoices() const -> QStringList;
+    [[nodiscard]] Q_INVOKABLE auto pageIdAt(int index) const -> QString;
 
     Q_INVOKABLE void createNotebook(const QUrl& url);
     Q_INVOKABLE void openNotebook(const QUrl& url);
     Q_INVOKABLE void closeNotebook();
     Q_INVOKABLE void clearError();
+    Q_INVOKABLE auto createPage(const QString& name, const QString& displayTitle) -> bool;
+    Q_INVOKABLE auto renameCurrentPage(const QString& name, const QString& displayTitle) -> bool;
+    Q_INVOKABLE void navigateToPage(const QString& pageId);
+    Q_INVOKABLE void navigateToJournalDate(const QDate& date);
+    Q_INVOKABLE void navigateToJournalDateText(const QString& isoDate);
+    Q_INVOKABLE void navigateToToday();
+    Q_INVOKABLE void navigateToPreviousJournalDate();
+    Q_INVOKABLE void navigateToNextJournalDate();
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     Q_INVOKABLE auto insertJournalEntry(const QString& authoredText,
                                         const QString& afterEntryId = {}) -> int;
@@ -98,7 +117,7 @@ class NotebookController final : public QObject {
         -> QString;
     [[nodiscard]] Q_INVOKABLE auto journalEntrySelection(int anchorRow, int extentRow) const
         -> QVariantMap;
-    Q_INVOKABLE void copyTextToClipboard(const QString& text) const;
+    Q_INVOKABLE static void copyTextToClipboard(const QString& text);
     Q_INVOKABLE auto deleteJournalSubtrees(const QStringList& entryIds) -> QVariantMap;
     Q_INVOKABLE auto undoJournalEdit(const QString& preferredEntryId = {}, int cursorPosition = 0)
         -> QVariantMap;
@@ -122,6 +141,8 @@ class NotebookController final : public QObject {
     void reject(const hieda::notebook::NotebookError& error);
     void rejectSave(const hieda::notebook::NotebookError& error);
     void loadJournalDate(const QDate& date);
+    void loadPage(const hieda::notebook::BlockId& pageId);
+    void refreshPages();
     auto moveJournalEntry(const QString& entryId, const QString& authoredText,
                           hieda::notebook::JournalEntryMove movement, int cursorPosition)
         -> QVariantMap;
@@ -135,6 +156,11 @@ class NotebookController final : public QObject {
     QString error_;
     QDate journalDate_;
     QDate pendingJournalDate_;
+    std::optional<hieda::notebook::BlockId> currentPageId_;
+    QString currentPageName_;
+    QString currentPageTitle_;
+    QStringList pageChoices_;
+    std::vector<hieda::notebook::BlockId> pageIds_;
     JournalEntryModel journalEntries_;
     QTimer midnightTimer_;
 };

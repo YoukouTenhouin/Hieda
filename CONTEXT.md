@@ -20,6 +20,10 @@ _Avoid_: Daily note, journal
 A short, plain-text block for quickly capturing an idea, included in a journal page through an ordered containment relationship.
 _Avoid_: Journal block, note
 
+**Page Entry**:
+A short authored-text block contained in an ordinary Page. It has the same outline editing behavior as a Journal Entry but remains a distinct Block type.
+_Avoid_: Journal Entry, document
+
 **Page**:
 A titled block that provides a stable destination for organizing and linking content. A journal page is a date-associated specialization of a page.
 _Avoid_: Document, article

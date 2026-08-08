@@ -90,6 +90,31 @@ struct JournalPage {
     auto operator==(const JournalPage&) const -> bool = default;
 };
 
+struct PageEntry {
+    BlockMetadata metadata;
+    std::string authoredText;
+    std::optional<BlockId> parentEntry;
+
+    auto operator==(const PageEntry&) const -> bool = default;
+};
+
+struct PageSummary {
+    BlockMetadata metadata;
+    std::string name;
+    std::string displayTitle;
+
+    auto operator==(const PageSummary&) const -> bool = default;
+};
+
+struct Page {
+    BlockMetadata metadata;
+    std::string name;
+    std::string displayTitle;
+    std::vector<PageEntry> entries;
+
+    auto operator==(const Page&) const -> bool = default;
+};
+
 struct JournalEditCapabilities {
     bool canUndo{false};
     bool canRedo{false};
@@ -98,6 +123,7 @@ struct JournalEditCapabilities {
 };
 
 enum class JournalEntryMove : std::uint8_t { indent, outdent, up, down };
+enum class PageEntryMove : std::uint8_t { indent, outdent, up, down };
 
 enum class NotebookErrorCode : std::uint8_t {
     pathNotFound,
@@ -119,6 +145,9 @@ enum class NotebookErrorCode : std::uint8_t {
     blockHasChildren,
     undoUnavailable,
     redoUnavailable,
+    invalidPageName,
+    invalidPageTitle,
+    pageNameConflict,
 };
 
 struct NotebookError {
@@ -177,6 +206,26 @@ class NotebookSession {
     [[nodiscard]] auto isOpen() const noexcept -> bool;
     [[nodiscard]] auto current() const -> std::optional<NotebookInfo>;
     [[nodiscard]] auto journalPage(JournalDate date) const -> Result<JournalPage>;
+    [[nodiscard]] auto pages() const -> Result<std::vector<PageSummary>>;
+    [[nodiscard]] auto page(BlockId pageId) const -> Result<Page>;
+    [[nodiscard]] auto createPage(std::string name, std::string displayTitle) -> Result<Page>;
+    [[nodiscard]] auto renamePage(BlockId pageId, std::string name, std::string displayTitle)
+        -> Result<Page>;
+    [[nodiscard]] auto insertPageEntry(BlockId pageId, std::optional<BlockId> afterEntry,
+                                       std::string authoredText) -> Result<Page>;
+    [[nodiscard]] auto updatePageEntry(BlockId entryId, std::string authoredText)
+        -> Result<PageEntry>;
+    [[nodiscard]] auto splitPageEntry(BlockId entryId, std::string authoredText,
+                                      std::size_t cursorByteOffset) -> Result<Page>;
+    [[nodiscard]] auto joinPageEntry(BlockId entryId, std::string authoredText) -> Result<Page>;
+    [[nodiscard]] auto movePageEntry(BlockId entryId, PageEntryMove movement,
+                                     std::string authoredText) -> Result<Page>;
+    [[nodiscard]] auto deletePageEntry(BlockId entryId) -> Result<Page>;
+    [[nodiscard]] auto deletePageSubtrees(std::vector<BlockId> entryIds) -> Result<Page>;
+    [[nodiscard]] auto pageEditCapabilities(BlockId pageId) const
+        -> Result<JournalEditCapabilities>;
+    [[nodiscard]] auto undoPageEdit(BlockId pageId) -> Result<Page>;
+    [[nodiscard]] auto redoPageEdit(BlockId pageId) -> Result<Page>;
     [[nodiscard]] auto insertJournalEntry(JournalDate date, std::optional<BlockId> afterEntry,
                                           std::string authoredText) -> Result<JournalPage>;
     [[nodiscard]] auto updateJournalEntry(BlockId entryId, std::string authoredText)

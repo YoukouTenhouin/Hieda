@@ -40,6 +40,32 @@ auto waitUntil(Predicate predicate, std::chrono::milliseconds timeout = std::chr
 
 } // namespace
 
+TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(
+        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("page-ui.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("project"), QStringLiteral("Project")));
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* sidebar = root->findChild<QQuickItem*>(QStringLiteral("pageSidebar"));
+    auto* pageList = root->findChild<QQuickItem*>(QStringLiteral("pageList"));
+    REQUIRE(sidebar != nullptr);
+    REQUIRE(pageList != nullptr);
+    CHECK(sidebar->isVisible());
+    CHECK(pageList->property("count").toInt() == 1);
+    REQUIRE(root->findChild<QObject*>(QStringLiteral("newPageAction")) != nullptr);
+    REQUIRE(root->findChild<QObject*>(QStringLiteral("goToPageAction")) != nullptr);
+    REQUIRE(root->findChild<QObject*>(QStringLiteral("renamePageAction")) != nullptr);
+}
+
 TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings") {
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
