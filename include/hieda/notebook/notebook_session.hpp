@@ -77,6 +77,7 @@ struct BlockMetadata {
 struct JournalEntry {
     BlockMetadata metadata;
     std::string authoredText;
+    std::optional<BlockId> parentEntry;
 
     auto operator==(const JournalEntry&) const -> bool = default;
 };
@@ -88,6 +89,8 @@ struct JournalPage {
 
     auto operator==(const JournalPage&) const -> bool = default;
 };
+
+enum class JournalEntryMove : std::uint8_t { indent, outdent, up, down };
 
 enum class NotebookErrorCode : std::uint8_t {
     pathNotFound,
@@ -104,6 +107,9 @@ enum class NotebookErrorCode : std::uint8_t {
     invalidAuthoredText,
     blockNotFound,
     invalidInsertionPoint,
+    invalidCursorPosition,
+    invalidStructuralMove,
+    blockHasChildren,
 };
 
 struct NotebookError {
@@ -166,6 +172,13 @@ class NotebookSession {
                                           std::string authoredText) -> Result<JournalPage>;
     [[nodiscard]] auto updateJournalEntry(BlockId entryId, std::string authoredText)
         -> Result<JournalEntry>;
+    [[nodiscard]] auto splitJournalEntry(BlockId entryId, std::string authoredText,
+                                         std::size_t cursorByteOffset) -> Result<JournalPage>;
+    [[nodiscard]] auto joinJournalEntry(BlockId entryId, std::string authoredText)
+        -> Result<JournalPage>;
+    [[nodiscard]] auto moveJournalEntry(BlockId entryId, JournalEntryMove movement,
+                                        std::string authoredText) -> Result<JournalPage>;
+    [[nodiscard]] auto deleteJournalEntry(BlockId entryId) -> Result<JournalPage>;
     [[nodiscard]] auto subscribeToChanges(std::function<void()> callback) -> NotebookSubscription;
 
   private:

@@ -9,6 +9,7 @@ ApplicationWindow {
 
     readonly property real uiSpacing: Math.max(6, Math.round(font.pixelSize * 0.6))
     readonly property real maximumDocumentWidth: 780
+    readonly property int structureModifier: Qt.platform.os === "osx" ? Qt.MetaModifier : Qt.ControlModifier
     property string draftAfterId: ""
     property string draftText: ""
     property var activeJournalEditor: null
@@ -42,6 +43,18 @@ ApplicationWindow {
                 item.focusEditor(cursorPosition);
 
         });
+    }
+
+    function applyJournalOutcome(outcome) {
+        if (!outcome.succeeded)
+            return false;
+
+        draftAfterId = "";
+        draftText = "";
+        if (outcome.row >= 0)
+            focusEntry(outcome.row, outcome.cursorPosition);
+
+        return true;
     }
 
     function registerJournalEditor(editor) {
@@ -274,7 +287,16 @@ ApplicationWindow {
 
                         required property string entryId
                         required property string authoredText
+                        required property int depth
+                        required property bool hasChildren
+                        required property bool canIndent
+                        required property bool canOutdent
+                        required property bool canMoveUp
+                        required property bool canMoveDown
+                        required property bool canDelete
                         required property int index
+                        readonly property real outlineIndent: depth * window.uiSpacing * 3
+                        readonly property var contextMenu: entryMenu
                         readonly property real editorHeight: Math.max(entryEditor.contentHeight, entryEditor.font.pixelSize * 1.45) + (window.uiSpacing * 0.7)
 
                         function focusEditor(cursorPosition) {
@@ -297,7 +319,8 @@ ApplicationWindow {
                         height: editorHeight + inlineDraft.height
 
                         Rectangle {
-                            width: parent.width
+                            x: entryRoot.outlineIndent
+                            width: parent.width - x
                             height: entryRoot.editorHeight
                             color: palette.alternateBase
                             opacity: entryHover.hovered || entryEditor.activeFocus ? 0.35 : 0
@@ -308,7 +331,8 @@ ApplicationWindow {
                         }
 
                         RowLayout {
-                            width: parent.width
+                            x: entryRoot.outlineIndent
+                            width: parent.width - x
                             height: entryRoot.editorHeight
                             spacing: window.uiSpacing
 
@@ -321,9 +345,74 @@ ApplicationWindow {
                                 color: palette.text
 
                                 TapHandler {
+                                    acceptedButtons: Qt.LeftButton
                                     onTapped: entryRoot.focusEditor(entryEditor.cursorPosition)
                                 }
 
+                                TapHandler {
+                                    acceptedButtons: Qt.RightButton
+                                    onTapped: entryMenu.popup()
+                                }
+
+                            }
+
+
+                            Menu {
+                                id: entryMenu
+
+                                objectName: "journalEntryMenu-" + entryRoot.index
+
+                                MenuItem {
+                                    text: qsTr("Indent")
+                                    enabled: entryRoot.canIndent
+                                    onTriggered: {
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.indentJournalEntry(entryRoot.entryId, entryEditor.text, entryEditor.cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
+                                    }
+                                }
+
+                                MenuItem {
+                                    text: qsTr("Outdent")
+                                    enabled: entryRoot.canOutdent
+                                    onTriggered: {
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.outdentJournalEntry(entryRoot.entryId, entryEditor.text, entryEditor.cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
+                                    }
+                                }
+
+                                MenuItem {
+                                    text: qsTr("Move Up")
+                                    enabled: entryRoot.canMoveUp
+                                    onTriggered: {
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.moveJournalEntryUp(entryRoot.entryId, entryEditor.text, entryEditor.cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
+                                    }
+                                }
+
+                                MenuItem {
+                                    text: qsTr("Move Down")
+                                    enabled: entryRoot.canMoveDown
+                                    onTriggered: {
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.moveJournalEntryDown(entryRoot.entryId, entryEditor.text, entryEditor.cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
+                                    }
+                                }
+
+                                MenuSeparator {
+                                }
+
+                                MenuItem {
+                                    text: qsTr("Delete Entry")
+                                    enabled: entryRoot.canDelete
+                                    onTriggered: {
+                                        window.activeJournalEditor = null;
+                                        window.applyJournalOutcome(notebookController.deleteJournalEntry(entryRoot.entryId));
+                                    }
+                                }
                             }
 
                             TextArea {
@@ -353,12 +442,34 @@ ApplicationWindow {
                                 Keys.onPressed: function(event) {
                                     if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                                         event.accepted = true;
-                                        if (entryRoot.commit()) {
-                                            if (window.rolloverPending)
-                                                journalList.forceActiveFocus();
-                                            else
-                                                window.beginDraft(entryRoot.entryId);
-                                        }
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.splitJournalEntry(entryRoot.entryId, text, cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
+                                    } else if (event.key === Qt.Key_Backspace && cursorPosition === 0 && selectionStart === selectionEnd) {
+                                        event.accepted = true;
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.joinJournalEntry(entryRoot.entryId, text)))
+                                            window.registerJournalEditor(entryEditor);
+                                    } else if (event.key === Qt.Key_Tab && !(event.modifiers & Qt.ShiftModifier)) {
+                                        event.accepted = true;
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.indentJournalEntry(entryRoot.entryId, text, cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
+                                    } else if (event.key === Qt.Key_Backtab || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))) {
+                                        event.accepted = true;
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.outdentJournalEntry(entryRoot.entryId, text, cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
+                                    } else if ((event.modifiers & window.structureModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Up) {
+                                        event.accepted = true;
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.moveJournalEntryUp(entryRoot.entryId, text, cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
+                                    } else if ((event.modifiers & window.structureModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Down) {
+                                        event.accepted = true;
+                                        window.activeJournalEditor = null;
+                                        if (!window.applyJournalOutcome(notebookController.moveJournalEntryDown(entryRoot.entryId, text, cursorPosition)))
+                                            window.registerJournalEditor(entryEditor);
                                     } else if (event.key === Qt.Key_Escape) {
                                         event.accepted = true;
                                         text = entryRoot.authoredText;
@@ -389,7 +500,8 @@ ApplicationWindow {
 
                             anchors.top: parent.top
                             anchors.topMargin: entryRoot.editorHeight
-                            width: parent.width
+                            x: entryRoot.outlineIndent
+                            width: parent.width - x
                             insertionAfterId: entryRoot.entryId
                             anchorRow: entryRoot.index
                             activeDraft: entryRoot.index + 1 < journalList.count && window.draftAfterId === entryRoot.entryId

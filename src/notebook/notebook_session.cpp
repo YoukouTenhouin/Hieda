@@ -16,6 +16,7 @@
 #include <limits>
 #include <mutex>
 #include <random>
+#include <ranges>
 #include <sstream>
 #include <system_error>
 #include <unordered_map>
@@ -623,6 +624,18 @@ struct JournalDatabases {
     MDB_dbi journalByDate{0};
 };
 
+struct ParentLink {
+    BlockId parent;
+    std::uint64_t rank{0};
+};
+
+struct LoadedOutline {
+    BlockRecord page;
+    std::vector<JournalEntry> entries;
+};
+
+enum class OutlineEditKind : std::uint8_t { split, join, indent, outdent, up, down, erase };
+
 auto openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path)
     -> Result<JournalDatabases> {
     JournalDatabases databases;
@@ -850,6 +863,321 @@ class NotebookSession::Impl {
         }
     }
 
+    auto childrenOf(MDB_txn* transaction, const JournalDatabases& databases,
+                    const BlockId& parent) const
+        -> Result<std::vector<std::pair<BlockId, std::uint64_t>>> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        std::vector<std::pair<BlockId, std::uint64_t>> children;
+        MDB_cursor* cursor = nullptr;
+        auto result = mdb_cursor_open(transaction, databases.containmentByParent, &cursor);
+        if (result != MDB_SUCCESS) {
+            return Result<std::vector<std::pair<BlockId, std::uint64_t>>>::failure(
+                errorFromLmdb(path, result, "open Containment children"));
+        }
+        auto start = containmentParentKey(parent, 0);
+        MDB_val key{start.size(), start.data()};
+        MDB_val value{};
+        result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+        while (result == MDB_SUCCESS && key.mv_size == 24 &&
+               std::memcmp(key.mv_data, parent.bytes.data(), parent.bytes.size()) == 0) {
+            if (value.mv_size != BlockId{}.bytes.size()) {
+                mdb_cursor_close(cursor);
+                return Result<std::vector<std::pair<BlockId, std::uint64_t>>>::failure(makeError(
+                    NotebookErrorCode::invalidNotebook, path, "invalid Containment child"));
+            }
+            BlockId child;
+            std::memcpy(child.bytes.data(), value.mv_data, child.bytes.size());
+            children.emplace_back(child, rankFromParentKey(key));
+            result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+        }
+        mdb_cursor_close(cursor);
+        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+            return Result<std::vector<std::pair<BlockId, std::uint64_t>>>::failure(
+                errorFromLmdb(path, result, "read Containment children"));
+        }
+        return Result<std::vector<std::pair<BlockId, std::uint64_t>>>::success(std::move(children));
+    }
+
+    auto parentOf(MDB_txn* transaction, const JournalDatabases& databases,
+                  const BlockId& child) const -> Result<ParentLink> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        auto key = blockKey(child);
+        MDB_val value{};
+        const auto result = mdb_get(transaction, databases.containmentByChild, &key, &value);
+        if (result == MDB_NOTFOUND) {
+            return Result<ParentLink>::failure(makeError(NotebookErrorCode::invalidNotebook, path,
+                                                         "contained Block has no parent"));
+        }
+        if (result != MDB_SUCCESS || value.mv_size != 24) {
+            return Result<ParentLink>::failure(
+                result == MDB_SUCCESS ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                                  "invalid Containment parent index")
+                                      : errorFromLmdb(path, result, "read Containment parent"));
+        }
+        ParentLink link;
+        std::memcpy(link.parent.bytes.data(), value.mv_data, link.parent.bytes.size());
+        MDB_val encoded{value.mv_size, value.mv_data};
+        link.rank = rankFromParentKey(encoded);
+        return Result<ParentLink>::success(link);
+    }
+
+    auto loadOutline(MDB_txn* transaction, const JournalDatabases& databases,
+                     BlockRecord page) const -> Result<LoadedOutline> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        LoadedOutline outline{std::move(page), {}};
+        struct PendingEntry {
+            BlockId id;
+            std::optional<BlockId> parentEntry;
+            std::uint64_t rank{0};
+        };
+        std::vector<PendingEntry> pending;
+        auto roots = childrenOf(transaction, databases, outline.page.metadata.id);
+        if (!roots) {
+            return Result<LoadedOutline>::failure(roots.error());
+        }
+        for (const auto& [identifier, rank] : roots.value() | std::views::reverse) {
+            pending.push_back({identifier, std::nullopt, rank});
+        }
+        std::vector<BlockId> visited;
+        while (!pending.empty()) {
+            const auto current = pending.back();
+            pending.pop_back();
+            if (std::ranges::find(visited, current.id) != visited.end()) {
+                return Result<LoadedOutline>::failure(makeError(
+                    NotebookErrorCode::invalidNotebook, path, "cyclic Journal Containment"));
+            }
+            visited.push_back(current.id);
+            auto parent = parentOf(transaction, databases, current.id);
+            const auto expectedParent = current.parentEntry.value_or(outline.page.metadata.id);
+            if (!parent || parent.value().parent != expectedParent ||
+                parent.value().rank != current.rank) {
+                return Result<LoadedOutline>::failure(
+                    parent ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                       "inconsistent Journal Containment indexes")
+                           : parent.error());
+            }
+            auto block = readBlock(transaction, databases.blocks, current.id, path);
+            if (!block || block.value().type != BlockType::journalEntry) {
+                return Result<LoadedOutline>::failure(
+                    block ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                      "Journal contains a non-Entry Block")
+                          : block.error());
+            }
+            outline.entries.push_back(
+                {block.value().metadata, block.value().authoredText, current.parentEntry});
+            auto children = childrenOf(transaction, databases, current.id);
+            if (!children) {
+                return Result<LoadedOutline>::failure(children.error());
+            }
+            for (const auto& [identifier, rank] : children.value() | std::views::reverse) {
+                pending.push_back({identifier, current.id, rank});
+            }
+        }
+        return Result<LoadedOutline>::success(std::move(outline));
+    }
+
+    auto loadOutlineForEntry(MDB_txn* transaction, const JournalDatabases& databases,
+                             BlockId entryId) const -> Result<LoadedOutline> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        auto entry = readBlock(transaction, databases.blocks, entryId, path);
+        if (!entry || entry.value().type != BlockType::journalEntry) {
+            return Result<LoadedOutline>::failure(
+                entry ? makeError(NotebookErrorCode::blockNotFound, path,
+                                  "Block is not a Journal Entry")
+                      : entry.error());
+        }
+        std::vector<BlockId> visited{entryId};
+        auto current = entryId;
+        while (true) {
+            auto parent = parentOf(transaction, databases, current);
+            if (!parent) {
+                return Result<LoadedOutline>::failure(parent.error());
+            }
+            if (std::ranges::find(visited, parent.value().parent) != visited.end()) {
+                return Result<LoadedOutline>::failure(makeError(
+                    NotebookErrorCode::invalidNotebook, path, "cyclic Journal Containment"));
+            }
+            visited.push_back(parent.value().parent);
+            auto block = readBlock(transaction, databases.blocks, parent.value().parent, path);
+            if (!block) {
+                return Result<LoadedOutline>::failure(block.error());
+            }
+            if (block.value().type == BlockType::journalPage) {
+                return loadOutline(transaction, databases, std::move(block).value());
+            }
+            if (block.value().type != BlockType::journalEntry) {
+                return Result<LoadedOutline>::failure(makeError(NotebookErrorCode::invalidNotebook,
+                                                                path, "invalid Journal ancestor"));
+            }
+            current = parent.value().parent;
+        }
+    }
+
+    auto eraseContainment(MDB_txn* transaction, const JournalDatabases& databases,
+                          const JournalEntry& entry) const -> std::optional<NotebookError> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        auto parent = parentOf(transaction, databases, entry.metadata.id);
+        if (!parent) {
+            return parent.error();
+        }
+        auto parentKey = containmentParentKey(parent.value().parent, parent.value().rank);
+        MDB_val encodedParent{parentKey.size(), parentKey.data()};
+        auto result = mdb_del(transaction, databases.containmentByParent, &encodedParent, nullptr);
+        if (result != MDB_SUCCESS) {
+            return errorFromLmdb(path, result, "remove Containment ordering");
+        }
+        auto childKey = blockKey(entry.metadata.id);
+        result = mdb_del(transaction, databases.containmentByChild, &childKey, nullptr);
+        if (result != MDB_SUCCESS) {
+            return errorFromLmdb(path, result, "remove Containment parent");
+        }
+        return std::nullopt;
+    }
+
+    auto rewriteContainment(MDB_txn* transaction, const JournalDatabases& databases,
+                            const LoadedOutline& before, const LoadedOutline& after) const
+        -> std::optional<NotebookError> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        for (const auto& entry : before.entries) {
+            if (auto error = eraseContainment(transaction, databases, entry)) {
+                return error;
+            }
+        }
+        constexpr std::uint64_t rankGap = 1ULL << 32U;
+        std::vector<std::pair<BlockId, std::uint64_t>> nextRanks;
+        for (const auto& entry : after.entries) {
+            const auto parent = entry.parentEntry.value_or(after.page.metadata.id);
+            auto rank = rankGap;
+            auto found = std::ranges::find_if(
+                nextRanks, [&](const auto& item) -> bool { return item.first == parent; });
+            if (found == nextRanks.end()) {
+                nextRanks.emplace_back(parent, rankGap * 2U);
+            } else {
+                rank = found->second;
+                found->second += rankGap;
+            }
+            auto parentBytes = containmentParentKey(parent, rank);
+            MDB_val parentKey{parentBytes.size(), parentBytes.data()};
+            MDB_val childValue{entry.metadata.id.bytes.size(),
+                               const_cast<std::byte*>(entry.metadata.id.bytes.data())};
+            auto result = mdb_put(transaction, databases.containmentByParent, &parentKey,
+                                  &childValue, MDB_NOOVERWRITE);
+            if (result != MDB_SUCCESS) {
+                return errorFromLmdb(path, result, "write Containment ordering");
+            }
+            auto childKey = blockKey(entry.metadata.id);
+            MDB_val parentValue{parentBytes.size(), parentBytes.data()};
+            result = mdb_put(transaction, databases.containmentByChild, &childKey, &parentValue,
+                             MDB_NOOVERWRITE);
+            if (result != MDB_SUCCESS) {
+                return errorFromLmdb(path, result, "write Containment parent");
+            }
+        }
+        return std::nullopt;
+    }
+
+    static auto subtreeEnd(const std::vector<JournalEntry>& entries, std::size_t root)
+        -> std::size_t {
+        const auto rootId = entries[root].metadata.id;
+        auto index = root + 1;
+        for (; index < entries.size(); ++index) {
+            auto parent = entries[index].parentEntry;
+            bool descendant = false;
+            while (parent) {
+                if (*parent == rootId) {
+                    descendant = true;
+                    break;
+                }
+                const auto found =
+                    std::ranges::find_if(entries, [&](const auto& candidate) -> bool {
+                        return candidate.metadata.id == *parent;
+                    });
+                if (found == entries.end()) {
+                    break;
+                }
+                parent = found->parentEntry;
+            }
+            if (!descendant) {
+                break;
+            }
+        }
+        return index;
+    }
+
+    auto touchContainer(MDB_txn* transaction, const JournalDatabases& databases,
+                        LoadedOutline& outline, std::optional<BlockId> parent,
+                        BlockTimestamp now) const -> std::optional<NotebookError> {
+        if (!parent) {
+            outline.page.metadata.updatedAt = now;
+            return writeBlock(transaction, databases.blocks, outline.page,
+                              info.value_or(NotebookInfo{}).path);
+        }
+        const auto found = std::ranges::find_if(outline.entries, [&](const auto& entry) -> bool {
+            return entry.metadata.id == *parent;
+        });
+        if (found == outline.entries.end()) {
+            return makeError(NotebookErrorCode::invalidNotebook, info.value_or(NotebookInfo{}).path,
+                             "Journal parent is outside its Page");
+        }
+        auto loaded =
+            readBlock(transaction, databases.blocks, *parent, info.value_or(NotebookInfo{}).path);
+        if (!loaded) {
+            return loaded.error();
+        }
+        auto block = std::move(loaded).value();
+        block.metadata.updatedAt = now;
+        found->metadata.updatedAt = now;
+        return writeBlock(transaction, databases.blocks, block, info.value_or(NotebookInfo{}).path);
+    }
+
+    auto readNestedJournalPage(JournalDate date) const -> Result<JournalPage> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(errorFromLmdb(path, result, "begin Journal read"));
+        }
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(databases.error());
+        }
+        const auto encodedDate = dateKey(date);
+        MDB_val key{encodedDate.size(), const_cast<std::uint8_t*>(encodedDate.data())};
+        MDB_val value{};
+        result = mdb_get(transaction, databases.value().journalByDate, &key, &value);
+        if (result == MDB_NOTFOUND) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::success({date, std::nullopt, {}});
+        }
+        if (result != MDB_SUCCESS || value.mv_size != BlockId{}.bytes.size()) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(
+                result == MDB_SUCCESS ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                                  "invalid Journal date index")
+                                      : errorFromLmdb(path, result, "read Journal date index"));
+        }
+        BlockId pageId;
+        std::memcpy(pageId.bytes.data(), value.mv_data, pageId.bytes.size());
+        auto page = readBlock(transaction, databases.value().blocks, pageId, path);
+        if (!page || page.value().type != BlockType::journalPage ||
+            page.value().journalDate != date) {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(
+                page ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                 "Journal date points to an invalid Page")
+                     : page.error());
+        }
+        auto outline = loadOutline(transaction, databases.value(), std::move(page).value());
+        mdb_txn_abort(transaction);
+        if (!outline) {
+            return Result<JournalPage>::failure(outline.error());
+        }
+        auto loaded = std::move(outline).value();
+        return Result<JournalPage>::success(
+            {date, loaded.page.metadata, std::move(loaded.entries)});
+    }
+
     auto readJournalPage(JournalDate date) const -> Result<JournalPage> {
         const auto path = info.value_or(NotebookInfo{}).path;
         MDB_txn* transaction = nullptr;
@@ -925,8 +1253,8 @@ class NotebookSession::Impl {
                                            "Journal Page contains a non-Entry Block")
                                : entryBlock.error());
             }
-            page.entries.push_back(
-                JournalEntry{entryBlock.value().metadata, entryBlock.value().authoredText});
+            page.entries.push_back(JournalEntry{entryBlock.value().metadata,
+                                                entryBlock.value().authoredText, std::nullopt});
             result = mdb_cursor_get(cursor, &containmentKey, &childValue, MDB_NEXT);
         }
         mdb_cursor_close(cursor);
@@ -1140,7 +1468,7 @@ class NotebookSession::Impl {
         for (std::size_t index = 0; index <= siblings.size(); ++index) {
             if (index == insertionIndex) {
                 committedPage.entries.push_back(
-                    JournalEntry{entryBlock.metadata, entryBlock.authoredText});
+                    JournalEntry{entryBlock.metadata, entryBlock.authoredText, std::nullopt});
             }
             if (index < siblings.size()) {
                 auto sibling =
@@ -1150,8 +1478,8 @@ class NotebookSession::Impl {
                                                     "Journal Page contains a non-Entry Block")
                                         : sibling.error());
                 }
-                committedPage.entries.push_back(
-                    JournalEntry{sibling.value().metadata, sibling.value().authoredText});
+                committedPage.entries.push_back(JournalEntry{
+                    sibling.value().metadata, sibling.value().authoredText, std::nullopt});
             }
         }
         if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
@@ -1192,9 +1520,22 @@ class NotebookSession::Impl {
                 makeError(NotebookErrorCode::blockNotFound, path, "Block is not a Journal Entry"));
         }
         auto entry = loaded.value();
+        auto parentLink = parentOf(transaction, databases.value(), entryId);
+        if (!parentLink) {
+            return fail(parentLink.error());
+        }
+        auto parentBlock =
+            readBlock(transaction, databases.value().blocks, parentLink.value().parent, path);
+        if (!parentBlock) {
+            return fail(parentBlock.error());
+        }
+        const auto parentEntry = parentBlock.value().type == BlockType::journalEntry
+                                     ? std::optional<BlockId>{parentLink.value().parent}
+                                     : std::nullopt;
         if (entry.authoredText == authoredText) {
             mdb_txn_abort(transaction);
-            return Result<JournalEntry>::success(JournalEntry{entry.metadata, entry.authoredText});
+            return Result<JournalEntry>::success(
+                JournalEntry{entry.metadata, entry.authoredText, parentEntry});
         }
         entry.authoredText = std::move(authoredText);
         entry.metadata.updatedAt = currentTimestamp();
@@ -1211,7 +1552,378 @@ class NotebookSession::Impl {
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
-        return Result<JournalEntry>::success(JournalEntry{entry.metadata, entry.authoredText});
+        return Result<JournalEntry>::success(
+            JournalEntry{entry.metadata, entry.authoredText, parentEntry});
+    }
+
+    auto insertNestedEntry(JournalDate date, std::optional<BlockId> afterEntry,
+                           std::string authoredText) -> Result<JournalPage> {
+        lastCommandCommitted = false;
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "begin Journal insertion"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<JournalPage> {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        const auto now = currentTimestamp();
+        const auto encodedDate = dateKey(date);
+        MDB_val dateIndexKey{encodedDate.size(), const_cast<std::uint8_t*>(encodedDate.data())};
+        MDB_val pageValue{};
+        result = mdb_get(transaction, databases.value().journalByDate, &dateIndexKey, &pageValue);
+        BlockRecord page;
+        if (result == MDB_NOTFOUND) {
+            if (afterEntry) {
+                return fail(makeError(NotebookErrorCode::invalidInsertionPoint, path,
+                                      "insertion point is not on this Journal Page"));
+            }
+            page = {BlockType::journalPage, BlockMetadata{generateBlockId(), now, now}, date, {}};
+            if (auto error = writeBlock(transaction, databases.value().blocks, page, path)) {
+                return fail(std::move(*error));
+            }
+            if (auto error = writeTypeIndex(transaction, databases.value().blocksByType, page.type,
+                                            page.metadata.id, path)) {
+                return fail(std::move(*error));
+            }
+            MDB_val pageIdValue{page.metadata.id.bytes.size(), page.metadata.id.bytes.data()};
+            result = mdb_put(transaction, databases.value().journalByDate, &dateIndexKey,
+                             &pageIdValue, MDB_NOOVERWRITE);
+            if (result != MDB_SUCCESS) {
+                return fail(errorFromLmdb(path, result, "index Journal date"));
+            }
+        } else {
+            if (result != MDB_SUCCESS || pageValue.mv_size != BlockId{}.bytes.size()) {
+                return fail(result == MDB_SUCCESS
+                                ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                            "invalid Journal date index")
+                                : errorFromLmdb(path, result, "read Journal date index"));
+            }
+            BlockId pageId;
+            std::memcpy(pageId.bytes.data(), pageValue.mv_data, pageId.bytes.size());
+            auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
+            if (!loaded || loaded.value().type != BlockType::journalPage ||
+                loaded.value().journalDate != date) {
+                return fail(loaded ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                               "Journal date points to an invalid Page")
+                                   : loaded.error());
+            }
+            page = std::move(loaded).value();
+        }
+        auto loadedOutline = loadOutline(transaction, databases.value(), std::move(page));
+        if (!loadedOutline) {
+            return fail(loadedOutline.error());
+        }
+        auto outline = std::move(loadedOutline).value();
+        const auto before = outline;
+        std::optional<BlockId> parent;
+        auto insertionIndex = outline.entries.size();
+        if (afterEntry) {
+            const auto found =
+                std::ranges::find_if(outline.entries, [&](const auto& entry) -> bool {
+                    return entry.metadata.id == *afterEntry;
+                });
+            if (found == outline.entries.end()) {
+                return fail(makeError(NotebookErrorCode::invalidInsertionPoint, path,
+                                      "insertion point is not on this Journal Page"));
+            }
+            const auto index =
+                static_cast<std::size_t>(std::distance(outline.entries.begin(), found));
+            parent = found->parentEntry;
+            insertionIndex = subtreeEnd(outline.entries, index);
+        }
+        BlockRecord entry{BlockType::journalEntry, BlockMetadata{generateBlockId(), now, now},
+                          std::nullopt, std::move(authoredText)};
+        if (auto error = writeBlock(transaction, databases.value().blocks, entry, path)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = writeTypeIndex(transaction, databases.value().blocksByType, entry.type,
+                                        entry.metadata.id, path)) {
+            return fail(std::move(*error));
+        }
+        outline.entries.insert(outline.entries.begin() +
+                                   static_cast<std::ptrdiff_t>(insertionIndex),
+                               {entry.metadata, entry.authoredText, parent});
+        if (auto error = touchContainer(transaction, databases.value(), outline, parent, now)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = rewriteContainment(transaction, databases.value(), before, outline)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
+            return fail(std::move(*error));
+        }
+        result = commitAdapter->commit(transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "commit Journal insertion"));
+        }
+        incrementCachedRevision();
+        lastCommandCommitted = true;
+        return Result<JournalPage>::success(
+            {date, outline.page.metadata, std::move(outline.entries)});
+    }
+
+    auto editOutline(BlockId entryId, OutlineEditKind edit, std::size_t cursorByteOffset = 0,
+                     std::string editedText = {}) -> Result<JournalPage> {
+        lastCommandCommitted = false;
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "begin Journal structural edit"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<JournalPage> {
+            mdb_txn_abort(transaction);
+            return Result<JournalPage>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        auto loaded = loadOutlineForEntry(transaction, databases.value(), entryId);
+        if (!loaded) {
+            return fail(loaded.error());
+        }
+        auto outline = std::move(loaded).value();
+        const auto before = outline;
+        auto found = std::ranges::find_if(outline.entries, [&](const auto& entry) -> bool {
+            return entry.metadata.id == entryId;
+        });
+        if (found == outline.entries.end()) {
+            return fail(makeError(NotebookErrorCode::blockNotFound, path,
+                                  "Journal Entry is not on its Page"));
+        }
+        auto index = static_cast<std::size_t>(std::distance(outline.entries.begin(), found));
+        const auto originalParent = found->parentEntry;
+        const auto hasChildren =
+            std::ranges::any_of(outline.entries, [&](const auto& entry) -> bool {
+                return entry.parentEntry == entryId;
+            });
+        const auto now = currentTimestamp();
+        std::vector<std::optional<BlockId>> touchedContainers;
+        auto touch = [&](std::optional<BlockId> parent) -> void {
+            if (std::ranges::find(touchedContainers, parent) == touchedContainers.end()) {
+                touchedContainers.push_back(parent);
+            }
+        };
+        bool deleteOriginal = false;
+        std::optional<BlockRecord> blockToWrite;
+        std::optional<BlockRecord> blockToCreate;
+
+        if (edit == OutlineEditKind::split) {
+            if (cursorByteOffset > editedText.size() ||
+                (cursorByteOffset < editedText.size() &&
+                 (static_cast<unsigned char>(editedText[cursorByteOffset]) & 0xC0U) == 0x80U)) {
+                return fail(makeError(NotebookErrorCode::invalidCursorPosition, path,
+                                      "split cursor is not on a Unicode boundary"));
+            }
+            auto original = readBlock(transaction, databases.value().blocks, entryId, path);
+            if (!original) {
+                return fail(original.error());
+            }
+            auto updated = std::move(original).value();
+            const auto suffix = editedText.substr(cursorByteOffset);
+            updated.authoredText = editedText.substr(0, cursorByteOffset);
+            updated.metadata.updatedAt = now;
+            found->authoredText = updated.authoredText;
+            found->metadata.updatedAt = now;
+            blockToWrite = updated;
+            BlockRecord created{BlockType::journalEntry, BlockMetadata{generateBlockId(), now, now},
+                                std::nullopt, suffix};
+            blockToCreate = created;
+            const auto insertion = subtreeEnd(outline.entries, index);
+            outline.entries.insert(outline.entries.begin() + static_cast<std::ptrdiff_t>(insertion),
+                                   {created.metadata, created.authoredText, originalParent});
+            touch(originalParent);
+        } else if (edit == OutlineEditKind::join) {
+            if (hasChildren) {
+                return fail(makeError(NotebookErrorCode::blockHasChildren, path,
+                                      "an Entry with children cannot be joined"));
+            }
+            if (index == 0) {
+                return fail(makeError(NotebookErrorCode::invalidStructuralMove, path,
+                                      "the first Entry has no previous visible Entry"));
+            }
+            auto& target = outline.entries[index - 1];
+            const auto combined = target.authoredText + editedText;
+            if (!validAuthoredText(combined)) {
+                return fail(makeError(NotebookErrorCode::invalidAuthoredText, path,
+                                      "joined Journal Entry text is too large"));
+            }
+            auto targetBlock =
+                readBlock(transaction, databases.value().blocks, target.metadata.id, path);
+            if (!targetBlock) {
+                return fail(targetBlock.error());
+            }
+            auto updated = std::move(targetBlock).value();
+            updated.authoredText = combined;
+            updated.metadata.updatedAt = now;
+            target.authoredText = combined;
+            target.metadata.updatedAt = now;
+            blockToWrite = updated;
+            outline.entries.erase(outline.entries.begin() + static_cast<std::ptrdiff_t>(index));
+            deleteOriginal = true;
+            touch(originalParent);
+        } else if (edit == OutlineEditKind::erase) {
+            if (hasChildren) {
+                return fail(makeError(NotebookErrorCode::blockHasChildren, path,
+                                      "an Entry with children cannot be deleted"));
+            }
+            outline.entries.erase(outline.entries.begin() + static_cast<std::ptrdiff_t>(index));
+            deleteOriginal = true;
+            touch(originalParent);
+        } else if (edit == OutlineEditKind::indent) {
+            std::optional<std::size_t> previousSibling;
+            for (std::size_t candidate = 0; candidate < index; ++candidate) {
+                if (outline.entries[candidate].parentEntry == originalParent) {
+                    previousSibling = candidate;
+                }
+            }
+            if (!previousSibling) {
+                return fail(makeError(NotebookErrorCode::invalidStructuralMove, path,
+                                      "the first sibling cannot be indented"));
+            }
+            found->parentEntry = outline.entries[*previousSibling].metadata.id;
+            touch(originalParent);
+            touch(found->parentEntry);
+        } else if (edit == OutlineEditKind::outdent) {
+            if (!originalParent) {
+                return fail(makeError(NotebookErrorCode::invalidStructuralMove, path,
+                                      "a top-level Entry cannot be outdented"));
+            }
+            const auto parent =
+                std::ranges::find_if(outline.entries, [&](const auto& entry) -> bool {
+                    return entry.metadata.id == *originalParent;
+                });
+            if (parent == outline.entries.end()) {
+                return fail(makeError(NotebookErrorCode::invalidNotebook, path,
+                                      "Journal parent is outside its Page"));
+            }
+            const auto parentParent = parent->parentEntry;
+            const auto end = subtreeEnd(outline.entries, index);
+            std::vector<JournalEntry> moving(
+                outline.entries.begin() + static_cast<std::ptrdiff_t>(index),
+                outline.entries.begin() + static_cast<std::ptrdiff_t>(end));
+            moving.front().parentEntry = parentParent;
+            outline.entries.erase(outline.entries.begin() + static_cast<std::ptrdiff_t>(index),
+                                  outline.entries.begin() + static_cast<std::ptrdiff_t>(end));
+            const auto parentAfterErase = static_cast<std::size_t>(
+                std::distance(outline.entries.begin(),
+                              std::ranges::find_if(outline.entries, [&](const auto& entry) -> bool {
+                                  return entry.metadata.id == *originalParent;
+                              })));
+            const auto insertion = subtreeEnd(outline.entries, parentAfterErase);
+            outline.entries.insert(outline.entries.begin() + static_cast<std::ptrdiff_t>(insertion),
+                                   moving.begin(), moving.end());
+            touch(originalParent);
+            touch(parentParent);
+        } else {
+            const auto end = subtreeEnd(outline.entries, index);
+            if (edit == OutlineEditKind::up) {
+                std::optional<std::size_t> previousSibling;
+                for (std::size_t candidate = 0; candidate < index; ++candidate) {
+                    if (outline.entries[candidate].parentEntry == originalParent) {
+                        previousSibling = candidate;
+                    }
+                }
+                if (!previousSibling) {
+                    return fail(makeError(NotebookErrorCode::invalidStructuralMove, path,
+                                          "the first sibling cannot move up"));
+                }
+                std::rotate(outline.entries.begin() + static_cast<std::ptrdiff_t>(*previousSibling),
+                            outline.entries.begin() + static_cast<std::ptrdiff_t>(index),
+                            outline.entries.begin() + static_cast<std::ptrdiff_t>(end));
+            } else {
+                if (end >= outline.entries.size() ||
+                    outline.entries[end].parentEntry != originalParent) {
+                    return fail(makeError(NotebookErrorCode::invalidStructuralMove, path,
+                                          "the last sibling cannot move down"));
+                }
+                const auto nextEnd = subtreeEnd(outline.entries, end);
+                std::rotate(outline.entries.begin() + static_cast<std::ptrdiff_t>(index),
+                            outline.entries.begin() + static_cast<std::ptrdiff_t>(end),
+                            outline.entries.begin() + static_cast<std::ptrdiff_t>(nextEnd));
+            }
+            touch(originalParent);
+        }
+
+        if (edit == OutlineEditKind::indent || edit == OutlineEditKind::outdent ||
+            edit == OutlineEditKind::up || edit == OutlineEditKind::down) {
+            auto moved = readBlock(transaction, databases.value().blocks, entryId, path);
+            if (!moved) {
+                return fail(moved.error());
+            }
+            auto updated = std::move(moved).value();
+            updated.authoredText = editedText;
+            updated.metadata.updatedAt = now;
+            blockToWrite = updated;
+            const auto movedEntry =
+                std::ranges::find_if(outline.entries, [&](const auto& entry) -> bool {
+                    return entry.metadata.id == entryId;
+                });
+            movedEntry->metadata.updatedAt = now;
+            movedEntry->authoredText = editedText;
+        }
+        if (blockToWrite) {
+            if (auto error =
+                    writeBlock(transaction, databases.value().blocks, *blockToWrite, path)) {
+                return fail(std::move(*error));
+            }
+        }
+        if (blockToCreate) {
+            if (auto error =
+                    writeBlock(transaction, databases.value().blocks, *blockToCreate, path)) {
+                return fail(std::move(*error));
+            }
+            if (auto error =
+                    writeTypeIndex(transaction, databases.value().blocksByType, blockToCreate->type,
+                                   blockToCreate->metadata.id, path)) {
+                return fail(std::move(*error));
+            }
+        }
+        for (const auto& container : touchedContainers) {
+            if (auto error =
+                    touchContainer(transaction, databases.value(), outline, container, now)) {
+                return fail(std::move(*error));
+            }
+        }
+        if (auto error = rewriteContainment(transaction, databases.value(), before, outline)) {
+            return fail(std::move(*error));
+        }
+        if (deleteOriginal) {
+            auto blockKeyValue = blockKey(entryId);
+            result = mdb_del(transaction, databases.value().blocks, &blockKeyValue, nullptr);
+            if (result != MDB_SUCCESS) {
+                return fail(errorFromLmdb(path, result, "delete Journal Entry"));
+            }
+            auto typeKeyBytes = typeIndexKey(BlockType::journalEntry, entryId);
+            MDB_val typeKey{typeKeyBytes.size(), typeKeyBytes.data()};
+            result = mdb_del(transaction, databases.value().blocksByType, &typeKey, nullptr);
+            if (result != MDB_SUCCESS) {
+                return fail(errorFromLmdb(path, result, "delete Journal Entry type index"));
+            }
+        }
+        if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
+            return fail(std::move(*error));
+        }
+        result = commitAdapter->commit(transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<JournalPage>::failure(
+                errorFromLmdb(path, result, "commit Journal structural edit"));
+        }
+        incrementCachedRevision();
+        lastCommandCommitted = true;
+        return Result<JournalPage>::success({outline.page.journalDate.value_or(JournalDate{}),
+                                             outline.page.metadata, std::move(outline.entries)});
     }
 
     void incrementCachedRevision() {
@@ -1399,7 +2111,7 @@ auto NotebookSession::journalPage(JournalDate date) const -> Result<JournalPage>
         return Result<JournalPage>::failure(makeError(NotebookErrorCode::invalidJournalDate,
                                                       impl_->info->path, "invalid Journal date"));
     }
-    return impl_->readJournalPage(date);
+    return impl_->readNestedJournalPage(date);
 }
 
 auto NotebookSession::insertJournalEntry(JournalDate date, std::optional<BlockId> afterEntry,
@@ -1420,7 +2132,7 @@ auto NotebookSession::insertJournalEntry(JournalDate date, std::optional<BlockId
                 makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
                           "Journal Entry text must be one bounded Unicode line"));
         }
-        auto outcome = impl_->insertEntry(date, afterEntry, std::move(authoredText));
+        auto outcome = impl_->insertNestedEntry(date, afterEntry, std::move(authoredText));
         if (impl_->lastCommandCommitted) {
             callbacks = impl_->committedCallbacks();
         }
@@ -1445,6 +2157,113 @@ auto NotebookSession::updateJournalEntry(BlockId entryId, std::string authoredTe
                           "Journal Entry text must be one bounded Unicode line"));
         }
         auto outcome = impl_->updateEntry(entryId, std::move(authoredText));
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::splitJournalEntry(BlockId entryId, std::string authoredText,
+                                        std::size_t cursorByteOffset) -> Result<JournalPage> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalPage> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validAuthoredText(authoredText)) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
+                          "Journal Entry text must be one bounded Unicode line"));
+        }
+        auto outcome = impl_->editOutline(entryId, OutlineEditKind::split, cursorByteOffset,
+                                          std::move(authoredText));
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::joinJournalEntry(BlockId entryId, std::string authoredText)
+    -> Result<JournalPage> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalPage> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validAuthoredText(authoredText)) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
+                          "Journal Entry text must be one bounded Unicode line"));
+        }
+        auto outcome =
+            impl_->editOutline(entryId, OutlineEditKind::join, 0, std::move(authoredText));
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::moveJournalEntry(BlockId entryId, JournalEntryMove movement,
+                                       std::string authoredText) -> Result<JournalPage> {
+    auto edit = OutlineEditKind::indent;
+    switch (movement) {
+    case JournalEntryMove::indent:
+        edit = OutlineEditKind::indent;
+        break;
+    case JournalEntryMove::outdent:
+        edit = OutlineEditKind::outdent;
+        break;
+    case JournalEntryMove::up:
+        edit = OutlineEditKind::up;
+        break;
+    case JournalEntryMove::down:
+        edit = OutlineEditKind::down;
+        break;
+    }
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalPage> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (!validAuthoredText(authoredText)) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::invalidAuthoredText, impl_->info->path,
+                          "Journal Entry text must be one bounded Unicode line"));
+        }
+        auto outcome = impl_->editOutline(entryId, edit, 0, std::move(authoredText));
+        if (impl_->lastCommandCommitted) {
+            callbacks = impl_->committedCallbacks();
+        }
+        return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::deleteJournalEntry(BlockId entryId) -> Result<JournalPage> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<JournalPage> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<JournalPage>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        auto outcome = impl_->editOutline(entryId, OutlineEditKind::erase);
         if (impl_->lastCommandCommitted) {
             callbacks = impl_->committedCallbacks();
         }

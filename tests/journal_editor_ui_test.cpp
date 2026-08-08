@@ -86,7 +86,8 @@ TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings"
     QSignalSpy qmlWarnings(&engine, &QQmlEngine::warnings);
     editor->forceActiveFocus();
     REQUIRE(waitUntil([editor]() -> bool { return editor->hasActiveFocus(); }));
-    QTest::keyClick(window, Qt::Key_Return);
+    REQUIRE(QMetaObject::invokeMethod(root.get(), "beginDraft",
+                                      Q_ARG(QVariant, controller.journalEntryId(0))));
 
     REQUIRE(waitUntil([firstEntry]() -> bool {
         return firstEntry->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) != nullptr;
@@ -114,7 +115,8 @@ TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings"
     REQUIRE(secondEditor != nullptr);
     secondEditor->forceActiveFocus();
     REQUIRE(waitUntil([secondEditor]() -> bool { return secondEditor->hasActiveFocus(); }));
-    QTest::keyClick(window, Qt::Key_Return);
+    REQUIRE(QMetaObject::invokeMethod(root.get(), "beginDraft",
+                                      Q_ARG(QVariant, controller.journalEntryId(1))));
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
                window->activeFocusItem()->objectName() == QStringLiteral("journalDraftEditor");
@@ -135,6 +137,107 @@ TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings"
     QTest::keyClick(window, Qt::Key_W);
     REQUIRE(QMetaObject::invokeMethod(root.get(), "beginTrailingDraft"));
     CHECK(qmlWarnings.count() == 0);
+}
+
+TEST_CASE("the Journal editor routes nested outline keys and exposes pointer actions") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(
+        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("outline-ui.hieda"))));
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("parent")) == 0);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("child")) == 1);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("tail")) == 2);
+    const auto childId = controller.journalEntryId(1);
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    REQUIRE(window != nullptr);
+    window->show();
+    window->requestActivate();
+    REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
+    auto* journalList = root->findChild<QQuickItem*>(QStringLiteral("journalList"));
+    REQUIRE(journalList != nullptr);
+    REQUIRE(
+        waitUntil([journalList]() -> bool { return journalList->property("count").toInt() == 3; }));
+
+    const auto entryAt = [journalList](int row) -> QQuickItem* {
+        QVariant value;
+        if (!QMetaObject::invokeMethod(journalList, "entryItemAt", Q_RETURN_ARG(QVariant, value),
+                                       Q_ARG(QVariant, row))) {
+            return nullptr;
+        }
+        return qobject_cast<QQuickItem*>(value.value<QObject*>());
+    };
+    auto* parentEntry = entryAt(0);
+    auto* childEntry = entryAt(1);
+    REQUIRE(parentEntry != nullptr);
+    REQUIRE(childEntry != nullptr);
+    auto* childEditor = childEntry->findChild<QQuickItem*>(QStringLiteral("journalEntryEditor-1"));
+    REQUIRE(childEditor != nullptr);
+    childEditor->forceActiveFocus();
+    REQUIRE(waitUntil([childEditor]() -> bool { return childEditor->hasActiveFocus(); }));
+    QTest::keyClick(window, Qt::Key_Tab);
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.journalEntries()
+                   ->data(controller.journalEntries()->index(1, 0), JournalEntryModel::DepthRole)
+                   .toInt() == 1;
+    }));
+
+    parentEntry = entryAt(0);
+    childEntry = entryAt(1);
+    REQUIRE(parentEntry != nullptr);
+    REQUIRE(childEntry != nullptr);
+    auto* parentEditor =
+        parentEntry->findChild<QQuickItem*>(QStringLiteral("journalEntryEditor-0"));
+    childEditor = childEntry->findChild<QQuickItem*>(QStringLiteral("journalEntryEditor-1"));
+    REQUIRE(parentEditor != nullptr);
+    REQUIRE(childEditor != nullptr);
+    CHECK(childEditor->mapToScene({}).x() > parentEditor->mapToScene({}).x());
+    CHECK(childEntry->property("contextMenu").value<QObject*>() != nullptr);
+
+    childEditor->forceActiveFocus();
+    childEditor->setProperty("cursorPosition", 2);
+    QTest::keyClick(window, Qt::Key_Return);
+    REQUIRE(
+        waitUntil([journalList]() -> bool { return journalList->property("count").toInt() == 4; }));
+    REQUIRE(waitUntil([window]() -> bool {
+        return window->activeFocusItem() != nullptr &&
+               window->activeFocusItem()->objectName() == QStringLiteral("journalEntryEditor-2");
+    }));
+    auto* suffixEditor = window->activeFocusItem();
+    CHECK(suffixEditor->property("cursorPosition").toInt() == 0);
+    QTest::keyClick(window, Qt::Key_Backspace);
+    REQUIRE(
+        waitUntil([journalList]() -> bool { return journalList->property("count").toInt() == 3; }));
+    REQUIRE(waitUntil([window]() -> bool {
+        return window->activeFocusItem() != nullptr &&
+               window->activeFocusItem()->objectName() == QStringLiteral("journalEntryEditor-1");
+    }));
+    childEditor = window->activeFocusItem();
+    CHECK(childEditor->property("cursorPosition").toInt() == 2);
+    CHECK(controller.journalEntryId(1) == childId);
+
+    QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.journalEntries()
+                   ->data(controller.journalEntries()->index(1, 0), JournalEntryModel::DepthRole)
+                   .toInt() == 0;
+    }));
+#ifdef Q_OS_MACOS
+    constexpr auto structureModifier = Qt::MetaModifier;
+#else
+    constexpr auto structureModifier = Qt::ControlModifier;
+#endif
+    QTest::keyClick(window, Qt::Key_Down, structureModifier | Qt::ShiftModifier);
+    REQUIRE(waitUntil(
+        [&controller, &childId]() -> bool { return controller.journalEntryId(2) == childId; }));
 }
 
 auto main(int argc, char* argv[]) -> int {

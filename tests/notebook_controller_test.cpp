@@ -178,3 +178,48 @@ TEST_CASE("the Qt adapter switches Journal dates without materializing empty Pag
               .toString() == QStringLiteral("first day"));
     CHECK(rolloverRequests == 3);
 }
+
+TEST_CASE("the Qt adapter exposes and edits nested Journal structure") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "nested-adapter.hieda"));
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("parent")) == 0);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("child")) == 1);
+    REQUIRE(controller.insertJournalEntry(QStringLiteral("tail")) == 2);
+    auto* model = controller.journalEntries();
+    const auto childId = controller.journalEntryId(1);
+
+    const auto indented = controller.indentJournalEntry(childId, QStringLiteral("child"), 2);
+    REQUIRE(indented.value(QStringLiteral("succeeded")).toBool());
+    CHECK(indented.value(QStringLiteral("row")).toInt() == 1);
+    CHECK(indented.value(QStringLiteral("cursorPosition")).toInt() == 2);
+    CHECK(model->data(model->index(1, 0), JournalEntryModel::DepthRole).toInt() == 1);
+    CHECK(model->data(model->index(0, 0), JournalEntryModel::HasChildrenRole).toBool());
+    CHECK_FALSE(model->data(model->index(0, 0), JournalEntryModel::CanDeleteRole).toBool());
+    CHECK(model->data(model->index(1, 0), JournalEntryModel::CanOutdentRole).toBool());
+
+    const auto split = controller.splitJournalEntry(childId, QStringLiteral("child"), 2);
+    REQUIRE(split.value(QStringLiteral("succeeded")).toBool());
+    const auto splitRow = split.value(QStringLiteral("row")).toInt();
+    CHECK(splitRow == 2);
+    CHECK(model->data(model->index(1, 0), JournalEntryModel::AuthoredTextRole).toString() ==
+          QStringLiteral("ch"));
+    CHECK(model->data(model->index(splitRow, 0), JournalEntryModel::AuthoredTextRole).toString() ==
+          QStringLiteral("ild"));
+    CHECK(model->data(model->index(splitRow, 0), JournalEntryModel::DepthRole).toInt() == 1);
+
+    const auto joined =
+        controller.joinJournalEntry(controller.journalEntryId(splitRow), QStringLiteral("ild"));
+    REQUIRE(joined.value(QStringLiteral("succeeded")).toBool());
+    CHECK(joined.value(QStringLiteral("row")).toInt() == 1);
+    CHECK(joined.value(QStringLiteral("cursorPosition")).toInt() == 2);
+    CHECK(model->data(model->index(1, 0), JournalEntryModel::AuthoredTextRole).toString() ==
+          QStringLiteral("child"));
+
+    const auto rejectedDelete = controller.deleteJournalEntry(controller.journalEntryId(0));
+    CHECK_FALSE(rejectedDelete.value(QStringLiteral("succeeded")).toBool());
+    CHECK_FALSE(controller.errorMessage().isEmpty());
+    const auto deleted = controller.deleteJournalEntry(childId);
+    REQUIRE(deleted.value(QStringLiteral("succeeded")).toBool());
+    CHECK(model->rowCount() == 2);
+}

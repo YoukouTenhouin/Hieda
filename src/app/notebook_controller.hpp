@@ -9,12 +9,24 @@
 #include <QString>
 #include <QTimer>
 #include <QUrl>
+#include <QVariantMap>
 
 class JournalEntryModel final : public QAbstractListModel {
     Q_OBJECT
 
   public:
-    enum Role : std::uint16_t { EntryIdRole = Qt::UserRole + 1, AuthoredTextRole };
+    enum Role : std::uint16_t {
+        EntryIdRole = Qt::UserRole + 1,
+        AuthoredTextRole,
+        ParentEntryIdRole,
+        DepthRole,
+        HasChildrenRole,
+        CanIndentRole,
+        CanOutdentRole,
+        CanMoveUpRole,
+        CanMoveDownRole,
+        CanDeleteRole,
+    };
 
     explicit JournalEntryModel(QObject* parent = nullptr);
     [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const -> int override;
@@ -24,6 +36,8 @@ class JournalEntryModel final : public QAbstractListModel {
     void insertEntry(int row, hieda::notebook::JournalEntry entry);
     void updateEntry(const hieda::notebook::JournalEntry& entry);
     [[nodiscard]] auto entryId(int row) const -> QString;
+    [[nodiscard]] auto entryText(int row) const -> QString;
+    [[nodiscard]] auto rowForId(const hieda::notebook::BlockId& identifier) const -> int;
 
   private:
     std::vector<hieda::notebook::JournalEntry> entries_;
@@ -59,6 +73,19 @@ class NotebookController final : public QObject {
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
     Q_INVOKABLE auto updateJournalEntry(const QString& entryId, const QString& authoredText)
         -> bool;
+    Q_INVOKABLE auto splitJournalEntry(const QString& entryId, const QString& authoredText,
+                                       int cursorPosition) -> QVariantMap;
+    Q_INVOKABLE auto joinJournalEntry(const QString& entryId, const QString& authoredText)
+        -> QVariantMap;
+    Q_INVOKABLE auto indentJournalEntry(const QString& entryId, const QString& authoredText,
+                                        int cursorPosition) -> QVariantMap;
+    Q_INVOKABLE auto outdentJournalEntry(const QString& entryId, const QString& authoredText,
+                                         int cursorPosition) -> QVariantMap;
+    Q_INVOKABLE auto moveJournalEntryUp(const QString& entryId, const QString& authoredText,
+                                        int cursorPosition) -> QVariantMap;
+    Q_INVOKABLE auto moveJournalEntryDown(const QString& entryId, const QString& authoredText,
+                                          int cursorPosition) -> QVariantMap;
+    Q_INVOKABLE auto deleteJournalEntry(const QString& entryId) -> QVariantMap;
     void requestJournalDateRollover(const QDate& date);
     Q_INVOKABLE void completeJournalDateRollover();
 
@@ -75,6 +102,9 @@ class NotebookController final : public QObject {
     void reject(const hieda::notebook::NotebookError& error);
     void rejectSave(const hieda::notebook::NotebookError& error);
     void loadJournalDate(const QDate& date);
+    auto moveJournalEntry(const QString& entryId, const QString& authoredText,
+                          hieda::notebook::JournalEntryMove movement, int cursorPosition)
+        -> QVariantMap;
     void scheduleMidnightRefresh();
 
     hieda::notebook::NotebookSession session_;

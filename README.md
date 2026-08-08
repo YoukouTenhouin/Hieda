@@ -1,7 +1,7 @@
 # Hieda
 
 Hieda is a native Qt Quick notebook application. It creates, closes, and reopens one portable
-`.hieda` Notebook at a time and provides a durable flat Journal for the current local date.
+`.hieda` Notebook at a time and provides a durable nested Journal for the current local date.
 
 ## Prerequisites
 
@@ -52,10 +52,12 @@ lock files beside an open Notebook. Do not copy or synchronize a Notebook while 
 
 ## Journal editing
 
-Opening a Notebook shows the Journal Page for the current local date as a document-like list of
-bullets. The trailing bullet is a temporary draft. Enter commits authored text and continues with
-a new draft directly below it; an untouched draft is never persisted. Existing bullets commit
-with Enter or when focus leaves them, and Escape cancels the current edit. Up and Down move between
-bullets. Long text wraps visually, but Journal text remains exact single-line Unicode. A failed
-edit restores the last durably committed text, while a failed new Entry keeps its draft available
-for retry or copying.
+Opening a Notebook shows the Journal Page for the current local date as a nested list of bullets.
+The trailing bullet is a temporary draft and an untouched draft is never persisted. Enter splits
+an existing Entry at the cursor; Backspace at the start joins a leaf into the previous visible
+Entry. Tab and Shift+Tab indent and outdent complete subtrees. Control+Shift+Up/Down on Windows and
+Linux, or Command+Shift+Up/Down on macOS, reorder sibling subtrees. Right-click a bullet for the
+same structural actions and leaf deletion. Entries with children cannot be joined or deleted.
+Escape cancels a text edit, and ordinary Up/Down moves between visible bullets. Long text wraps
+visually, but Journal text remains exact single-line Unicode. A failed edit restores the last
+durably committed state, while a failed new Entry keeps its draft available for retry or copying.
