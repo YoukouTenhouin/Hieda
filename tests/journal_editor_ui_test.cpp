@@ -27,8 +27,8 @@
 namespace {
 
 template <typename Predicate>
-auto waitUntil(Predicate predicate, std::chrono::milliseconds timeout = std::chrono::seconds(1))
-    -> bool {
+auto waitUntil(const Predicate& predicate,
+               std::chrono::milliseconds timeout = std::chrono::seconds(1)) -> bool {
     QElapsedTimer timer;
     timer.start();
     while (!predicate() && timer.elapsed() < timeout.count()) {
@@ -41,6 +41,7 @@ auto waitUntil(Predicate predicate, std::chrono::milliseconds timeout = std::chr
 } // namespace
 
 TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
+    QAccessible::setActive(true);
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
@@ -91,15 +92,136 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     REQUIRE(editor != nullptr);
     editor->forceActiveFocus();
     REQUIRE(waitUntil([editor]() -> bool { return editor->hasActiveFocus(); }));
-    editor->setProperty("text", QStringLiteral("committed before navigation"));
+    editor->setProperty("text", QStringLiteral("committed before rename"));
+
+    auto* renameAction = root->findChild<QObject*>(QStringLiteral("renamePageAction"));
+    auto* renameDialog = root->findChild<QObject*>(QStringLiteral("renamePageDialog"));
+    auto* renameName = root->findChild<QQuickItem*>(QStringLiteral("renamePageName"));
+    auto* renameTitle = root->findChild<QQuickItem*>(QStringLiteral("renamePageTitle"));
+    REQUIRE(renameAction != nullptr);
+    REQUIRE(renameDialog != nullptr);
+    REQUIRE(renameName != nullptr);
+    REQUIRE(renameTitle != nullptr);
+    REQUIRE(QMetaObject::invokeMethod(renameAction, "trigger"));
+    REQUIRE(
+        waitUntil([renameDialog]() -> bool { return renameDialog->property("visible").toBool(); }));
+    renameName->setProperty("text", QStringLiteral("renamed_project"));
+    renameTitle->setProperty("text", QStringLiteral("Renamed Project"));
+    REQUIRE(QMetaObject::invokeMethod(renameDialog, "accept"));
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.currentPageName() == QStringLiteral("renamed_project") &&
+               controller.currentPageTitle() == QStringLiteral("Renamed Project");
+    }));
+    REQUIRE(waitUntil([editor]() -> bool { return editor->hasActiveFocus(); }));
+    CHECK(controller.outlineEntries()
+              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("committed before rename"));
+    auto* heading = root->findChild<QQuickItem*>(QStringLiteral("pageHeading"));
+    REQUIRE(heading != nullptr);
+    CHECK(heading->property("text").toString().contains(QStringLiteral("Renamed Project")));
+    CHECK(heading->property("text").toString().contains(QStringLiteral("renamed_project")));
+    auto* bullet = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryBullet-0"));
+    REQUIRE(bullet != nullptr);
+    auto* listInterface = QAccessible::queryAccessibleInterface(outlineList);
+    auto* headingInterface = QAccessible::queryAccessibleInterface(heading);
+    auto* bulletInterface = QAccessible::queryAccessibleInterface(bullet);
+    auto* editorInterface = QAccessible::queryAccessibleInterface(editor);
+    REQUIRE(listInterface != nullptr);
+    REQUIRE(headingInterface != nullptr);
+    REQUIRE(bulletInterface != nullptr);
+    REQUIRE(editorInterface != nullptr);
+    CHECK(listInterface->text(QAccessible::Name) == QStringLiteral("Page Entries"));
+    CHECK(headingInterface->text(QAccessible::Name) ==
+          QStringLiteral("Page title Renamed Project, name renamed_project"));
+    CHECK(bulletInterface->role() == QAccessible::ListItem);
+    CHECK(bulletInterface->text(QAccessible::Name) == QStringLiteral("Select Page Entry 1"));
+    CHECK(editorInterface->role() == QAccessible::EditableText);
+
+    qsizetype projectIndex = -1;
+    for (qsizetype index = 0; index < controller.pageChoices().size(); ++index) {
+        if (controller.pageIdAt(index) == projectId) {
+            projectIndex = index;
+            break;
+        }
+    }
+    REQUIRE(projectIndex >= 0);
+    QVariant pageDelegateValue;
+    REQUIRE(QMetaObject::invokeMethod(pageList, "pageItemAt",
+                                      Q_RETURN_ARG(QVariant, pageDelegateValue),
+                                      Q_ARG(QVariant, projectIndex)));
+    auto* pageDelegate = qobject_cast<QQuickItem*>(pageDelegateValue.value<QObject*>());
+    REQUIRE(pageDelegate != nullptr);
+    CHECK(pageDelegate->property("highlighted").toBool());
+
+    REQUIRE(QMetaObject::invokeMethod(renameAction, "trigger"));
+    REQUIRE(
+        waitUntil([renameDialog]() -> bool { return renameDialog->property("visible").toBool(); }));
+    renameName->setProperty("text", QStringLiteral("second"));
+    renameTitle->setProperty("text", QStringLiteral("Conflict"));
+    REQUIRE(QMetaObject::invokeMethod(renameDialog, "accept"));
+    REQUIRE(
+        waitUntil([renameDialog]() -> bool { return renameDialog->property("visible").toBool(); }));
+    CHECK_FALSE(controller.errorMessage().isEmpty());
+    REQUIRE(QMetaObject::invokeMethod(renameDialog, "reject"));
+    REQUIRE(waitUntil([editor]() -> bool { return editor->hasActiveFocus(); }));
+
+    auto* goToAction = root->findChild<QObject*>(QStringLiteral("goToPageAction"));
+    auto* goToDialog = root->findChild<QObject*>(QStringLiteral("goToPageDialog"));
+    auto* openSelected = root->findChild<QQuickItem*>(QStringLiteral("openSelectedPageButton"));
+    REQUIRE(goToAction != nullptr);
+    REQUIRE(goToDialog != nullptr);
+    REQUIRE(openSelected != nullptr);
+    REQUIRE(QMetaObject::invokeMethod(goToAction, "trigger"));
+    pagePicker->setProperty("editText", QStringLiteral("second"));
+    REQUIRE(
+        waitUntil([pagePicker]() -> bool { return pagePicker->property("count").toInt() == 1; }));
+    REQUIRE(QMetaObject::invokeMethod(openSelected, "clicked"));
+    REQUIRE(waitUntil([&controller, projectId]() -> bool {
+        return !controller.isJournalPage() && controller.currentPageId() != projectId;
+    }));
+    CHECK_FALSE(goToDialog->property("visible").toBool());
+
+    auto* newPageAction = root->findChild<QObject*>(QStringLiteral("newPageAction"));
+    auto* newPageDialog = root->findChild<QObject*>(QStringLiteral("newPageDialog"));
+    auto* newPageName = root->findChild<QQuickItem*>(QStringLiteral("newPageName"));
+    auto* newPageTitle = root->findChild<QQuickItem*>(QStringLiteral("newPageTitle"));
+    REQUIRE(newPageAction != nullptr);
+    REQUIRE(newPageDialog != nullptr);
+    REQUIRE(newPageName != nullptr);
+    REQUIRE(newPageTitle != nullptr);
+    REQUIRE(QMetaObject::invokeMethod(newPageAction, "trigger"));
+    newPageName->setProperty("text", QStringLiteral("created_in_dialog"));
+    newPageTitle->setProperty("text", QStringLiteral("Created in Dialog"));
+    REQUIRE(QMetaObject::invokeMethod(newPageDialog, "accept"));
+    REQUIRE(waitUntil([&controller]() -> bool {
+        return controller.currentPageName() == QStringLiteral("created_in_dialog");
+    }));
+    REQUIRE(QMetaObject::invokeMethod(newPageAction, "trigger"));
+    newPageName->setProperty("text", QStringLiteral("created_in_dialog"));
+    newPageTitle->setProperty("text", QStringLiteral("Duplicate"));
+    REQUIRE(QMetaObject::invokeMethod(newPageDialog, "accept"));
+    REQUIRE(waitUntil(
+        [newPageDialog]() -> bool { return newPageDialog->property("visible").toBool(); }));
+    REQUIRE(QMetaObject::invokeMethod(newPageDialog, "reject"));
+
     auto* todayButton = root->findChild<QQuickItem*>(QStringLiteral("todayJournalButton"));
+    auto* previousButton = root->findChild<QQuickItem*>(QStringLiteral("previousJournalButton"));
+    auto* nextButton = root->findChild<QQuickItem*>(QStringLiteral("nextJournalButton"));
     REQUIRE(todayButton != nullptr);
+    REQUIRE(previousButton != nullptr);
+    REQUIRE(nextButton != nullptr);
     REQUIRE(QMetaObject::invokeMethod(todayButton, "clicked"));
     REQUIRE(waitUntil([&controller]() -> bool { return controller.isJournalPage(); }));
+    const auto today = controller.journalDate();
+    CHECK(todayButton->property("highlighted").toBool());
+    REQUIRE(QMetaObject::invokeMethod(previousButton, "clicked"));
+    CHECK(controller.journalDate() == today.addDays(-1));
+    REQUIRE(QMetaObject::invokeMethod(nextButton, "clicked"));
+    CHECK(controller.journalDate() == today);
     controller.navigateToPage(projectId);
     CHECK(controller.outlineEntries()
               ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
-              .toString() == QStringLiteral("committed before navigation"));
+              .toString() == QStringLiteral("committed before rename"));
 }
 
 TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings") {

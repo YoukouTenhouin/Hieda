@@ -661,10 +661,26 @@ struct ParentLink {
     std::uint64_t rank{0};
 };
 
+struct OutlineEntryRecord {
+    BlockMetadata metadata;
+    std::string authoredText;
+    std::optional<BlockId> parentEntry;
+};
+
 struct LoadedOutline {
     BlockRecord page;
-    std::vector<JournalEntry> entries;
+    std::vector<OutlineEntryRecord> entries;
 };
+
+auto publicJournalEntries(const std::vector<OutlineEntryRecord>& outlineEntries)
+    -> std::vector<JournalEntry> {
+    std::vector<JournalEntry> entries;
+    entries.reserve(outlineEntries.size());
+    for (const auto& entry : outlineEntries) {
+        entries.push_back({entry.metadata, entry.authoredText, entry.parentEntry});
+    }
+    return entries;
+}
 
 struct JournalHistoryAction {
     std::uint64_t sequence{0};
@@ -681,8 +697,10 @@ struct JournalPageHistory {
 };
 
 struct PageHistoryAction {
+    std::uint64_t sequence{0};
     Page before;
     Page after;
+    std::size_t estimatedBytes{0};
 };
 
 struct PageHistory {
@@ -1083,7 +1101,7 @@ class NotebookSession::Impl {
     }
 
     auto eraseContainment(MDB_txn* transaction, const JournalDatabases& databases,
-                          const JournalEntry& entry) const -> std::optional<NotebookError> {
+                          const OutlineEntryRecord& entry) const -> std::optional<NotebookError> {
         const auto path = info.value_or(NotebookInfo{}).path;
         auto parent = parentOf(transaction, databases, entry.metadata.id);
         if (!parent) {
@@ -1145,7 +1163,7 @@ class NotebookSession::Impl {
         return std::nullopt;
     }
 
-    static auto subtreeEnd(const std::vector<JournalEntry>& entries, std::size_t root)
+    static auto subtreeEnd(const std::vector<OutlineEntryRecord>& entries, std::size_t root)
         -> std::size_t {
         const auto rootId = entries[root].metadata.id;
         auto index = root + 1;
@@ -1238,7 +1256,7 @@ class NotebookSession::Impl {
         }
         auto bytes = sizeof(LoadedOutline) + outline->page.authoredText.size();
         for (const auto& entry : outline->entries) {
-            bytes += sizeof(JournalEntry) + entry.authoredText.size();
+            bytes += sizeof(OutlineEntryRecord) + entry.authoredText.size();
         }
         return bytes;
     }
@@ -1263,6 +1281,9 @@ class NotebookSession::Impl {
         for (const auto& history : journalHistory) {
             count += history.undo.size() + history.redo.size();
         }
+        for (const auto& history : pageHistories) {
+            count += history.undo.size() + history.redo.size();
+        }
         return count;
     }
 
@@ -1270,31 +1291,56 @@ class NotebookSession::Impl {
         constexpr std::size_t historyBudget = 32ULL * 1024ULL * 1024ULL;
         while (historyBytes > historyBudget && historyActionCount() > 1) {
             JournalPageHistory* oldestHistory = nullptr;
+            PageHistory* oldestPageHistory = nullptr;
             bool oldestIsRedo = false;
             auto oldestSequence = std::numeric_limits<std::uint64_t>::max();
             for (auto& history : journalHistory) {
                 if (!history.undo.empty() && history.undo.front().sequence < oldestSequence) {
                     oldestHistory = &history;
+                    oldestPageHistory = nullptr;
                     oldestIsRedo = false;
                     oldestSequence = history.undo.front().sequence;
                 }
                 if (!history.redo.empty() && history.redo.back().sequence < oldestSequence) {
                     oldestHistory = &history;
+                    oldestPageHistory = nullptr;
                     oldestIsRedo = true;
                     oldestSequence = history.redo.back().sequence;
                 }
             }
-            if (oldestHistory == nullptr) {
+            for (auto& history : pageHistories) {
+                if (!history.undo.empty() && history.undo.front().sequence < oldestSequence) {
+                    oldestHistory = nullptr;
+                    oldestPageHistory = &history;
+                    oldestIsRedo = false;
+                    oldestSequence = history.undo.front().sequence;
+                }
+                if (!history.redo.empty() && history.redo.back().sequence < oldestSequence) {
+                    oldestHistory = nullptr;
+                    oldestPageHistory = &history;
+                    oldestIsRedo = true;
+                    oldestSequence = history.redo.back().sequence;
+                }
+            }
+            if (oldestHistory == nullptr && oldestPageHistory == nullptr) {
                 break;
             }
-            if (oldestIsRedo) {
+            if (oldestHistory != nullptr && oldestIsRedo) {
                 for (const auto& action : oldestHistory->redo) {
                     historyBytes -= action.estimatedBytes;
                 }
                 oldestHistory->redo.clear();
-            } else {
+            } else if (oldestHistory != nullptr) {
                 historyBytes -= oldestHistory->undo.front().estimatedBytes;
                 oldestHistory->undo.pop_front();
+            } else if (oldestIsRedo) {
+                for (const auto& action : oldestPageHistory->redo) {
+                    historyBytes -= action.estimatedBytes;
+                }
+                oldestPageHistory->redo.clear();
+            } else {
+                historyBytes -= oldestPageHistory->undo.front().estimatedBytes;
+                oldestPageHistory->undo.pop_front();
             }
         }
     }
@@ -1449,7 +1495,8 @@ class NotebookSession::Impl {
         if (!target) {
             return Result<JournalPage>::success({date, std::nullopt, {}});
         }
-        return Result<JournalPage>::success({date, target->page.metadata, target->entries});
+        return Result<JournalPage>::success(
+            {date, target->page.metadata, publicJournalEntries(target->entries)});
     }
 
     static auto publicPage(LoadedOutline outline) -> Page {
@@ -1796,12 +1843,23 @@ class NotebookSession::Impl {
 
     void recordPageHistory(Page before, Page after) {
         auto& history = pageHistory(before.metadata.id);
-        history.redo.clear();
-        history.undo.push_back({std::move(before), std::move(after)});
-        constexpr std::size_t maximumPageActions = 100;
-        if (history.undo.size() > maximumPageActions) {
-            history.undo.pop_front();
+        for (const auto& action : history.redo) {
+            historyBytes -= action.estimatedBytes;
         }
+        history.redo.clear();
+        const auto estimatePageBytes = [](const Page& page) -> std::size_t {
+            auto bytes = sizeof(Page) + page.name.size() + page.displayTitle.size();
+            for (const auto& entry : page.entries) {
+                bytes += sizeof(PageEntry) + entry.authoredText.size();
+            }
+            return bytes;
+        };
+        PageHistoryAction action{nextHistorySequence++, std::move(before), std::move(after), 0};
+        action.estimatedBytes = sizeof(PageHistoryAction) + estimatePageBytes(action.before) +
+                                estimatePageBytes(action.after);
+        historyBytes += action.estimatedBytes;
+        history.undo.push_back(std::move(action));
+        enforceHistoryBudget();
     }
 
     auto restorePageEntries(const Page& target) -> Result<Page> {
@@ -1942,7 +2000,7 @@ class NotebookSession::Impl {
         }
         auto loaded = std::move(outline).value();
         return Result<JournalPage>::success(
-            {date, loaded.page.metadata, std::move(loaded.entries)});
+            {date, loaded.page.metadata, publicJournalEntries(loaded.entries)});
     }
 
     auto readJournalPage(JournalDate date) const -> Result<JournalPage> {
@@ -2270,17 +2328,18 @@ class NotebookSession::Impl {
         return Result<JournalPage>::success(std::move(committedPage));
     }
 
-    auto updateEntry(BlockId entryId, std::string authoredText) -> Result<JournalEntry> {
+    auto updateEntry(BlockId entryId, std::string authoredText) -> Result<OutlineEntryRecord> {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
         MDB_txn* transaction = nullptr;
         auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
         if (result != MDB_SUCCESS) {
-            return Result<JournalEntry>::failure(errorFromLmdb(path, result, "begin Journal edit"));
+            return Result<OutlineEntryRecord>::failure(
+                errorFromLmdb(path, result, "begin outline edit"));
         }
-        const auto fail = [&](NotebookError error) -> Result<JournalEntry> {
+        const auto fail = [&](NotebookError error) -> Result<OutlineEntryRecord> {
             mdb_txn_abort(transaction);
-            return Result<JournalEntry>::failure(std::move(error));
+            return Result<OutlineEntryRecord>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
@@ -2316,8 +2375,8 @@ class NotebookSession::Impl {
                                      : std::nullopt;
         if (entry.authoredText == authoredText) {
             mdb_txn_abort(transaction);
-            return Result<JournalEntry>::success(
-                JournalEntry{entry.metadata, entry.authoredText, parentEntry});
+            return Result<OutlineEntryRecord>::success(
+                {entry.metadata, entry.authoredText, parentEntry});
         }
         entry.authoredText = std::move(authoredText);
         entry.metadata.updatedAt = currentTimestamp();
@@ -2329,8 +2388,8 @@ class NotebookSession::Impl {
         }
         result = commitAdapter->commit(transaction);
         if (result != MDB_SUCCESS) {
-            return Result<JournalEntry>::failure(
-                errorFromLmdb(path, result, "commit Journal edit"));
+            return Result<OutlineEntryRecord>::failure(
+                errorFromLmdb(path, result, "commit outline edit"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -2345,8 +2404,8 @@ class NotebookSession::Impl {
             recordHistory(before.page.journalDate.value_or(JournalDate{}), before,
                           std::move(after));
         }
-        return Result<JournalEntry>::success(
-            JournalEntry{entry.metadata, entry.authoredText, parentEntry});
+        return Result<OutlineEntryRecord>::success(
+            {entry.metadata, entry.authoredText, parentEntry});
     }
 
     auto insertNestedEntry(JournalDate date, std::optional<BlockId> afterEntry,
@@ -2473,7 +2532,7 @@ class NotebookSession::Impl {
         recordHistory(date, pageWasCreated ? std::nullopt : std::optional<LoadedOutline>{before},
                       outline);
         return Result<JournalPage>::success(
-            {date, outline.page.metadata, std::move(outline.entries)});
+            {date, outline.page.metadata, publicJournalEntries(outline.entries)});
     }
 
     auto editOutline(BlockId entryId, OutlineEditKind edit, std::size_t cursorByteOffset = 0,
@@ -2620,7 +2679,7 @@ class NotebookSession::Impl {
             }
             const auto parentParent = parent->parentEntry;
             const auto end = subtreeEnd(outline.entries, index);
-            std::vector<JournalEntry> moving(
+            std::vector<OutlineEntryRecord> moving(
                 outline.entries.begin() + static_cast<std::ptrdiff_t>(index),
                 outline.entries.begin() + static_cast<std::ptrdiff_t>(end));
             moving.front().parentEntry = parentParent;
@@ -2738,7 +2797,8 @@ class NotebookSession::Impl {
             recordHistory(outline.page.journalDate.value_or(JournalDate{}), before, outline);
         }
         return Result<JournalPage>::success({outline.page.journalDate.value_or(JournalDate{}),
-                                             outline.page.metadata, std::move(outline.entries)});
+                                             outline.page.metadata,
+                                             publicJournalEntries(outline.entries)});
     }
 
     auto deleteSubtrees(const std::vector<BlockId>& entryIds) -> Result<JournalPage> {
@@ -2773,7 +2833,7 @@ class NotebookSession::Impl {
                                    const BlockId& identifier) -> bool {
             return std::ranges::find(ids, identifier) != ids.end();
         };
-        const auto hasAncestorIn = [&](const JournalEntry& entry,
+        const auto hasAncestorIn = [&](const OutlineEntryRecord& entry,
                                        const std::vector<BlockId>& ids) -> bool {
             auto ancestor = entry.parentEntry;
             while (ancestor) {
@@ -2806,7 +2866,7 @@ class NotebookSession::Impl {
                 roots.push_back(entry.metadata.id);
             }
         }
-        const auto isDeleted = [&](const JournalEntry& entry) -> bool {
+        const auto isDeleted = [&](const OutlineEntryRecord& entry) -> bool {
             return containsId(roots, entry.metadata.id) || hasAncestorIn(entry, roots);
         };
 
@@ -2860,7 +2920,8 @@ class NotebookSession::Impl {
             recordHistory(outline.page.journalDate.value_or(JournalDate{}), before, outline);
         }
         return Result<JournalPage>::success({outline.page.journalDate.value_or(JournalDate{}),
-                                             outline.page.metadata, std::move(outline.entries)});
+                                             outline.page.metadata,
+                                             publicJournalEntries(outline.entries)});
     }
 
     void incrementCachedRevision() {
@@ -2894,7 +2955,7 @@ class NotebookSession::Impl {
 };
 
 #ifdef HIEDA_TESTING
-void NotebookSessionTestAccess::rejectNextJournalCommit(NotebookSession& session) {
+void NotebookSessionTestAccess::rejectNextCommit(NotebookSession& session) {
     std::scoped_lock lock(session.impl_->mutex);
     session.impl_->commitAdapter = std::make_unique<RejectNextJournalCommitAdapter>();
 }
@@ -3420,7 +3481,12 @@ auto NotebookSession::updateJournalEntry(BlockId entryId, std::string authoredTe
         if (impl_->lastCommandCommitted) {
             callbacks = impl_->committedCallbacks();
         }
-        return outcome;
+        if (!outcome) {
+            return Result<JournalEntry>::failure(outcome.error());
+        }
+        auto entry = std::move(outcome).value();
+        return Result<JournalEntry>::success(
+            {entry.metadata, std::move(entry.authoredText), entry.parentEntry});
     }();
     notifyCallbacks(callbacks);
     return result;

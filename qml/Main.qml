@@ -19,6 +19,7 @@ ApplicationWindow {
     property var outlineSelectionRoots: []
     property int outlineSelectionAnchorRow: -1
     property int outlineSelectionExtentRow: -1
+    property var pageRenameReturnEditor: null
     readonly property bool hasPendingOutlineEdit: activeOutlineEditor && activeOutlineEditor.hasPendingEdit
     readonly property int outlineSelectionCount: outlineSelectionIds.length
 
@@ -219,6 +220,13 @@ ApplicationWindow {
 
     }
 
+    function restorePageRenameFocus() {
+        const editor = pageRenameReturnEditor;
+        pageRenameReturnEditor = null;
+        if (editor)
+            Qt.callLater(function() { editor.forceActiveFocus(); });
+    }
+
     function completeDeferredRollover(focusDraft) {
         if (!rolloverPending)
             return ;
@@ -342,6 +350,7 @@ ApplicationWindow {
         text: qsTr("&Rename Page…")
         enabled: notebookController.hasOpenNotebook && !notebookController.isJournalPage
         onTriggered: {
+            window.pageRenameReturnEditor = window.activeOutlineEditor;
             renamePageName.text = notebookController.currentPageName;
             renamePageTitle.text = notebookController.currentPageTitle;
             renamePageDialog.open();
@@ -428,7 +437,7 @@ ApplicationWindow {
         standardButtons: Dialog.Ok | Dialog.Cancel
         onAccepted: {
             if (!window.commitActiveOutlineEditor() || !notebookController.createPage(newPageName.text, newPageTitle.text))
-                open();
+                Qt.callLater(function() { newPageDialog.open(); });
             else {
                 newPageName.clear();
                 newPageTitle.clear();
@@ -451,8 +460,11 @@ ApplicationWindow {
         standardButtons: Dialog.Ok | Dialog.Cancel
         onAccepted: {
             if (!window.commitActiveOutlineEditor() || !notebookController.renameCurrentPage(renamePageName.text, renamePageTitle.text))
-                open();
+                Qt.callLater(function() { renamePageDialog.open(); });
+            else
+                window.restorePageRenameFocus();
         }
+        onRejected: window.restorePageRenameFocus()
         ColumnLayout {
             Label { text: qsTr("Name") }
             TextField { id: renamePageName; objectName: "renamePageName" }
@@ -479,6 +491,7 @@ ApplicationWindow {
                 })
             }
             Button {
+                objectName: "openSelectedPageButton"
                 text: qsTr("Open selected Page")
                 enabled: notebookController.pageIdForChoice(pagePicker.currentText).length > 0
                 onClicked: {
@@ -641,6 +654,11 @@ ApplicationWindow {
                         Label { text: qsTr("Pages"); font.bold: true }
                         ListView {
                             id: pageList
+
+                            function pageItemAt(row) {
+                                return itemAtIndex(row);
+                            }
+
                             objectName: "pageList"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
@@ -692,15 +710,16 @@ ApplicationWindow {
 
                         Label {
                             id: dateHeading
+                            objectName: "pageHeading"
 
                             width: Math.min(parent.width - (window.uiSpacing * 8), window.maximumDocumentWidth)
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.top: parent.top
                             anchors.topMargin: window.uiSpacing * 4
-                            text: notebookController.isJournalPage ? Qt.formatDate(notebookController.journalDate, Locale.LongFormat) : notebookController.currentPageTitle
+                            text: notebookController.isJournalPage ? Qt.formatDate(notebookController.journalDate, Locale.LongFormat) : qsTr("%1 — %2").arg(notebookController.currentPageTitle).arg(notebookController.currentPageName)
                             font.pixelSize: Math.round(window.font.pixelSize * 1.7)
                             font.weight: Font.DemiBold
-                            Accessible.name: notebookController.isJournalPage ? qsTr("Journal Page for %1").arg(text) : qsTr("Page %1, name %2").arg(text).arg(notebookController.currentPageName)
+                            Accessible.name: notebookController.isJournalPage ? qsTr("Journal Page for %1").arg(text) : qsTr("Page title %1, name %2").arg(notebookController.currentPageTitle).arg(notebookController.currentPageName)
                         }
 
                     }

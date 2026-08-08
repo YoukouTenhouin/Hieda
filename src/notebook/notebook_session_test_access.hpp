@@ -7,7 +7,7 @@ namespace hieda::notebook {
 
 class NotebookSessionTestAccess {
   public:
-    static void rejectNextJournalCommit(NotebookSession& session);
+    static void rejectNextCommit(NotebookSession& session);
 };
 
 } // namespace hieda::notebook

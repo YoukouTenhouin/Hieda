@@ -12,6 +12,12 @@
 #include <QUrl>
 #include <QVariantMap>
 
+struct OutlineEntry {
+    hieda::notebook::BlockMetadata metadata;
+    std::string authoredText;
+    std::optional<hieda::notebook::BlockId> parentEntry;
+};
+
 class OutlineEntryModel final : public QAbstractListModel {
     Q_OBJECT
 
@@ -33,9 +39,9 @@ class OutlineEntryModel final : public QAbstractListModel {
     [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const -> int override;
     [[nodiscard]] auto data(const QModelIndex& index, int role) const -> QVariant override;
     [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;
-    void setEntries(std::vector<hieda::notebook::JournalEntry> entries);
-    void insertEntry(int row, hieda::notebook::JournalEntry entry);
-    void updateEntry(const hieda::notebook::JournalEntry& entry);
+    void setEntries(std::vector<OutlineEntry> entries);
+    void insertEntry(int row, OutlineEntry entry);
+    void updateEntry(const OutlineEntry& entry);
     [[nodiscard]] auto entryId(int row) const -> QString;
     [[nodiscard]] auto entryText(int row) const -> QString;
     [[nodiscard]] auto entryParentId(int row) const -> QString;
@@ -44,7 +50,7 @@ class OutlineEntryModel final : public QAbstractListModel {
     [[nodiscard]] auto rowForId(const hieda::notebook::BlockId& identifier) const -> int;
 
   private:
-    std::vector<hieda::notebook::JournalEntry> entries_;
+    std::vector<OutlineEntry> entries_;
 };
 
 class NotebookController final : public QObject {
@@ -53,14 +59,14 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QString notebookPath READ notebookPath NOTIFY stateChanged)
     Q_PROPERTY(QString notebookName READ notebookName NOTIFY stateChanged)
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
-    Q_PROPERTY(QDate journalDate READ journalDate NOTIFY journalChanged)
+    Q_PROPERTY(QDate journalDate READ journalDate NOTIFY destinationChanged)
     Q_PROPERTY(QAbstractItemModel* outlineEntries READ outlineEntries CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
-    Q_PROPERTY(bool isJournalPage READ isJournalPage NOTIFY journalChanged)
-    Q_PROPERTY(QString currentPageId READ currentPageId NOTIFY journalChanged)
-    Q_PROPERTY(QString currentPageName READ currentPageName NOTIFY journalChanged)
-    Q_PROPERTY(QString currentPageTitle READ currentPageTitle NOTIFY journalChanged)
+    Q_PROPERTY(bool isJournalPage READ isJournalPage NOTIFY destinationChanged)
+    Q_PROPERTY(QString currentPageId READ currentPageId NOTIFY destinationChanged)
+    Q_PROPERTY(QString currentPageName READ currentPageName NOTIFY destinationChanged)
+    Q_PROPERTY(QString currentPageTitle READ currentPageTitle NOTIFY destinationChanged)
     Q_PROPERTY(QStringList pageChoices READ pageChoices NOTIFY stateChanged)
 
   public:
@@ -129,7 +135,7 @@ class NotebookController final : public QObject {
 
   signals:
     void stateChanged();
-    void journalChanged();
+    void destinationChanged();
     void journalDateRolloverRequested();
 
   protected:
@@ -137,6 +143,7 @@ class NotebookController final : public QObject {
 
   private:
     enum class OutlineHistoryDirection : std::uint8_t { undo, redo };
+    enum class OutlineEntryMove : std::uint8_t { indent, outdent, up, down };
 
     void accept(const hieda::notebook::NotebookInfo& info);
     void reject(const hieda::notebook::NotebookError& error);
@@ -145,8 +152,7 @@ class NotebookController final : public QObject {
     void loadPage(const hieda::notebook::BlockId& pageId);
     void refreshPages();
     auto moveOutlineEntry(const QString& entryId, const QString& authoredText,
-                          hieda::notebook::JournalEntryMove movement, int cursorPosition)
-        -> QVariantMap;
+                          OutlineEntryMove movement, int cursorPosition) -> QVariantMap;
     auto applyOutlineHistory(OutlineHistoryDirection direction, const QString& preferredEntryId,
                              int cursorPosition) -> QVariantMap;
     void scheduleMidnightRefresh();
