@@ -154,6 +154,92 @@ struct OutlinePage {
     auto operator==(const OutlinePage&) const -> bool = default;
 };
 
+struct BlockReference {
+    std::size_t sourceByteOffset{0};
+    std::size_t sourceByteLength{0};
+    BlockId targetId;
+    std::optional<BlockMetadata> target;
+
+    auto operator==(const BlockReference&) const -> bool = default;
+};
+
+struct BlockReferenceDestination {
+    BlockMetadata target;
+    OutlinePage structuralPage;
+    std::vector<BlockId> containmentPath;
+
+    auto operator==(const BlockReferenceDestination&) const -> bool = default;
+};
+
+enum class SemanticReferenceKind : std::uint8_t { pageLink, blockReference };
+
+struct LinkedReferenceOccurrence {
+    SemanticReferenceKind kind{SemanticReferenceKind::pageLink};
+    std::size_t sourceByteOffset{0};
+    std::size_t sourceByteLength{0};
+
+    auto operator==(const LinkedReferenceOccurrence&) const -> bool = default;
+};
+
+struct LinkedReferenceSource {
+    Entry source;
+    OutlinePage structuralPage;
+    std::vector<BlockId> containmentPath;
+    std::vector<LinkedReferenceOccurrence> occurrences;
+    std::size_t occurrenceCount{0};
+
+    auto operator==(const LinkedReferenceSource&) const -> bool = default;
+};
+
+struct LinkedReferencesBatch {
+    std::vector<LinkedReferenceSource> sources;
+    std::size_t totalSourceCount{0};
+    std::optional<std::string> continuationCursor;
+
+    auto operator==(const LinkedReferencesBatch&) const -> bool = default;
+};
+
+struct LinkedReferenceOccurrencesBatch {
+    std::vector<LinkedReferenceOccurrence> occurrences;
+    std::size_t totalOccurrenceCount{0};
+    std::optional<std::string> continuationCursor;
+
+    auto operator==(const LinkedReferenceOccurrencesBatch&) const -> bool = default;
+};
+
+struct UnresolvedPageLinkOccurrence {
+    std::size_t sourceByteOffset{0};
+    std::size_t sourceByteLength{0};
+
+    auto operator==(const UnresolvedPageLinkOccurrence&) const -> bool = default;
+};
+
+struct UnresolvedPageLinkSource {
+    Entry source;
+    OutlinePage structuralPage;
+    std::vector<BlockId> containmentPath;
+    std::vector<UnresolvedPageLinkOccurrence> occurrences;
+    std::size_t occurrenceCount{0};
+
+    auto operator==(const UnresolvedPageLinkSource&) const -> bool = default;
+};
+
+struct UnresolvedPageLinkSourcesBatch {
+    std::vector<UnresolvedPageLinkSource> sources;
+    std::size_t totalSourceCount{0};
+    std::optional<std::string> continuationCursor;
+
+    auto operator==(const UnresolvedPageLinkSourcesBatch&) const -> bool = default;
+};
+
+struct UnresolvedPageLinkOccurrencesBatch {
+    std::vector<UnresolvedPageLinkOccurrence> occurrences;
+    std::size_t totalOccurrenceCount{0};
+    std::optional<std::string> continuationCursor;
+
+    auto operator==(const UnresolvedPageLinkOccurrencesBatch&) const -> bool = default;
+};
+
 struct EditCapabilities {
     bool canUndo{false};
     bool canRedo{false};
@@ -191,6 +277,8 @@ enum class NotebookErrorCode : std::uint8_t {
     pageNotFound,
     staleHierarchyCursor,
     pageLinkNotFound,
+    blockReferenceNotFound,
+    staleLinkedReferencesCursor,
 };
 
 struct NotebookError {
@@ -262,6 +350,29 @@ class NotebookSession {
     [[nodiscard]] auto pageLinks(BlockId entryId) const -> Result<std::vector<PageLink>>;
     [[nodiscard]] auto followPageLink(BlockId entryId, std::size_t sourceByteOffset) const
         -> Result<PageLinkDestination>;
+    [[nodiscard]] auto insertBlockReference(BlockId sourceEntryId, std::size_t sourceByteOffset,
+                                            BlockId targetId) -> Result<Entry>;
+    [[nodiscard]] auto blockReferences(BlockId entryId) const
+        -> Result<std::vector<BlockReference>>;
+    [[nodiscard]] auto followBlockReference(BlockId entryId, std::size_t sourceByteOffset) const
+        -> Result<BlockReferenceDestination>;
+    [[nodiscard]] auto locateBlock(BlockId blockId) const -> Result<BlockReferenceDestination>;
+    [[nodiscard]] auto
+    linkedReferences(BlockId targetId,
+                     std::optional<std::string> continuationCursor = std::nullopt) const
+        -> Result<LinkedReferencesBatch>;
+    [[nodiscard]] auto
+    linkedReferenceOccurrences(BlockId targetId, BlockId sourceId,
+                               std::optional<std::string> continuationCursor = std::nullopt) const
+        -> Result<LinkedReferenceOccurrencesBatch>;
+    [[nodiscard]] auto
+    unresolvedPageLinkSources(std::string name,
+                              std::optional<std::string> continuationCursor = std::nullopt) const
+        -> Result<UnresolvedPageLinkSourcesBatch>;
+    [[nodiscard]] auto unresolvedPageLinkOccurrences(
+        std::string name, BlockId sourceId,
+        std::optional<std::string> continuationCursor = std::nullopt) const
+        -> Result<UnresolvedPageLinkOccurrencesBatch>;
     [[nodiscard]] auto pagePreview(std::string name) const -> Result<PagePreview>;
     [[nodiscard]] auto outline(PageAddress address) const -> Result<OutlinePage>;
     [[nodiscard]] auto insertEntry(PageAddress address, std::optional<BlockId> afterEntry,

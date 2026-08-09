@@ -882,6 +882,220 @@ TEST_CASE("Entry commits replace Page Link meaning atomically and persist it acr
     CHECK(session.pageLinks(entry.metadata.id).value().empty());
 }
 
+TEST_CASE("a user inserts follows and reopens a durable Block Reference") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "block-reference.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    const auto targetPage = session.createPage("target", "Target").value();
+    const auto target =
+        session.insertEntry(targetPage.metadata.id, std::nullopt, "target text").value().entries[0];
+    const auto child =
+        session.insertEntry(targetPage.metadata.id, target.metadata.id, "child").value().entries[1];
+    REQUIRE(session.moveEntry(child.metadata.id, hieda::notebook::EntryMove::indent, "child"));
+    const auto sourcePage = session.createPage("source", "Source").value();
+    const auto source = session.insertEntry(sourcePage.metadata.id, std::nullopt, "before after")
+                            .value()
+                            .entries[0];
+
+    const auto inserted = session.insertBlockReference(source.metadata.id, 7, child.metadata.id);
+
+    REQUIRE(inserted);
+    const auto notation = "[[block:" + child.metadata.id.toString() + "]]";
+    CHECK(inserted.value().authoredText == "before " + notation + "after");
+    const auto references = session.blockReferences(source.metadata.id);
+    REQUIRE(references);
+    REQUIRE(references.value().size() == 1);
+    CHECK(references.value()[0].targetId == child.metadata.id);
+    REQUIRE(references.value()[0].target);
+    const auto followed = session.followBlockReference(source.metadata.id,
+                                                       references.value()[0].sourceByteOffset + 3);
+    REQUIRE(followed);
+    CHECK(followed.value().target.id == child.metadata.id);
+    CHECK(followed.value().structuralPage.metadata.value().id == targetPage.metadata.id);
+    REQUIRE(followed.value().containmentPath.size() == 2);
+    CHECK(followed.value().containmentPath[0] == target.metadata.id);
+    CHECK(followed.value().containmentPath[1] == child.metadata.id);
+
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    REQUIRE(session.blockReferences(source.metadata.id).value()[0].target);
+    CHECK(session.followBlockReference(source.metadata.id, 7).value().target.id ==
+          child.metadata.id);
+}
+
+TEST_CASE("Linked References deduplicate occurrences and track structural changes") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "linked-references.hieda"));
+    const auto targetPage = session.createPage("target", "Target").value();
+    const auto sourcePage = session.createPage("source", "Source").value();
+    const auto archivePage = session.createPage("archive", "Archive").value();
+    const auto sourceText =
+        "[[target]] and [[block:" + targetPage.metadata.id.toString() + "]] twice [[target]]";
+    const auto source =
+        session.insertEntry(sourcePage.metadata.id, std::nullopt, sourceText).value().entries[0];
+
+    auto incoming = session.linkedReferences(targetPage.metadata.id);
+
+    REQUIRE(incoming);
+    CHECK(incoming.value().totalSourceCount == 1);
+    REQUIRE(incoming.value().sources.size() == 1);
+    CHECK(incoming.value().sources[0].source.metadata.id == source.metadata.id);
+    CHECK(incoming.value().sources[0].occurrenceCount == 3);
+    REQUIRE(incoming.value().sources[0].occurrences.size() == 3);
+    CHECK(incoming.value().sources[0].occurrences[0].kind ==
+          hieda::notebook::SemanticReferenceKind::pageLink);
+    CHECK(incoming.value().sources[0].occurrences[1].kind ==
+          hieda::notebook::SemanticReferenceKind::blockReference);
+    CHECK(incoming.value().sources[0].structuralPage.metadata.value().id == sourcePage.metadata.id);
+
+    REQUIRE(session.moveEntryToPage(source.metadata.id, archivePage.metadata.id, std::nullopt));
+    incoming = session.linkedReferences(targetPage.metadata.id);
+    REQUIRE(incoming);
+    CHECK(incoming.value().sources[0].structuralPage.metadata.value().id ==
+          archivePage.metadata.id);
+
+    REQUIRE(session.updateEntry(source.metadata.id, "no references"));
+    CHECK(session.linkedReferences(targetPage.metadata.id).value().totalSourceCount == 0);
+}
+
+TEST_CASE("deleting and undoing a target only changes Block Reference resolution") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "missing-block-reference.hieda"));
+    const auto targetPage = session.createPage("target", "Target").value();
+    const auto target =
+        session.insertEntry(targetPage.metadata.id, std::nullopt, "target").value().entries[0];
+    const auto archivePage = session.createPage("archive", "Archive").value();
+    const auto sourcePage = session.createPage("source", "Source").value();
+    const auto sourceText = "points to [[block:" + target.metadata.id.toString() + "]]";
+    const auto source =
+        session.insertEntry(sourcePage.metadata.id, std::nullopt, sourceText).value().entries[0];
+
+    REQUIRE(session.moveEntryToPage(target.metadata.id, archivePage.metadata.id, std::nullopt));
+    CHECK(session.linkedReferences(target.metadata.id).value().totalSourceCount == 1);
+    CHECK(session.followBlockReference(source.metadata.id, 10)
+              .value()
+              .structuralPage.metadata.value()
+              .id == archivePage.metadata.id);
+
+    REQUIRE(session.deleteEntry(target.metadata.id));
+
+    const auto missing = session.blockReferences(source.metadata.id).value()[0];
+    CHECK_FALSE(missing.target);
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].authoredText == sourceText);
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].metadata.updatedAt ==
+          source.metadata.updatedAt);
+    const auto missingFollow = session.followBlockReference(source.metadata.id, 10);
+    CHECK_FALSE(missingFollow);
+    CHECK(missingFollow.error().code == hieda::notebook::NotebookErrorCode::blockNotFound);
+
+    REQUIRE(session.undoEdit());
+    REQUIRE(session.blockReferences(source.metadata.id).value()[0].target);
+    CHECK(session.followBlockReference(source.metadata.id, 10).value().target.id ==
+          target.metadata.id);
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].authoredText == sourceText);
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].metadata.updatedAt ==
+          source.metadata.updatedAt);
+}
+
+TEST_CASE("Linked References batches and cursors are bounded to a Notebook revision") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "linked-reference-cursor.hieda"));
+    const auto target = session.createPage("target", "Target").value();
+    const auto source = session.createPage("source", "Source").value();
+    const auto notation = "[[block:" + target.metadata.id.toString() + "]]";
+    for (auto index = 0; index < 101; ++index) {
+        REQUIRE(session.insertEntry(source.metadata.id, std::nullopt,
+                                    notation + notation + notation + notation));
+    }
+
+    const auto first = session.linkedReferences(target.metadata.id);
+
+    REQUIRE(first);
+    CHECK(first.value().totalSourceCount == 101);
+    CHECK(first.value().sources.size() == 100);
+    REQUIRE(first.value().continuationCursor);
+    CHECK(first.value().sources[0].occurrenceCount == 4);
+    CHECK(first.value().sources[0].occurrences.size() == 3);
+    const auto firstOccurrences = session.linkedReferenceOccurrences(
+        target.metadata.id, first.value().sources[0].source.metadata.id);
+    REQUIRE(firstOccurrences);
+    CHECK(firstOccurrences.value().totalOccurrenceCount == 4);
+    CHECK(firstOccurrences.value().occurrences.size() == 3);
+    REQUIRE(firstOccurrences.value().continuationCursor);
+    const auto remainingOccurrences = session.linkedReferenceOccurrences(
+        target.metadata.id, first.value().sources[0].source.metadata.id,
+        firstOccurrences.value().continuationCursor);
+    REQUIRE(remainingOccurrences);
+    CHECK(remainingOccurrences.value().occurrences.size() == 1);
+    CHECK_FALSE(remainingOccurrences.value().continuationCursor);
+    const auto second =
+        session.linkedReferences(target.metadata.id, first.value().continuationCursor);
+    REQUIRE(second);
+    CHECK(second.value().sources.size() == 1);
+    CHECK_FALSE(second.value().continuationCursor);
+
+    REQUIRE(session.updateEntry(second.value().sources[0].source.metadata.id, "changed"));
+    const auto stale =
+        session.linkedReferences(target.metadata.id, first.value().continuationCursor);
+    CHECK_FALSE(stale);
+    CHECK(stale.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor);
+}
+
+TEST_CASE("Linked References group Pages by recency and keep current outline order") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "linked-reference-order.hieda"));
+    const auto target = session.createPage("target", "Target").value();
+    const auto firstPage = session.createPage("first", "First").value();
+    const auto secondPage = session.createPage("second", "Second").value();
+    const auto notation = "[[block:" + target.metadata.id.toString() + "]]";
+    const auto first =
+        session.insertEntry(firstPage.metadata.id, std::nullopt, notation).value().entries[0];
+    const auto second =
+        session.insertEntry(secondPage.metadata.id, std::nullopt, notation).value().entries[0];
+    const auto third =
+        session.insertEntry(firstPage.metadata.id, first.metadata.id, notation).value().entries[1];
+
+    const auto incoming = session.linkedReferences(target.metadata.id).value();
+
+    REQUIRE(incoming.sources.size() == 3);
+    CHECK(incoming.sources[0].source.metadata.id == first.metadata.id);
+    CHECK(incoming.sources[1].source.metadata.id == third.metadata.id);
+    CHECK(incoming.sources[2].source.metadata.id == second.metadata.id);
+}
+
+TEST_CASE("unresolved Page Link sources use bounded preview batches") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "preview-linked-references.hieda"));
+    const auto source = session.createPage("source", "Source").value();
+    for (auto index = 0; index < 101; ++index) {
+        REQUIRE(session.insertEntry(source.metadata.id, std::nullopt,
+                                    "[[missing]] [[missing]] [[missing]] [[missing]]"));
+    }
+
+    const auto first = session.unresolvedPageLinkSources("missing");
+    REQUIRE(first);
+    CHECK(first.value().totalSourceCount == 101);
+    CHECK(first.value().sources.size() == 100);
+    REQUIRE(first.value().continuationCursor);
+    CHECK(first.value().sources.front().occurrenceCount == 4);
+    CHECK(first.value().sources.front().occurrences.size() == 3);
+    const auto more = session.unresolvedPageLinkOccurrences(
+        "missing", first.value().sources.front().source.metadata.id);
+    REQUIRE(more);
+    REQUIRE(more.value().continuationCursor);
+    const auto last = session.unresolvedPageLinkOccurrences(
+        "missing", first.value().sources.front().source.metadata.id,
+        more.value().continuationCursor);
+    REQUIRE(last);
+    CHECK(last.value().occurrences.size() == 1);
+}
+
 TEST_CASE("opening a schema v2 Notebook backfills missing Page Link indexes") {
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath = temporaryDirectory.path() / "page-link-backfill.hieda";
