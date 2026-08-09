@@ -249,6 +249,8 @@ TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy preview
     CHECK_FALSE(controller.isJournalPage());
     CHECK(controller.currentPageName() == QStringLiteral("work/client"));
     CHECK(controller.currentPageId().isEmpty());
+    root = hierarchy->index(0, 0);
+    client = hierarchy->index(0, 0, root);
     CHECK(hierarchy->data(client, PageHierarchyModel::SelectedRole).toBool());
 
     REQUIRE(controller.createCurrentPage(QStringLiteral("Client")));
@@ -267,6 +269,69 @@ TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy preview
     CHECK(controller.currentPageId() == createdId);
     REQUIRE(controller.redoOutlineEdit().value(QStringLiteral("succeeded")).toBool());
     CHECK(controller.currentPagePreview());
+}
+
+TEST_CASE("the Qt adapter follows committed Page Links and presents unresolved sources") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "page-links-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    const auto targetId = controller.currentPageId();
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]] and [[missing/page]]")) == 0);
+    const auto sourceId = controller.outlineEntryId(0);
+    const auto presentation = controller.committedEntryPresentation(
+        sourceId, QStringLiteral("[[target]] and [[missing/page]]"));
+    CHECK(presentation.contains(QStringLiteral(">Target</a>")));
+    CHECK(presentation.contains(QStringLiteral(">missing/page</a>")));
+    CHECK_FALSE(presentation.contains(QStringLiteral("[[target]]")));
+
+    REQUIRE(
+        controller.followPageLink(sourceId, 3, QStringLiteral("[[target]] and [[missing/page]]")));
+    CHECK(controller.currentPageId() == targetId);
+    CHECK(controller.currentPageName() == QStringLiteral("target"));
+
+    controller.navigateToPageName(QStringLiteral("source"));
+    REQUIRE(
+        controller.followPageLink(sourceId, 20, QStringLiteral("[[target]] and [[missing/page]]")));
+    CHECK(controller.currentPagePreview());
+    CHECK(controller.currentPageName() == QStringLiteral("missing/page"));
+    REQUIRE(controller.outlineEntries()->rowCount() == 1);
+    CHECK(controller.outlineEntries()
+              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("[[target]] and [[missing/page]]"));
+
+    controller.navigateToPageName(QStringLiteral("source"));
+    controller.navigateToPageName(QStringLiteral("missing/page"));
+    CHECK(controller.currentPagePreview());
+    CHECK(controller.outlineEntries()->rowCount() == 1);
+
+    controller.navigateToPageName(QStringLiteral("source"));
+    CHECK_FALSE(controller.followPageLink(sourceId, 3, QStringLiteral("draft [[target]]")));
+    CHECK(controller.currentPageName() == QStringLiteral("source"));
+}
+
+TEST_CASE("the Qt adapter presents dense Unicode Page Links at exact cursor offsets") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "dense-page-links.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    constexpr auto repetitions = 4096;
+    QString authoredText;
+    authoredText.reserve(static_cast<qsizetype>(repetitions) * 11);
+    for (auto index = 0; index < repetitions; ++index) {
+        authoredText += QStringLiteral("β[[target]]");
+    }
+    REQUIRE(controller.insertOutlineEntry(authoredText) == 0);
+    const auto sourceId = controller.outlineEntryId(0);
+
+    const auto presentation = controller.committedEntryPresentation(sourceId, authoredText);
+
+    CHECK(presentation.count(QStringLiteral("<a href=")) == repetitions);
+    const auto lastCharacterOffset = ((repetitions - 1) * 11) + 1;
+    CHECK(presentation.contains(
+        QStringLiteral("<a href=\"%1\">Target</a>").arg(lastCharacterOffset)));
 }
 
 TEST_CASE("the Qt hierarchy model fetches every revision-bound child batch") {

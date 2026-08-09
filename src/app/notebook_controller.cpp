@@ -241,7 +241,7 @@ auto OutlineEntryModel::rowForId(const hieda::notebook::BlockId& identifier) con
 
 PageHierarchyModel::PageHierarchyModel(QObject* parent) : QAbstractItemModel(parent) {}
 
-auto PageHierarchyModel::node(const QModelIndex& index) const -> Node* {
+auto PageHierarchyModel::node(const QModelIndex& index) -> Node* {
     return index.isValid() ? static_cast<Node*>(index.internalPointer()) : nullptr;
 }
 
@@ -506,7 +506,7 @@ auto PageHierarchyModel::indexForPageName(const QString& pageName) const -> QMod
                : createIndex(static_cast<int>(std::distance(siblings.begin(), found)), 0, item);
 }
 
-auto PageHierarchyModel::pageName(const QModelIndex& index) const -> QString {
+auto PageHierarchyModel::pageName(const QModelIndex& index) -> QString {
     const auto* item = node(index);
     return item == nullptr ? QString{} : QString::fromUtf8(item->node.name);
 }
@@ -1065,21 +1065,21 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
             return outlineOutcome(false);
         }
         if (currentPagePreview_) {
-            const auto restored = std::ranges::find_if(result.value(), [&](const auto& page) {
-                return page.kind == hieda::notebook::PageKind::named &&
-                       QString::fromUtf8(page.name) == currentPageName_ && page.metadata;
-            });
+            const auto restored =
+                std::ranges::find_if(result.value(), [&](const auto& page) -> bool {
+                    return page.kind == hieda::notebook::PageKind::named &&
+                           QString::fromUtf8(page.name) == currentPageName_ && page.metadata;
+                });
             if (restored != result.value().end()) {
-                currentPageId_ = restored->metadata->id;
-                currentPagePreview_ = false;
-                currentPageTitle_ = QString::fromUtf8(restored->displayTitle);
+                if (const auto restoredMetadata = restored->metadata) {
+                    currentPageId_ = restoredMetadata->id;
+                    currentPagePreview_ = false;
+                    currentPageTitle_ = QString::fromUtf8(restored->displayTitle);
+                }
             }
             if (currentPagePreview_) {
-                outlineEntries_.setEntries({});
+                loadPagePreview(currentPageName_);
                 refreshPages();
-                error_.clear();
-                emit stateChanged();
-                emit destinationChanged();
                 return outlineOutcome(true);
             }
         }
@@ -1089,11 +1089,8 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
             currentPageId_.reset();
             currentPagePreview_ = true;
             currentPageTitle_.clear();
-            outlineEntries_.setEntries({});
+            loadPagePreview(currentPageName_);
             refreshPages();
-            error_.clear();
-            emit stateChanged();
-            emit destinationChanged();
             return outlineOutcome(true);
         }
         if (!current) {
@@ -1253,6 +1250,9 @@ auto NotebookController::renameCurrentPage(const QString& name, const QString& d
     refreshPages();
     currentPageName_ = QString::fromUtf8(result.value().name);
     currentPageTitle_ = QString::fromUtf8(result.value().displayTitle);
+    for (const auto& entry : result.value().entries) {
+        outlineEntries_.updateEntry({entry.metadata, entry.authoredText, entry.parentEntry});
+    }
     static_cast<void>(pageHierarchy_.refresh(currentPageName_));
     error_.clear();
     emit destinationChanged();
@@ -1283,6 +1283,71 @@ void NotebookController::navigateToPageName(const QString& pageName) {
         return;
     }
     loadPagePreview(pageName);
+}
+
+auto NotebookController::followPageLink(const QString& entryId, int characterOffset,
+                                        const QString& editorText) -> bool {
+    const auto id = blockId(entryId);
+    const auto row = id ? outlineEntries_.rowForId(*id) : -1;
+    if (!id || row < 0 || characterOffset < 0 || characterOffset > editorText.size() ||
+        editorText != outlineEntries_.entryText(row)) {
+        return false;
+    }
+    const auto prefix = editorText.first(characterOffset).toUtf8();
+    const auto destination = session_.followPageLink(*id, static_cast<std::size_t>(prefix.size()));
+    if (!destination) {
+        if (destination.error().code != hieda::notebook::NotebookErrorCode::pageLinkNotFound) {
+            reject(destination.error());
+        }
+        return false;
+    }
+    if (const auto* page = std::get_if<hieda::notebook::PageSummary>(&destination.value())) {
+        loadPage(page->metadata.id);
+    } else {
+        loadPagePreview(
+            QString::fromUtf8(std::get<hieda::notebook::PagePreview>(destination.value()).name));
+    }
+    return true;
+}
+
+// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
+auto NotebookController::committedEntryPresentation(const QString& entryId,
+                                                    const QString& authoredText) const -> QString {
+    const auto decodeText = [](std::string_view text) -> QString {
+        return QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
+    };
+    const auto escapeText = [](const QString& text) -> QString {
+        auto escaped = text.toHtmlEscaped();
+        return escaped.replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+    };
+    const auto id = blockId(entryId);
+    if (!id) {
+        return authoredText.toHtmlEscaped();
+    }
+    const auto utf8 = authoredText.toUtf8();
+    const std::string_view source{utf8.constData(), static_cast<std::size_t>(utf8.size())};
+    const auto links = session_.pageLinks(*id);
+    if (!links) {
+        return escapeText(decodeText(source));
+    }
+    QString presentation;
+    std::size_t sourceOffset = 0;
+    qsizetype characterOffset = 0;
+    for (const auto& link : links.value()) {
+        const auto prefix =
+            decodeText(source.substr(sourceOffset, link.sourceByteOffset - sourceOffset));
+        presentation += escapeText(prefix);
+        characterOffset += prefix.size();
+        const auto displayText = link.target ? link.target->displayTitle : link.pageName;
+        presentation += QStringLiteral("<a href=\"%1\">%2</a>")
+                            .arg(characterOffset)
+                            .arg(QString::fromUtf8(displayText).toHtmlEscaped());
+        characterOffset +=
+            decodeText(source.substr(link.sourceByteOffset, link.sourceByteLength)).size();
+        sourceOffset = link.sourceByteOffset + link.sourceByteLength;
+    }
+    presentation += escapeText(decodeText(source.substr(sourceOffset)));
+    return presentation;
 }
 
 void NotebookController::navigateToJournalDate(const QDate& date) {
@@ -1352,7 +1417,8 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         error_ = tr("Choose a valid Journal date.");
         break;
     case NotebookErrorCode::invalidAuthoredText:
-        error_ = tr("A Entry must contain one line of Unicode text.");
+        error_ = tr("An Entry must contain at most 1 MiB of valid Unicode text and no control "
+                    "characters other than line feeds.");
         break;
     case NotebookErrorCode::blockNotFound:
         error_ = tr("That Entry is no longer available.");
@@ -1390,6 +1456,9 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         break;
     case NotebookErrorCode::staleHierarchyCursor:
         error_ = tr("The Page Hierarchy changed; reload it from the beginning.");
+        break;
+    case NotebookErrorCode::pageLinkNotFound:
+        error_ = tr("Place the cursor inside a committed Page Link before following it.");
         break;
     }
     emit stateChanged();
@@ -1450,12 +1519,22 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
 }
 
 void NotebookController::loadPagePreview(const QString& pageName) {
+    const auto utf8 = pageName.toUtf8();
+    const auto preview =
+        session_.pagePreview({utf8.constData(), static_cast<std::size_t>(utf8.size())});
+    if (!preview) {
+        if (preview.error().code != hieda::notebook::NotebookErrorCode::pageNameConflict) {
+            reject(preview.error());
+            return;
+        }
+    }
     currentPageId_.reset();
     currentPagePreview_ = true;
     journalDate_ = {};
     currentPageName_ = pageName;
     currentPageTitle_.clear();
-    outlineEntries_.setEntries({});
+    outlineEntries_.setEntries(preview ? asOutlineEntries(preview.value().sources)
+                                       : std::vector<OutlineEntry>{});
     error_.clear();
     static_cast<void>(pageHierarchy_.refresh(currentPageName_));
     emit destinationChanged();
