@@ -4,7 +4,14 @@
 
 **What to build:** Produce a distributable Linux v0 and verify the entire supported user journey from Notebook creation through journaling, Pages, links, Linked References, Queries, search, backup, failure handling, close, reopen, and restore. Documentation must state the portability and plaintext-security boundaries clearly.
 
-**Blocked by:** 04 — Undo and redo Notebook edits; 05 — Support production desktop text input; 08 — Reference Blocks and browse Linked References; 10 — Query Containment and Semantic References; 12 — Detect and rebuild stale search indexes; 14 — Run automatic versioned backups; 16 — Recover safely during startup; 17 — Meet the reference performance envelope; 19 — Unify Page and Entry Block types; [Prototype the Qt Quick journal experience](../../notebook-v0/issues/12-prototype-the-qt-quick-journal-experience.md); [Choose the build and dependency strategy](../../notebook-v0/issues/13-choose-the-build-and-dependency-strategy.md); [Define verification and performance gates](../../notebook-v0/issues/14-define-verification-and-performance-gates.md)
+**Blocked by:** 04 — Undo and redo Notebook edits; 05 — Support production desktop text input;
+08 — Reference Blocks and browse Linked References; 10 — Query Containment and Semantic References;
+12 — Detect and rebuild stale search indexes; 14 — Run automatic versioned backups; 16 — Recover
+safely during startup; 17 — Meet the reference performance envelope; 19 — Unify Page and Entry Block
+types; 22 — Query and benchmark Page Hierarchies;
+[Prototype the Qt Quick journal experience](../../notebook-v0/issues/12-prototype-the-qt-quick-journal-experience.md);
+[Choose the build and dependency strategy](../../notebook-v0/issues/13-choose-the-build-and-dependency-strategy.md);
+[Define verification and performance gates](../../notebook-v0/issues/14-define-verification-and-performance-gates.md)
 
 **Status:** ready-for-agent
 

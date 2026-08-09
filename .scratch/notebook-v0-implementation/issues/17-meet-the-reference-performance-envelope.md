@@ -4,7 +4,11 @@
 
 **What to build:** Generate the agreed long-lived personal Notebook workload, measure every important interaction reproducibly, and remove bottlenecks that prevent the application from meeting its documented v0 performance gates without weakening durability or correctness.
 
-**Blocked by:** 05 — Support production desktop text input; 08 — Reference Blocks and browse Linked References; 10 — Query Containment and Semantic References; 12 — Detect and rebuild stale search indexes; 16 — Recover safely during startup; 19 — Unify Page and Entry Block types; [Define verification and performance gates](../../notebook-v0/issues/14-define-verification-and-performance-gates.md)
+**Blocked by:** 05 — Support production desktop text input; 08 — Reference Blocks and browse Linked
+References; 10 — Query Containment and Semantic References; 12 — Detect and rebuild stale search
+indexes; 16 — Recover safely during startup; 19 — Unify Page and Entry Block types; 22 — Query and
+benchmark Page Hierarchies;
+[Define verification and performance gates](../../notebook-v0/issues/14-define-verification-and-performance-gates.md)
 
 **Status:** ready-for-agent
 

@@ -12,5 +12,7 @@
 - [ ] Following a Block Reference navigates to and identifies the target in its structural context.
 - [ ] Page Links and Block References appear as incoming Linked References on the correct target.
 - [ ] Linked References update after link creation, editing, removal, target movement, and target lifecycle changes.
+- [ ] Deleting a target makes incoming Block References missing without changing their source text
+  or source Block Update Times; undo restores their original resolution atomically.
 - [ ] Creating or deleting a Semantic Reference never changes either Block's Containment parent or order.
 - [ ] All relationships survive close and reopen, and tests cover missing or restored targets under the resolved lifecycle rules.

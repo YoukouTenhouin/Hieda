@@ -7,3 +7,6 @@
 compile_commands.json
 *.user
 *.swp
+/*.hieda
+/*.hieda-lock
+/*.hieda.open-lock

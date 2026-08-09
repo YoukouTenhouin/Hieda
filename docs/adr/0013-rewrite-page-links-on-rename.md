@@ -24,11 +24,11 @@ value, including the 1 MiB limit. The Page mutation and all source rewrites then
 Notebook transaction. Any validation or persistence failure rejects the entire rename without
 changing the Page, its links, source text, timestamps, or Notebook revision.
 
-Page rename is not added to the Notebook-wide Editing History. Instead, the same Page Link rewrite
-is applied to matching Authored Text in all affected session-local undo and redo states,
-so restoring an older edit cannot resurrect the former Page name. This deliberate history rebase is
-acceptable because outline history is an ephemeral editing aid, not persisted Notebook version
-history; renaming back remains an explicit command.
+Page rename is one Notebook-wide Editing History action containing the Page mutation and every Page
+Link rewrite. Undo and redo restore the corresponding complete logical states atomically. This
+supersedes the earlier page-local-history workaround that rebased stored Authored Text and excluded
+rename itself from history; Notebook-wide chronological history preserves the necessary ordering
+without that exception.
 
 When the new name already has Unresolved Page Links, the same transaction resolves them to the
 renamed Page while rewriting links from the former name. Thus rename and Page creation have the

@@ -1,7 +1,7 @@
 # Define Page Hierarchy behavior
 
 Type: grilling
-Status: open
+Status: resolved
 Blocked by: 05, 11
 
 ## Question
@@ -18,3 +18,12 @@ slash-separated Page Names, visible Page Preview nodes for missing prefixes, and
 prefix propagation when a Page is renamed. The remaining hierarchy-specific edge cases belong here
 so the Block lifecycle ticket can settle identity, Containment, timestamps, and deletion without
 conflating structural ownership with name-based organization.
+
+Resolved by [ADR 0024](../../../docs/adr/0024-define-page-hierarchy-behavior.md). Hierarchy membership
+comes exclusively from materialized Named Pages and their required missing-prefix previews; links
+do not populate it. Lookup is exact, siblings use bytewise ASCII segment order, preview navigation
+never materializes content, and Queries use inclusive slash-boundary subtree semantics over Blocks.
+Creation, deletion, and rename cascades have atomic Notebook-wide undo/redo behavior, with final-
+namespace collision validation and mechanical descendant name propagation. Lazy revision-bound
+100-node enumeration and explicit reference-workload latency measurements bound normal reads while
+leaving arbitrarily large rename cascades uncapped and atomic.

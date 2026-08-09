@@ -33,6 +33,7 @@ Produce an implementation-ready specification and delivery route for a single-us
 - [Design persistence schema and migrations](issues/07-design-persistence-schema-and-migrations.md) — bounded LMDB databases use portable TLV records and shadow-copy migrations.
 - [Define link resolution and Linked References](issues/11-define-link-resolution-and-linked-references.md) — Page Links are literal Page Names, Block References are literal UUIDs, and incoming results are bounded source-Block views.
 - [Choose the build and dependency strategy](issues/13-choose-the-build-and-dependency-strategy.md) — C++20, Qt 6.8+, system dependencies, CMake/Ninja, CTest, and CPack TGZ.
+- [Define Page Hierarchy behavior](issues/16-define-page-hierarchy-behavior.md) — materialized Page Names exclusively derive a lazy, ordered hierarchy whose previews, cascades, queries, navigation, history, and performance semantics are explicit.
 
 ## Not yet specified
 
@@ -40,7 +41,6 @@ Produce an implementation-ready specification and delivery route for a single-us
 - Concrete corruption and partial-recovery cases; these become specifiable after the LMDB constraints and persistence layout are known.
 - Index rebuild, migration interruption, and compatibility cases; their exact questions depend on the selected index and schema designs.
 - Packaging and distribution edge cases across Linux environments; these depend on the initial toolchain and dependency strategy.
-- [Page Hierarchy](issues/16-define-page-hierarchy-behavior.md) collision, deletion, ordering, navigation, and performance semantics beyond the accepted name-derived foundation.
 
 ## Out of scope
 

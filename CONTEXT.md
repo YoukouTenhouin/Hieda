@@ -17,7 +17,7 @@ The UTC instant at which a Block identity first became durable. It remains uncha
 _Avoid_: Import time, current location time
 
 **Block Update Time**:
-The UTC instant at which a Block was last meaningfully edited, moved, or had its immediate ordered children changed. Mechanical maintenance such as link resolution or Page Link rewriting does not advance it.
+The UTC instant at which a Block was last meaningfully edited, moved, or had its immediate ordered children changed. Mechanical maintenance such as link resolution, Page Link rewriting, or descendant Page Name propagation does not advance it.
 _Avoid_: Last-written time, storage timestamp
 
 **Hard Deletion**:
@@ -76,8 +76,12 @@ _Avoid_: Ordinary Page, document
 An exact, Notebook-unique hierarchical name of one or more slash-separated ASCII segments, each matching `[a-z][a-z0-9_-]{0,63}`, with at most 255 bytes overall.
 _Avoid_: Display title, file path
 
+**Display Title**:
+A non-empty single-line Unicode presentation label for a Named Page that may duplicate another Page's title. It determines neither identity, Page Hierarchy, nor Page Link resolution and is never changed implicitly by a Page Name rewrite.
+_Avoid_: Page Name, identifier
+
 **Page Hierarchy**:
-A name-derived organization of Named Pages and Page Previews that is independent of Block identity and Containment. A hierarchical Page name's prefix identifies its hierarchy parent.
+A name-derived organization of materialized Named Pages and the Page Previews required for their missing name prefixes, independent of Block identity and Containment. Unresolved Page Links do not contribute nodes; a hierarchical Page name's prefix identifies its hierarchy parent.
 _Avoid_: Containment, folder tree
 
 **Containment**:

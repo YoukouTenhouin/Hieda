@@ -2,7 +2,9 @@
 
 Status: accepted
 
-Named Pages and Page Previews form a Page Hierarchy derived from slash-separated exact names.
+Materialized Named Pages and the Page Previews required for their missing proper prefixes form a
+Page Hierarchy derived from slash-separated exact names. Unresolved Page Links do not contribute
+hierarchy nodes.
 This hierarchy is distinct from Containment: all Pages remain Containment roots, while Entries are
 contained beneath their Page. A hierarchy parent may be a current Page or only a name represented
 by a Page Preview, so hierarchy placement creates no parent Block or identity. Renaming a Page
@@ -19,6 +21,6 @@ intermediate Pages are absent.
 
 Renaming a Named Page also renames every existing descendant Page whose name begins with the
 old name followed by `/`, substituting the new prefix while preserving each Page identity and
-contained outline. The Page names, affected Page Link source, derived hierarchy, link indexes, and
-session-history rebases form one all-or-nothing namespace edit; any resulting name conflict or
-invalid rewrite rejects the complete rename.
+contained outline. The Page names, affected Page Link sources, derived hierarchy, link indexes, and
+Notebook-wide Editing History action form one all-or-nothing namespace edit; any resulting name
+conflict or invalid rewrite rejects the complete rename.

@@ -17,9 +17,10 @@ Resolved by [ADR 0013](../../../docs/adr/0013-rewrite-page-links-on-rename.md),
 
 Page Links literally use exact unique Page names. Missing names produce queryable Unresolved Page
 Links and non-materialized Page Previews; creation, restoration, or rename into that name resolves
-them atomically. Renames rewrite committed Page Link notation and session-local history without
-advancing mechanically affected source Block Update Times. Deletion returns Page Links to the
-unresolved name, so a later same-named Page represents the same concept with a new identity.
+them atomically. Renames rewrite committed Page Link notation as part of one Notebook-wide Editing
+History action without advancing mechanically affected source Block Update Times. Deletion returns
+Page Links to the unresolved name, so a later same-named Page represents the same concept with a new
+identity.
 
 Block References literally use UUID identity. Deleted, mistyped, and never-existing targets share
 one Missing Block Reference state and presentation; only restoration of that UUID resolves them.
