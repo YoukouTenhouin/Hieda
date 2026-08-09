@@ -48,3 +48,7 @@ Every behavior change should include automated coverage. Place tests in `tests/`
 ## Commit & Pull Request Guidelines
 
 Use short, imperative commit subjects such as `Add token validation`, and keep unrelated changes in separate commits. Pull requests should explain the problem and solution, list verification performed, and link relevant issues. Include screenshots or logs for visible UI or operational changes, and call out migrations, compatibility risks, or follow-up work explicitly.
+
+## Feature Development Workflow
+
+For every new feature, create a Git-safe, lowercase kebab-case `<feature-name>-dev` branch and commit frequently in small, logical increments. After the feature is complete and the full test suite passes, create `<feature-name>-reflow`. Reconstruct the work there as small, self-contained commits: each commit must include its relevant tests and fold later fixes into the commit that introduced the behavior, leaving the repository coherent at every step. The reflow history need not mirror development chronology, but its final tree must exactly match the dev branch. Verify this with `git diff --exit-code <feature-name>-dev <feature-name>-reflow`.
