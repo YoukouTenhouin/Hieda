@@ -276,18 +276,14 @@ auto NotebookController::canUndo() const -> bool {
     if (!session_.isOpen() || !journalDate_.isValid()) {
         return false;
     }
-    const auto capabilities =
-        currentPageId_ ? session_.pageEditCapabilities(*currentPageId_)
-                       : session_.journalEditCapabilities(domainJournalDate(journalDate_));
+    const auto capabilities = session_.editCapabilities();
     return capabilities && capabilities.value().canUndo;
 }
 auto NotebookController::canRedo() const -> bool {
     if (!session_.isOpen() || !journalDate_.isValid()) {
         return false;
     }
-    const auto capabilities =
-        currentPageId_ ? session_.pageEditCapabilities(*currentPageId_)
-                       : session_.journalEditCapabilities(domainJournalDate(journalDate_));
+    const auto capabilities = session_.editCapabilities();
     return capabilities && capabilities.value().canRedo;
 }
 auto NotebookController::isJournalPage() const -> bool {
@@ -385,24 +381,13 @@ auto NotebookController::insertOutlineEntry(const QString& authoredText,
                 return -1;
             }
         }
-        std::vector<OutlineEntry> entries;
         const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-        if (currentPageId_) {
-            const auto result = session_.insertPageEntry(*currentPageId_, after, text);
-            if (!result) {
-                rejectSave(result.error());
-                return -1;
-            }
-            entries = asOutlineEntries(result.value().entries);
-        } else {
-            const auto result =
-                session_.insertJournalEntry(domainJournalDate(journalDate_), after, text);
-            if (!result) {
-                rejectSave(result.error());
-                return -1;
-            }
-            entries = asOutlineEntries(result.value().entries);
+        const auto result = session_.insertEntry(currentPageAddress(), after, text);
+        if (!result) {
+            rejectSave(result.error());
+            return -1;
         }
+        auto entries = asOutlineEntries(result.value().entries);
         const auto inserted = std::ranges::find_if(entries, [&](const auto& entry) -> bool {
             return std::ranges::find(existingIds, displayId(entry.metadata.id)) ==
                    existingIds.end();
@@ -442,26 +427,14 @@ auto NotebookController::updateOutlineEntry(const QString& entryId, const QStrin
     const auto utf8 = authoredText.toUtf8();
     try {
         const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-        if (currentPageId_) {
-            const auto pageId = currentPageId_.value_or(hieda::notebook::BlockId{});
-            const auto result = session_.updatePageEntry(*id, text);
-            if (!result) {
-                rejectSave(result.error());
-                loadPage(pageId);
-                return false;
-            }
-            outlineEntries_.updateEntry(
-                {result.value().metadata, result.value().authoredText, result.value().parentEntry});
-        } else {
-            const auto result = session_.updateJournalEntry(*id, text);
-            if (!result) {
-                rejectSave(result.error());
-                loadJournalDate(journalDate_);
-                return false;
-            }
-            outlineEntries_.updateEntry(
-                {result.value().metadata, result.value().authoredText, result.value().parentEntry});
+        const auto result = session_.updateEntry(*id, text);
+        if (!result) {
+            rejectSave(result.error());
+            currentPageId_ ? loadPage(*currentPageId_) : loadJournalDate(journalDate_);
+            return false;
         }
+        outlineEntries_.updateEntry(
+            {result.value().metadata, result.value().authoredText, result.value().parentEntry});
         error_.clear();
         emit stateChanged();
         return true;
@@ -495,25 +468,13 @@ auto NotebookController::splitOutlineEntry(const QString& entryId, const QString
     const auto prefix = authoredText.left(cursorPosition).toUtf8();
     const auto utf8 = authoredText.toUtf8();
     try {
-        std::vector<OutlineEntry> entries;
         const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-        if (currentPageId_) {
-            const auto result =
-                session_.splitPageEntry(*id, text, static_cast<std::size_t>(prefix.size()));
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
-        } else {
-            const auto result =
-                session_.splitJournalEntry(*id, text, static_cast<std::size_t>(prefix.size()));
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
+        const auto result = session_.splitEntry(*id, text, static_cast<std::size_t>(prefix.size()));
+        if (!result) {
+            rejectSave(result.error());
+            return outlineOutcome(false);
         }
+        auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
         auto insertedRow = -1;
         for (int current = 0; current < outlineEntries_.rowCount(); ++current) {
@@ -555,23 +516,13 @@ auto NotebookController::joinOutlineEntry(const QString& entryId, const QString&
         outlineEntries_.entryText(row - 1).size(), std::numeric_limits<int>::max()));
     const auto utf8 = authoredText.toUtf8();
     try {
-        std::vector<OutlineEntry> entries;
         const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-        if (currentPageId_) {
-            const auto result = session_.joinPageEntry(*id, text);
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
-        } else {
-            const auto result = session_.joinJournalEntry(*id, text);
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
+        const auto result = session_.joinEntry(*id, text);
+        if (!result) {
+            rejectSave(result.error());
+            return outlineOutcome(false);
         }
+        auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
         const auto targetRow = targetId ? outlineEntries_.rowForId(*targetId) : -1;
         error_.clear();
@@ -597,49 +548,14 @@ auto NotebookController::moveOutlineEntry(const QString& entryId, const QString&
     }
     const auto utf8 = authoredText.toUtf8();
     try {
-        std::vector<OutlineEntry> entries;
         const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-        if (currentPageId_) {
-            const auto pageMove = [movement]() -> hieda::notebook::PageEntryMove {
-                switch (movement) {
-                case OutlineEntryMove::indent:
-                    return hieda::notebook::PageEntryMove::indent;
-                case OutlineEntryMove::outdent:
-                    return hieda::notebook::PageEntryMove::outdent;
-                case OutlineEntryMove::up:
-                    return hieda::notebook::PageEntryMove::up;
-                case OutlineEntryMove::down:
-                    return hieda::notebook::PageEntryMove::down;
-                }
-                return hieda::notebook::PageEntryMove::indent;
-            }();
-            const auto result = session_.movePageEntry(*id, pageMove, text);
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
-        } else {
-            const auto journalMove = [movement]() -> hieda::notebook::JournalEntryMove {
-                switch (movement) {
-                case OutlineEntryMove::indent:
-                    return hieda::notebook::JournalEntryMove::indent;
-                case OutlineEntryMove::outdent:
-                    return hieda::notebook::JournalEntryMove::outdent;
-                case OutlineEntryMove::up:
-                    return hieda::notebook::JournalEntryMove::up;
-                case OutlineEntryMove::down:
-                    return hieda::notebook::JournalEntryMove::down;
-                }
-                return hieda::notebook::JournalEntryMove::indent;
-            }();
-            const auto result = session_.moveJournalEntry(*id, journalMove, text);
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
+        const auto entryMove = static_cast<hieda::notebook::EntryMove>(movement);
+        const auto result = session_.moveEntry(*id, entryMove, text);
+        if (!result) {
+            rejectSave(result.error());
+            return outlineOutcome(false);
         }
+        auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
         const auto row = outlineEntries_.rowForId(*id);
         error_.clear();
@@ -686,22 +602,12 @@ auto NotebookController::deleteOutlineEntry(const QString& entryId) -> QVariantM
     }
     const auto oldRow = outlineEntries_.rowForId(*id);
     try {
-        std::vector<OutlineEntry> entries;
-        if (currentPageId_) {
-            const auto result = session_.deletePageEntry(*id);
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
-        } else {
-            const auto result = session_.deleteJournalEntry(*id);
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
+        const auto result = session_.deleteEntry(*id);
+        if (!result) {
+            rejectSave(result.error());
+            return outlineOutcome(false);
         }
+        auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
         const auto focusRow = std::min(oldRow, outlineEntries_.rowCount() - 1);
         const auto cursor =
@@ -816,22 +722,12 @@ auto NotebookController::deleteOutlineSubtrees(const QStringList& entryIds) -> Q
         return outlineOutcome(false);
     }
     try {
-        std::vector<OutlineEntry> entries;
-        if (currentPageId_) {
-            const auto result = session_.deletePageSubtrees(std::move(ids));
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
-        } else {
-            const auto result = session_.deleteJournalSubtrees(std::move(ids));
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
+        const auto result = session_.deleteSubtrees(std::move(ids));
+        if (!result) {
+            rejectSave(result.error());
+            return outlineOutcome(false);
         }
+        auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
         auto focusRow = -1;
         auto cursor = 0;
@@ -876,26 +772,18 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
         oldEntries.push_back({outlineEntries_.entryId(row), outlineEntries_.entryText(row)});
     }
     try {
-        std::vector<OutlineEntry> entries;
-        if (currentPageId_) {
-            auto result = direction == OutlineHistoryDirection::redo
-                              ? session_.redoPageEdit(*currentPageId_)
-                              : session_.undoPageEdit(*currentPageId_);
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
-        } else {
-            auto result = direction == OutlineHistoryDirection::redo
-                              ? session_.redoJournalEdit(domainJournalDate(journalDate_))
-                              : session_.undoJournalEdit(domainJournalDate(journalDate_));
-            if (!result) {
-                rejectSave(result.error());
-                return outlineOutcome(false);
-            }
-            entries = asOutlineEntries(result.value().entries);
+        auto result =
+            direction == OutlineHistoryDirection::redo ? session_.redoEdit() : session_.undoEdit();
+        if (!result) {
+            rejectSave(result.error());
+            return outlineOutcome(false);
         }
+        const auto current = session_.outline(currentPageAddress());
+        if (!current) {
+            rejectSave(current.error());
+            return outlineOutcome(false);
+        }
+        auto entries = asOutlineEntries(current.value().entries);
         auto focusRow = -1;
         auto preferredSurvived = false;
         const auto preferredId = blockId(preferredEntryId);
@@ -1154,7 +1042,7 @@ void NotebookController::rejectSave(const hieda::notebook::NotebookError& error)
 
 void NotebookController::loadJournalDate(const QDate& date) {
     try {
-        const auto result = session_.journalPage(domainJournalDate(date));
+        const auto result = session_.outline(domainJournalDate(date));
         if (!result) {
             reject(result.error());
             return;
@@ -1174,7 +1062,7 @@ void NotebookController::loadJournalDate(const QDate& date) {
 
 void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
     try {
-        const auto result = session_.page(pageId);
+        const auto result = session_.outline(pageId);
         if (!result) {
             reject(result.error());
             return;
@@ -1190,6 +1078,11 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
     }
+}
+
+auto NotebookController::currentPageAddress() const -> hieda::notebook::PageAddress {
+    return currentPageId_ ? hieda::notebook::PageAddress{*currentPageId_}
+                          : hieda::notebook::PageAddress{domainJournalDate(journalDate_)};
 }
 
 void NotebookController::refreshPages() {

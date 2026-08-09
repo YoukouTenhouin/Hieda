@@ -27,7 +27,7 @@ namespace hieda::notebook {
 namespace {
 
 constexpr std::uint32_t formatVersion = 1;
-constexpr std::uint32_t schemaVersion = 1;
+constexpr std::uint32_t schemaVersion = 2;
 constexpr std::size_t mapSize = 8ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr std::string_view formatMagic = "HIEDA_NOTEBOOK";
 
@@ -52,7 +52,13 @@ struct Manifest {
     std::uint64_t revision{0};
 };
 
-enum class BlockType : std::uint8_t { journalPage = 1, journalEntry = 2, page = 3, pageEntry = 4 };
+enum class BlockType : std::uint8_t {
+    page = 1,
+    entry = 2,
+    journalPage = page,
+    journalEntry = entry,
+    pageEntry = entry,
+};
 
 struct BlockRecord {
     BlockType type{BlockType::journalEntry};
@@ -61,6 +67,7 @@ struct BlockRecord {
     std::string authoredText;
     std::string pageName;
     std::string displayTitle;
+    std::optional<PageKind> pageKind;
 };
 
 class JournalCommitAdapter {
@@ -445,7 +452,7 @@ auto timestampMicroseconds(BlockTimestamp timestamp) -> std::int64_t {
 
 auto encodeBlock(const BlockRecord& block) -> std::vector<std::uint8_t> {
     std::vector<std::uint8_t> output;
-    appendU16(output, 1);
+    appendU16(output, 2);
     const auto type = static_cast<std::uint8_t>(block.type);
     appendField(output, 1, &type, 1);
     std::vector<std::uint8_t> number;
@@ -454,8 +461,11 @@ auto encodeBlock(const BlockRecord& block) -> std::vector<std::uint8_t> {
     number.clear();
     appendU64(number, static_cast<std::uint64_t>(timestampMicroseconds(block.metadata.updatedAt)));
     appendField(output, 3, number.data(), number.size());
-    const std::uint8_t active = 1;
-    appendField(output, 4, &active, 1);
+    if (block.pageKind) {
+        const auto kind =
+            static_cast<std::uint8_t>(static_cast<std::uint8_t>(*block.pageKind) + 1U);
+        appendField(output, 4, &kind, 1);
+    }
     if (block.journalDate) {
         number.clear();
         const auto packed =
@@ -464,11 +474,11 @@ auto encodeBlock(const BlockRecord& block) -> std::vector<std::uint8_t> {
         appendU32(number, packed);
         appendField(output, 5, number.data(), number.size());
     }
-    if (block.type == BlockType::journalEntry || block.type == BlockType::pageEntry) {
+    if (block.type == BlockType::entry) {
         appendField(output, 6, reinterpret_cast<const std::uint8_t*>(block.authoredText.data()),
                     block.authoredText.size());
     }
-    if (block.type == BlockType::page) {
+    if (block.type == BlockType::page && block.pageKind == PageKind::named) {
         appendField(output, 7, reinterpret_cast<const std::uint8_t*>(block.pageName.data()),
                     block.pageName.size());
         appendField(output, 8, reinterpret_cast<const std::uint8_t*>(block.displayTitle.data()),
@@ -480,7 +490,7 @@ auto encodeBlock(const BlockRecord& block) -> std::vector<std::uint8_t> {
 auto decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
                  const std::filesystem::path& path) -> Result<BlockRecord> {
     const auto* bytes = static_cast<const std::uint8_t*>(value.mv_data);
-    if (value.mv_size < 2 || readU16(bytes) != 1) {
+    if (value.mv_size < 2 || readU16(bytes) != 2) {
         return Result<BlockRecord>::failure(
             makeError(NotebookErrorCode::invalidNotebook, path, "invalid Block record version"));
     }
@@ -489,7 +499,7 @@ auto decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
     bool hasType = false;
     bool hasCreated = false;
     bool hasUpdated = false;
-    bool active = false;
+    bool hasPageKind = false;
     std::size_t offset = 2;
     while (offset < value.mv_size) {
         if (value.mv_size - offset < 6) {
@@ -504,7 +514,7 @@ auto decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
                 makeError(NotebookErrorCode::invalidNotebook, path, "invalid Block field length"));
         }
         const auto* field = bytes + offset;
-        if (tag == 1 && length == 1 && field[0] >= 1 && field[0] <= 4) {
+        if (tag == 1 && length == 1 && field[0] >= 1 && field[0] <= 2) {
             block.type = static_cast<BlockType>(field[0]);
             hasType = true;
         } else if (tag == 2 && length == 8) {
@@ -515,8 +525,9 @@ auto decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
             block.metadata.updatedAt = BlockTimestamp{
                 std::chrono::microseconds{static_cast<std::int64_t>(readU64(field))}};
             hasUpdated = true;
-        } else if (tag == 4 && length == 1) {
-            active = field[0] == 1;
+        } else if (tag == 4 && length == 1 && field[0] >= 1 && field[0] <= 2) {
+            block.pageKind = static_cast<PageKind>(field[0] - 1U);
+            hasPageKind = true;
         } else if (tag == 5 && length == 4) {
             const auto packed = readU32(field);
             block.journalDate = JournalDate{static_cast<std::int32_t>(packed / 10000U),
@@ -531,10 +542,15 @@ auto decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
         }
         offset += length;
     }
-    if (!hasType || !hasCreated || !hasUpdated || !active ||
-        (block.type == BlockType::journalPage && !block.journalDate) ||
-        (block.type == BlockType::page &&
-         (!validPageName(block.pageName) || !validPageTitle(block.displayTitle)))) {
+    const auto validPage = block.type == BlockType::page && hasPageKind &&
+                           ((block.pageKind == PageKind::journal && block.journalDate &&
+                             block.pageName.empty() && block.displayTitle.empty()) ||
+                            (block.pageKind == PageKind::named && !block.journalDate &&
+                             validPageName(block.pageName) && validPageTitle(block.displayTitle)));
+    const auto validEntry = block.type == BlockType::entry && !hasPageKind && !block.journalDate &&
+                            block.pageName.empty() && block.displayTitle.empty() &&
+                            validAuthoredText(block.authoredText);
+    if (!hasType || !hasCreated || !hasUpdated || (!validPage && !validEntry)) {
         return Result<BlockRecord>::failure(
             makeError(NotebookErrorCode::invalidNotebook, path, "Block record is incomplete"));
     }
@@ -709,6 +725,15 @@ struct PageHistory {
     std::deque<PageHistoryAction> redo;
 };
 
+struct CrossPageHistoryAction {
+    std::uint64_t sequence{0};
+    LoadedOutline beforeSource;
+    std::optional<LoadedOutline> beforeDestination;
+    LoadedOutline afterSource;
+    LoadedOutline afterDestination;
+    std::size_t estimatedBytes{0};
+};
+
 enum class OutlineEditKind : std::uint8_t { split, join, indent, outdent, up, down, erase };
 
 auto openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path)
@@ -858,6 +883,8 @@ class NotebookSession::Impl {
         info.reset();
         journalHistory.clear();
         pageHistories.clear();
+        crossPageUndo.clear();
+        crossPageRedo.clear();
         historyBytes = 0;
         nextHistorySequence = 1;
     }
@@ -1036,11 +1063,9 @@ class NotebookSession::Impl {
                                        "inconsistent Journal Containment indexes")
                            : parent.error());
             }
-            const auto expectedEntryType = outline.page.type == BlockType::page
-                                               ? BlockType::pageEntry
-                                               : BlockType::journalEntry;
             auto block = readBlock(transaction, databases.blocks, current.id, path);
-            if (!block || block.value().type != expectedEntryType) {
+            if (!block || (block.value().type != BlockType::journalEntry &&
+                           block.value().type != BlockType::pageEntry)) {
                 return Result<LoadedOutline>::failure(
                     block ? makeError(NotebookErrorCode::invalidNotebook, path,
                                       "Journal contains a non-Entry Block")
@@ -1086,10 +1111,7 @@ class NotebookSession::Impl {
             if (!block) {
                 return Result<LoadedOutline>::failure(block.error());
             }
-            if ((entry.value().type == BlockType::journalEntry &&
-                 block.value().type == BlockType::journalPage) ||
-                (entry.value().type == BlockType::pageEntry &&
-                 block.value().type == BlockType::page)) {
+            if (block.value().type == BlockType::page) {
                 return loadOutline(transaction, databases, std::move(block).value());
             }
             if (block.value().type != entry.value().type) {
@@ -1236,8 +1258,8 @@ class NotebookSession::Impl {
         BlockId pageId;
         std::memcpy(pageId.bytes.data(), value.mv_data, pageId.bytes.size());
         auto page = readBlock(transaction, databases.blocks, pageId, path);
-        if (!page || page.value().type != BlockType::journalPage ||
-            page.value().journalDate != date) {
+        if (!page || page.value().type != BlockType::page ||
+            page.value().pageKind != PageKind::journal || page.value().journalDate != date) {
             return Result<std::optional<LoadedOutline>>::failure(
                 page ? makeError(NotebookErrorCode::invalidNotebook, path,
                                  "Journal date points to an invalid Page")
@@ -1277,7 +1299,7 @@ class NotebookSession::Impl {
     }
 
     auto historyActionCount() const -> std::size_t {
-        std::size_t count = 0;
+        std::size_t count = crossPageUndo.size() + crossPageRedo.size();
         for (const auto& history : journalHistory) {
             count += history.undo.size() + history.redo.size();
         }
@@ -1287,24 +1309,46 @@ class NotebookSession::Impl {
         return count;
     }
 
+    void clearRedoHistory() {
+        for (auto& history : journalHistory) {
+            for (const auto& action : history.redo) {
+                historyBytes -= action.estimatedBytes;
+            }
+            history.redo.clear();
+        }
+        for (auto& history : pageHistories) {
+            for (const auto& action : history.redo) {
+                historyBytes -= action.estimatedBytes;
+            }
+            history.redo.clear();
+        }
+        for (const auto& action : crossPageRedo) {
+            historyBytes -= action.estimatedBytes;
+        }
+        crossPageRedo.clear();
+    }
+
     void enforceHistoryBudget() {
         constexpr std::size_t historyBudget = 32ULL * 1024ULL * 1024ULL;
         while (historyBytes > historyBudget && historyActionCount() > 1) {
             JournalPageHistory* oldestHistory = nullptr;
             PageHistory* oldestPageHistory = nullptr;
             bool oldestIsRedo = false;
+            bool oldestIsCrossPage = false;
             auto oldestSequence = std::numeric_limits<std::uint64_t>::max();
             for (auto& history : journalHistory) {
                 if (!history.undo.empty() && history.undo.front().sequence < oldestSequence) {
                     oldestHistory = &history;
                     oldestPageHistory = nullptr;
                     oldestIsRedo = false;
+                    oldestIsCrossPage = false;
                     oldestSequence = history.undo.front().sequence;
                 }
                 if (!history.redo.empty() && history.redo.back().sequence < oldestSequence) {
                     oldestHistory = &history;
                     oldestPageHistory = nullptr;
                     oldestIsRedo = true;
+                    oldestIsCrossPage = false;
                     oldestSequence = history.redo.back().sequence;
                 }
             }
@@ -1313,19 +1357,42 @@ class NotebookSession::Impl {
                     oldestHistory = nullptr;
                     oldestPageHistory = &history;
                     oldestIsRedo = false;
+                    oldestIsCrossPage = false;
                     oldestSequence = history.undo.front().sequence;
                 }
                 if (!history.redo.empty() && history.redo.back().sequence < oldestSequence) {
                     oldestHistory = nullptr;
                     oldestPageHistory = &history;
                     oldestIsRedo = true;
+                    oldestIsCrossPage = false;
                     oldestSequence = history.redo.back().sequence;
                 }
             }
-            if (oldestHistory == nullptr && oldestPageHistory == nullptr) {
+            if (!crossPageUndo.empty() && crossPageUndo.front().sequence < oldestSequence) {
+                oldestHistory = nullptr;
+                oldestPageHistory = nullptr;
+                oldestIsRedo = false;
+                oldestIsCrossPage = true;
+                oldestSequence = crossPageUndo.front().sequence;
+            }
+            if (!crossPageRedo.empty() && crossPageRedo.back().sequence < oldestSequence) {
+                oldestHistory = nullptr;
+                oldestPageHistory = nullptr;
+                oldestIsRedo = true;
+                oldestIsCrossPage = true;
+            }
+            if (oldestHistory == nullptr && oldestPageHistory == nullptr && !oldestIsCrossPage) {
                 break;
             }
-            if (oldestHistory != nullptr && oldestIsRedo) {
+            if (oldestIsCrossPage && oldestIsRedo) {
+                for (const auto& action : crossPageRedo) {
+                    historyBytes -= action.estimatedBytes;
+                }
+                crossPageRedo.clear();
+            } else if (oldestIsCrossPage) {
+                historyBytes -= crossPageUndo.front().estimatedBytes;
+                crossPageUndo.pop_front();
+            } else if (oldestHistory != nullptr && oldestIsRedo) {
                 for (const auto& action : oldestHistory->redo) {
                     historyBytes -= action.estimatedBytes;
                 }
@@ -1347,11 +1414,8 @@ class NotebookSession::Impl {
 
     void recordHistory(JournalDate date, std::optional<LoadedOutline> before,
                        std::optional<LoadedOutline> after) {
+        clearRedoHistory();
         auto& history = pageHistory(date);
-        for (const auto& action : history.redo) {
-            historyBytes -= action.estimatedBytes;
-        }
-        history.redo.clear();
         JournalHistoryAction action{nextHistorySequence++, date, std::move(before),
                                     std::move(after), 0};
         action.estimatedBytes = sizeof(JournalHistoryAction) + estimateOutlineBytes(action.before) +
@@ -1432,7 +1496,8 @@ class NotebookSession::Impl {
         }
         for (const auto& entry : target->entries) {
             const BlockRecord block{
-                BlockType::journalEntry, entry.metadata, std::nullopt, entry.authoredText, {}, {}};
+                BlockType::entry, entry.metadata, std::nullopt, entry.authoredText, {}, {},
+                std::nullopt};
             if (auto error = writeBlock(transaction, databases.blocks, block, path)) {
                 return error;
             }
@@ -1522,7 +1587,8 @@ class NotebookSession::Impl {
             return Result<Page>::failure(databases.error());
         }
         auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
-        if (!loaded || loaded.value().type != BlockType::page) {
+        if (!loaded || loaded.value().type != BlockType::page ||
+            loaded.value().pageKind != PageKind::named) {
             mdb_txn_abort(transaction);
             if (!loaded && loaded.error().code != NotebookErrorCode::blockNotFound) {
                 return Result<Page>::failure(loaded.error());
@@ -1575,8 +1641,10 @@ class NotebookSession::Impl {
                                       "Page type index is invalid")
                           : block.error());
             }
-            pages.push_back(
-                {block.value().metadata, block.value().pageName, block.value().displayTitle});
+            if (block.value().pageKind == PageKind::named) {
+                pages.push_back(
+                    {block.value().metadata, block.value().pageName, block.value().displayTitle});
+            }
             result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
         }
         if (cursor != nullptr) {
@@ -1620,7 +1688,8 @@ class NotebookSession::Impl {
         const auto now = currentTimestamp();
         BlockRecord block{BlockType::page, BlockMetadata{generateBlockId(), now, now},
                           std::nullopt,    {},
-                          std::move(name), std::move(displayTitle)};
+                          std::move(name), std::move(displayTitle),
+                          PageKind::named};
         nameKey = MDB_val{block.pageName.size(), block.pageName.data()};
         if (auto error = writeBlock(transaction, databases.value().blocks, block, path)) {
             return fail(std::move(*error));
@@ -1664,7 +1733,8 @@ class NotebookSession::Impl {
             return fail(databases.error());
         }
         auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
-        if (!loaded || loaded.value().type != BlockType::page) {
+        if (!loaded || loaded.value().type != BlockType::page ||
+            loaded.value().pageKind != PageKind::named) {
             if (!loaded && loaded.error().code != NotebookErrorCode::blockNotFound) {
                 return fail(loaded.error());
             }
@@ -1731,7 +1801,8 @@ class NotebookSession::Impl {
             return fail(databases.error());
         }
         auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
-        if (!loaded || loaded.value().type != BlockType::page) {
+        if (!loaded || loaded.value().type != BlockType::page ||
+            loaded.value().pageKind != PageKind::named) {
             return fail(
                 loaded ? makeError(NotebookErrorCode::pageNotFound, path, "Block is not a Page")
                        : loaded.error());
@@ -1764,7 +1835,8 @@ class NotebookSession::Impl {
                           std::nullopt,
                           std::move(authoredText),
                           {},
-                          {}};
+                          {},
+                          std::nullopt};
         if (auto error = writeBlock(transaction, databases.value().blocks, block, path)) {
             return fail(std::move(*error));
         }
@@ -1819,7 +1891,7 @@ class NotebookSession::Impl {
         }
         auto outline = loadOutlineForEntry(transaction, databases.value(), entryId);
         mdb_txn_abort(transaction);
-        if (!outline || outline.value().page.type != BlockType::page) {
+        if (!outline || outline.value().page.pageKind != PageKind::named) {
             return Result<BlockId>::failure(outline ? makeError(NotebookErrorCode::blockNotFound,
                                                                 path, "Block is not a Page Entry")
                                                     : outline.error());
@@ -1842,11 +1914,8 @@ class NotebookSession::Impl {
     }
 
     void recordPageHistory(Page before, Page after) {
+        clearRedoHistory();
         auto& history = pageHistory(before.metadata.id);
-        for (const auto& action : history.redo) {
-            historyBytes -= action.estimatedBytes;
-        }
-        history.redo.clear();
         const auto estimatePageBytes = [](const Page& page) -> std::size_t {
             auto bytes = sizeof(Page) + page.name.size() + page.displayTitle.size();
             for (const auto& entry : page.entries) {
@@ -1879,7 +1948,8 @@ class NotebookSession::Impl {
             return fail(databases.error());
         }
         auto pageBlock = readBlock(transaction, databases.value().blocks, target.metadata.id, path);
-        if (!pageBlock || pageBlock.value().type != BlockType::page) {
+        if (!pageBlock || pageBlock.value().type != BlockType::page ||
+            pageBlock.value().pageKind != PageKind::named) {
             return fail(pageBlock ? makeError(NotebookErrorCode::pageNotFound, path,
                                               "Page no longer exists")
                                   : pageBlock.error());
@@ -1910,7 +1980,8 @@ class NotebookSession::Impl {
         LoadedOutline restored{restoredBlock, {}};
         for (const auto& entry : target.entries) {
             BlockRecord block{
-                BlockType::pageEntry, entry.metadata, std::nullopt, entry.authoredText, {}, {}};
+                BlockType::entry, entry.metadata, std::nullopt, entry.authoredText, {}, {},
+                std::nullopt};
             if (auto error = writeBlock(transaction, databases.value().blocks, block, path)) {
                 return fail(std::move(*error));
             }
@@ -1985,8 +2056,8 @@ class NotebookSession::Impl {
         BlockId pageId;
         std::memcpy(pageId.bytes.data(), value.mv_data, pageId.bytes.size());
         auto page = readBlock(transaction, databases.value().blocks, pageId, path);
-        if (!page || page.value().type != BlockType::journalPage ||
-            page.value().journalDate != date) {
+        if (!page || page.value().type != BlockType::page ||
+            page.value().pageKind != PageKind::journal || page.value().journalDate != date) {
             mdb_txn_abort(transaction);
             return Result<JournalPage>::failure(
                 page ? makeError(NotebookErrorCode::invalidNotebook, path,
@@ -2034,7 +2105,8 @@ class NotebookSession::Impl {
         BlockId pageId;
         std::memcpy(pageId.bytes.data(), pageValue.mv_data, pageId.bytes.size());
         auto pageBlock = readBlock(transaction, databases.value().blocks, pageId, path);
-        if (!pageBlock || pageBlock.value().type != BlockType::journalPage ||
+        if (!pageBlock || pageBlock.value().type != BlockType::page ||
+            pageBlock.value().pageKind != PageKind::journal ||
             pageBlock.value().journalDate != date) {
             mdb_txn_abort(transaction);
             return Result<JournalPage>::failure(
@@ -2070,7 +2142,8 @@ class NotebookSession::Impl {
             BlockId entryId;
             std::memcpy(entryId.bytes.data(), childValue.mv_data, entryId.bytes.size());
             auto entryBlock = readBlock(transaction, databases.value().blocks, entryId, path);
-            if (!entryBlock || entryBlock.value().type != BlockType::journalEntry) {
+            if (!entryBlock || (entryBlock.value().type != BlockType::journalEntry &&
+                                entryBlock.value().type != BlockType::pageEntry)) {
                 mdb_cursor_close(cursor);
                 mdb_txn_abort(transaction);
                 return Result<JournalPage>::failure(
@@ -2125,7 +2198,8 @@ class NotebookSession::Impl {
                                     date,
                                     {},
                                     {},
-                                    {}};
+                                    {},
+                                    PageKind::journal};
             if (auto error = writeBlock(transaction, databases.value().blocks, pageBlock, path)) {
                 return fail(std::move(*error));
             }
@@ -2150,7 +2224,8 @@ class NotebookSession::Impl {
             BlockId pageId;
             std::memcpy(pageId.bytes.data(), pageValue.mv_data, pageId.bytes.size());
             auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
-            if (!loaded || loaded.value().type != BlockType::journalPage) {
+            if (!loaded || loaded.value().type != BlockType::page ||
+                loaded.value().pageKind != PageKind::journal) {
                 return fail(loaded ? makeError(NotebookErrorCode::invalidNotebook, path,
                                                "Journal date points to an invalid Page")
                                    : loaded.error());
@@ -2265,7 +2340,8 @@ class NotebookSession::Impl {
                                std::nullopt,
                                std::move(authoredText),
                                {},
-                               {}};
+                               {},
+                               std::nullopt};
         if (auto error = writeBlock(transaction, databases.value().blocks, entryBlock, path)) {
             return fail(std::move(*error));
         }
@@ -2400,7 +2476,7 @@ class NotebookSession::Impl {
             });
         changed->metadata = entry.metadata;
         changed->authoredText = entry.authoredText;
-        if (before.page.type == BlockType::journalPage) {
+        if (before.page.pageKind == PageKind::journal) {
             recordHistory(before.page.journalDate.value_or(JournalDate{}), before,
                           std::move(after));
         }
@@ -2443,7 +2519,8 @@ class NotebookSession::Impl {
                     date,
                     {},
                     {},
-                    {}};
+                    {},
+                    PageKind::journal};
             if (auto error = writeBlock(transaction, databases.value().blocks, page, path)) {
                 return fail(std::move(*error));
             }
@@ -2467,7 +2544,8 @@ class NotebookSession::Impl {
             BlockId pageId;
             std::memcpy(pageId.bytes.data(), pageValue.mv_data, pageId.bytes.size());
             auto loaded = readBlock(transaction, databases.value().blocks, pageId, path);
-            if (!loaded || loaded.value().type != BlockType::journalPage ||
+            if (!loaded || loaded.value().type != BlockType::page ||
+                loaded.value().pageKind != PageKind::journal ||
                 loaded.value().journalDate != date) {
                 return fail(loaded ? makeError(NotebookErrorCode::invalidNotebook, path,
                                                "Journal date points to an invalid Page")
@@ -2502,7 +2580,8 @@ class NotebookSession::Impl {
                           std::nullopt,
                           std::move(authoredText),
                           {},
-                          {}};
+                          {},
+                          std::nullopt};
         if (auto error = writeBlock(transaction, databases.value().blocks, entry, path)) {
             return fail(std::move(*error));
         }
@@ -2601,13 +2680,13 @@ class NotebookSession::Impl {
             found->authoredText = updated.authoredText;
             found->metadata.updatedAt = now;
             blockToWrite = updated;
-            BlockRecord created{outline.page.type == BlockType::page ? BlockType::pageEntry
-                                                                     : BlockType::journalEntry,
+            BlockRecord created{BlockType::entry,
                                 BlockMetadata{generateBlockId(), now, now},
                                 std::nullopt,
                                 suffix,
                                 {},
-                                {}};
+                                {},
+                                std::nullopt};
             blockToCreate = created;
             const auto insertion = subtreeEnd(outline.entries, index);
             outline.entries.insert(outline.entries.begin() + static_cast<std::ptrdiff_t>(insertion),
@@ -2774,8 +2853,7 @@ class NotebookSession::Impl {
             if (result != MDB_SUCCESS) {
                 return fail(errorFromLmdb(path, result, "delete Journal Entry"));
             }
-            const auto entryType = outline.page.type == BlockType::page ? BlockType::pageEntry
-                                                                        : BlockType::journalEntry;
+            const auto entryType = BlockType::entry;
             auto typeKeyBytes = typeIndexKey(entryType, entryId);
             MDB_val typeKey{typeKeyBytes.size(), typeKeyBytes.data()};
             result = mdb_del(transaction, databases.value().blocksByType, &typeKey, nullptr);
@@ -2793,7 +2871,7 @@ class NotebookSession::Impl {
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
-        if (outline.page.type == BlockType::journalPage) {
+        if (outline.page.pageKind == PageKind::journal) {
             recordHistory(outline.page.journalDate.value_or(JournalDate{}), before, outline);
         }
         return Result<JournalPage>::success({outline.page.journalDate.value_or(JournalDate{}),
@@ -2899,8 +2977,7 @@ class NotebookSession::Impl {
             if (result != MDB_SUCCESS) {
                 return fail(errorFromLmdb(path, result, "delete selected Journal Entry"));
             }
-            const auto entryType = outline.page.type == BlockType::page ? BlockType::pageEntry
-                                                                        : BlockType::journalEntry;
+            const auto entryType = BlockType::entry;
             if (auto error = removeTypeIndex(transaction, databases.value().blocksByType, entryType,
                                              entry.metadata.id)) {
                 return fail(std::move(*error));
@@ -2916,12 +2993,325 @@ class NotebookSession::Impl {
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
-        if (outline.page.type == BlockType::journalPage) {
+        if (outline.page.pageKind == PageKind::journal) {
             recordHistory(outline.page.journalDate.value_or(JournalDate{}), before, outline);
         }
         return Result<JournalPage>::success({outline.page.journalDate.value_or(JournalDate{}),
                                              outline.page.metadata,
                                              publicJournalEntries(outline.entries)});
+    }
+
+    auto moveEntryToPage(BlockId entryId, const PageAddress& destinationAddress,
+                         std::optional<BlockId> afterEntry) -> Result<std::vector<LoadedOutline>> {
+        lastCommandCommitted = false;
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<std::vector<LoadedOutline>>::failure(
+                errorFromLmdb(path, result, "begin cross-Page Entry move"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<std::vector<LoadedOutline>> {
+            mdb_txn_abort(transaction);
+            return Result<std::vector<LoadedOutline>>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        auto sourceResult = loadOutlineForEntry(transaction, databases.value(), entryId);
+        if (!sourceResult) {
+            return fail(sourceResult.error());
+        }
+        auto source = std::move(sourceResult).value();
+        const auto beforeSource = source;
+        std::optional<LoadedOutline> beforeDestination;
+        LoadedOutline destination;
+        const auto now = currentTimestamp();
+        if (const auto* pageId = std::get_if<BlockId>(&destinationAddress)) {
+            auto block = readBlock(transaction, databases.value().blocks, *pageId, path);
+            if (!block || block.value().type != BlockType::page ||
+                block.value().pageKind != PageKind::named) {
+                return fail(block ? makeError(NotebookErrorCode::pageNotFound, path,
+                                              "move destination is not a Named Page")
+                                  : block.error());
+            }
+            auto loaded = loadOutline(transaction, databases.value(), std::move(block).value());
+            if (!loaded) {
+                return fail(loaded.error());
+            }
+            destination = std::move(loaded).value();
+            beforeDestination = destination;
+        } else {
+            const auto date = std::get<JournalDate>(destinationAddress);
+            auto loaded = loadOutlineForDate(transaction, databases.value(), date);
+            if (!loaded) {
+                return fail(loaded.error());
+            }
+            auto loadedPage = std::move(loaded).value();
+            if (loadedPage) {
+                destination = std::move(loadedPage).value_or(LoadedOutline{});
+                beforeDestination = destination;
+            } else {
+                BlockRecord page{BlockType::journalPage,
+                                 BlockMetadata{generateBlockId(), now, now},
+                                 date,
+                                 {},
+                                 {},
+                                 {},
+                                 PageKind::journal};
+                if (auto error = writeBlock(transaction, databases.value().blocks, page, path)) {
+                    return fail(std::move(*error));
+                }
+                if (auto error = writeTypeIndex(transaction, databases.value().blocksByType,
+                                                page.type, page.metadata.id, path)) {
+                    return fail(std::move(*error));
+                }
+                const auto encodedDate = dateKey(date);
+                MDB_val dateIndexKey{encodedDate.size(),
+                                     const_cast<std::uint8_t*>(encodedDate.data())};
+                MDB_val pageValue{page.metadata.id.bytes.size(), page.metadata.id.bytes.data()};
+                result = mdb_put(transaction, databases.value().journalByDate, &dateIndexKey,
+                                 &pageValue, MDB_NOOVERWRITE);
+                if (result != MDB_SUCCESS) {
+                    return fail(errorFromLmdb(path, result, "materialize move destination"));
+                }
+                destination = {std::move(page), {}};
+            }
+        }
+        if (source.page.metadata.id == destination.page.metadata.id) {
+            return fail(makeError(NotebookErrorCode::invalidStructuralMove, path,
+                                  "cross-Page move requires a different destination"));
+        }
+        const auto found = std::ranges::find_if(source.entries, [&](const auto& entry) -> bool {
+            return entry.metadata.id == entryId;
+        });
+        if (found == source.entries.end()) {
+            return fail(makeError(NotebookErrorCode::blockNotFound, path,
+                                  "Entry is not in its containing Page"));
+        }
+        const auto sourceIndex =
+            static_cast<std::size_t>(std::distance(source.entries.begin(), found));
+        const auto sourceEnd = subtreeEnd(source.entries, sourceIndex);
+        std::vector<OutlineEntryRecord> moving(
+            source.entries.begin() + static_cast<std::ptrdiff_t>(sourceIndex),
+            source.entries.begin() + static_cast<std::ptrdiff_t>(sourceEnd));
+        const auto oldParent = moving.front().parentEntry;
+        source.entries.erase(source.entries.begin() + static_cast<std::ptrdiff_t>(sourceIndex),
+                             source.entries.begin() + static_cast<std::ptrdiff_t>(sourceEnd));
+
+        std::optional<BlockId> newParent;
+        auto destinationIndex = destination.entries.size();
+        if (afterEntry) {
+            const auto insertion =
+                std::ranges::find_if(destination.entries, [&](const auto& entry) -> bool {
+                    return entry.metadata.id == *afterEntry;
+                });
+            if (insertion == destination.entries.end()) {
+                return fail(makeError(NotebookErrorCode::invalidInsertionPoint, path,
+                                      "insertion point is not on the destination Page"));
+            }
+            const auto index =
+                static_cast<std::size_t>(std::distance(destination.entries.begin(), insertion));
+            newParent = insertion->parentEntry;
+            destinationIndex = subtreeEnd(destination.entries, index);
+        }
+        moving.front().parentEntry = newParent;
+        moving.front().metadata.updatedAt = now;
+        destination.entries.insert(destination.entries.begin() +
+                                       static_cast<std::ptrdiff_t>(destinationIndex),
+                                   moving.begin(), moving.end());
+
+        auto movedBlock = readBlock(transaction, databases.value().blocks, entryId, path);
+        if (!movedBlock) {
+            return fail(movedBlock.error());
+        }
+        auto movedBlockRecord = std::move(movedBlock).value();
+        movedBlockRecord.metadata.updatedAt = now;
+        if (auto error =
+                writeBlock(transaction, databases.value().blocks, movedBlockRecord, path)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = touchContainer(transaction, databases.value(), source, oldParent, now)) {
+            return fail(std::move(*error));
+        }
+        if (auto error =
+                touchContainer(transaction, databases.value(), destination, newParent, now)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = rewriteContainment(transaction, databases.value(), beforeSource, source)) {
+            return fail(std::move(*error));
+        }
+        const LoadedOutline emptyDestination{destination.page, {}};
+        if (auto error =
+                rewriteContainment(transaction, databases.value(),
+                                   beforeDestination.value_or(emptyDestination), destination)) {
+            return fail(std::move(*error));
+        }
+        if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
+            return fail(std::move(*error));
+        }
+        result = commitAdapter->commit(transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<std::vector<LoadedOutline>>::failure(
+                errorFromLmdb(path, result, "commit cross-Page Entry move"));
+        }
+        incrementCachedRevision();
+        lastCommandCommitted = true;
+        clearRedoHistory();
+        CrossPageHistoryAction action{
+            nextHistorySequence++, beforeSource, beforeDestination, source, destination, 0};
+        action.estimatedBytes = sizeof(CrossPageHistoryAction) +
+                                estimateOutlineBytes(action.beforeSource) +
+                                estimateOutlineBytes(action.beforeDestination) +
+                                estimateOutlineBytes(action.afterSource) +
+                                estimateOutlineBytes(action.afterDestination);
+        historyBytes += action.estimatedBytes;
+        crossPageUndo.push_back(std::move(action));
+        enforceHistoryBudget();
+        return Result<std::vector<LoadedOutline>>::success(
+            {std::move(source), std::move(destination)});
+    }
+
+    auto applyCrossPageHistory(bool redo) -> Result<std::vector<LoadedOutline>> {
+        lastCommandCommitted = false;
+        auto& sourceActions = redo ? crossPageRedo : crossPageUndo;
+        if (sourceActions.empty()) {
+            return Result<std::vector<LoadedOutline>>::failure(makeError(
+                redo ? NotebookErrorCode::redoUnavailable : NotebookErrorCode::undoUnavailable,
+                info.value_or(NotebookInfo{}).path, "no cross-Page edit is available"));
+        }
+        const auto& action = sourceActions.back();
+        const auto& currentSource = redo ? action.beforeSource : action.afterSource;
+        const auto& currentDestination =
+            redo ? action.beforeDestination : std::optional<LoadedOutline>{action.afterDestination};
+        const auto& targetSource = redo ? action.afterSource : action.beforeSource;
+        const auto& targetDestination =
+            redo ? std::optional<LoadedOutline>{action.afterDestination} : action.beforeDestination;
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<std::vector<LoadedOutline>>::failure(
+                errorFromLmdb(path, result, "begin cross-Page history"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<std::vector<LoadedOutline>> {
+            mdb_txn_abort(transaction);
+            return Result<std::vector<LoadedOutline>>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        for (const auto& entry : currentSource.entries) {
+            if (auto error = eraseContainment(transaction, databases.value(), entry)) {
+                return fail(std::move(*error));
+            }
+        }
+        if (currentDestination) {
+            for (const auto& entry : currentDestination->entries) {
+                if (auto error = eraseContainment(transaction, databases.value(), entry)) {
+                    return fail(std::move(*error));
+                }
+            }
+        }
+        if (auto error =
+                writeBlock(transaction, databases.value().blocks, targetSource.page, path)) {
+            return fail(std::move(*error));
+        }
+        if (targetDestination) {
+            if (auto error = writeBlock(transaction, databases.value().blocks,
+                                        targetDestination->page, path)) {
+                return fail(std::move(*error));
+            }
+            if (!currentDestination) {
+                if (auto error = writeTypeIndex(transaction, databases.value().blocksByType,
+                                                targetDestination->page.type,
+                                                targetDestination->page.metadata.id, path)) {
+                    return fail(std::move(*error));
+                }
+                if (targetDestination->page.journalDate) {
+                    const auto encodedDate = dateKey(*targetDestination->page.journalDate);
+                    MDB_val dateIndexKey{encodedDate.size(),
+                                         const_cast<std::uint8_t*>(encodedDate.data())};
+                    MDB_val pageValue{
+                        targetDestination->page.metadata.id.bytes.size(),
+                        const_cast<std::byte*>(targetDestination->page.metadata.id.bytes.data())};
+                    result = mdb_put(transaction, databases.value().journalByDate, &dateIndexKey,
+                                     &pageValue, MDB_NOOVERWRITE);
+                    if (result != MDB_SUCCESS) {
+                        return fail(
+                            errorFromLmdb(path, result, "restore Journal move destination"));
+                    }
+                }
+            }
+        } else if (currentDestination) {
+            auto pageKey = blockKey(currentDestination->page.metadata.id);
+            result = mdb_del(transaction, databases.value().blocks, &pageKey, nullptr);
+            if (result != MDB_SUCCESS) {
+                return fail(errorFromLmdb(path, result, "remove virtualized Journal Page"));
+            }
+            if (auto error = removeTypeIndex(transaction, databases.value().blocksByType,
+                                             currentDestination->page.type,
+                                             currentDestination->page.metadata.id)) {
+                return fail(std::move(*error));
+            }
+            if (currentDestination->page.journalDate) {
+                const auto encodedDate = dateKey(*currentDestination->page.journalDate);
+                MDB_val dateIndexKey{encodedDate.size(),
+                                     const_cast<std::uint8_t*>(encodedDate.data())};
+                result =
+                    mdb_del(transaction, databases.value().journalByDate, &dateIndexKey, nullptr);
+                if (result != MDB_SUCCESS) {
+                    return fail(errorFromLmdb(path, result, "virtualize Journal move destination"));
+                }
+            }
+        }
+        const auto writeEntries =
+            [&](const LoadedOutline& outline) -> std::optional<NotebookError> {
+            for (const auto& entry : outline.entries) {
+                auto block =
+                    readBlock(transaction, databases.value().blocks, entry.metadata.id, path);
+                if (!block) {
+                    return block.error();
+                }
+                auto restored = std::move(block).value();
+                restored.metadata = entry.metadata;
+                restored.authoredText = entry.authoredText;
+                if (auto error =
+                        writeBlock(transaction, databases.value().blocks, restored, path)) {
+                    return error;
+                }
+            }
+            const LoadedOutline empty{outline.page, {}};
+            return rewriteContainment(transaction, databases.value(), empty, outline);
+        };
+        if (auto error = writeEntries(targetSource)) {
+            return fail(std::move(*error));
+        }
+        if (targetDestination) {
+            if (auto error = writeEntries(*targetDestination)) {
+                return fail(std::move(*error));
+            }
+        }
+        if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
+            return fail(std::move(*error));
+        }
+        result = commitAdapter->commit(transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<std::vector<LoadedOutline>>::failure(
+                errorFromLmdb(path, result, "commit cross-Page history"));
+        }
+        auto applied = std::move(sourceActions.back());
+        sourceActions.pop_back();
+        (redo ? crossPageUndo : crossPageRedo).push_back(std::move(applied));
+        incrementCachedRevision();
+        lastCommandCommitted = true;
+        std::vector<LoadedOutline> restored{targetSource};
+        if (targetDestination) {
+            restored.push_back(*targetDestination);
+        }
+        return Result<std::vector<LoadedOutline>>::success(std::move(restored));
     }
 
     void incrementCachedRevision() {
@@ -2950,6 +3340,8 @@ class NotebookSession::Impl {
     bool lastCommandCommitted{false};
     std::vector<JournalPageHistory> journalHistory;
     std::vector<PageHistory> pageHistories;
+    std::deque<CrossPageHistoryAction> crossPageUndo;
+    std::deque<CrossPageHistoryAction> crossPageRedo;
     std::size_t historyBytes{0};
     std::uint64_t nextHistorySequence{1};
 };
@@ -3659,6 +4051,315 @@ auto NotebookSession::applyJournalHistory(JournalDate date, JournalHistoryDirect
             callbacks = impl_->committedCallbacks();
         }
         return outcome;
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+namespace {
+
+auto unifiedPage(const Page& page) -> OutlinePage {
+    OutlinePage result{PageKind::named, page.metadata,     std::nullopt,
+                       page.name,       page.displayTitle, {}};
+    result.entries.reserve(page.entries.size());
+    for (const auto& entry : page.entries) {
+        result.entries.push_back({entry.metadata, entry.authoredText, entry.parentEntry});
+    }
+    return result;
+}
+
+auto unifiedPage(const JournalPage& page) -> OutlinePage {
+    OutlinePage result{PageKind::journal, page.metadata, page.date, {}, {}, {}};
+    result.entries.reserve(page.entries.size());
+    for (const auto& entry : page.entries) {
+        result.entries.push_back({entry.metadata, entry.authoredText, entry.parentEntry});
+    }
+    return result;
+}
+
+auto unifiedPage(const LoadedOutline& outline) -> OutlinePage {
+    OutlinePage result;
+    if (outline.page.pageKind == PageKind::journal) {
+        result.kind = PageKind::journal;
+        result.journalDate = outline.page.journalDate;
+    } else {
+        result.kind = PageKind::named;
+        result.name = outline.page.pageName;
+        result.displayTitle = outline.page.displayTitle;
+    }
+    result.metadata = outline.page.metadata;
+    result.entries.reserve(outline.entries.size());
+    for (const auto& entry : outline.entries) {
+        result.entries.push_back({entry.metadata, entry.authoredText, entry.parentEntry});
+    }
+    return result;
+}
+
+} // namespace
+
+auto NotebookSession::outline(PageAddress address) const -> Result<OutlinePage> {
+    if (const auto* pageId = std::get_if<BlockId>(&address)) {
+        const auto result = page(*pageId);
+        return result ? Result<OutlinePage>::success(unifiedPage(result.value()))
+                      : Result<OutlinePage>::failure(result.error());
+    }
+    const auto result = journalPage(std::get<JournalDate>(address));
+    return result ? Result<OutlinePage>::success(unifiedPage(result.value()))
+                  : Result<OutlinePage>::failure(result.error());
+}
+
+auto NotebookSession::insertEntry(PageAddress address, std::optional<BlockId> afterEntry,
+                                  std::string authoredText) -> Result<OutlinePage> {
+    if (const auto* pageId = std::get_if<BlockId>(&address)) {
+        auto result = insertPageEntry(*pageId, afterEntry, std::move(authoredText));
+        return result ? Result<OutlinePage>::success(unifiedPage(result.value()))
+                      : Result<OutlinePage>::failure(result.error());
+    }
+    auto result =
+        insertJournalEntry(std::get<JournalDate>(address), afterEntry, std::move(authoredText));
+    return result ? Result<OutlinePage>::success(unifiedPage(result.value()))
+                  : Result<OutlinePage>::failure(result.error());
+}
+
+auto NotebookSession::updateEntry(BlockId entryId, std::string authoredText) -> Result<Entry> {
+    auto named = updatePageEntry(entryId, authoredText);
+    if (named) {
+        const auto& entry = named.value();
+        return Result<Entry>::success({entry.metadata, entry.authoredText, entry.parentEntry});
+    }
+    auto journal = updateJournalEntry(entryId, std::move(authoredText));
+    if (!journal) {
+        return Result<Entry>::failure(journal.error());
+    }
+    const auto& entry = journal.value();
+    return Result<Entry>::success({entry.metadata, entry.authoredText, entry.parentEntry});
+}
+
+auto NotebookSession::splitEntry(BlockId entryId, std::string authoredText,
+                                 std::size_t cursorByteOffset) -> Result<OutlinePage> {
+    auto named = splitPageEntry(entryId, authoredText, cursorByteOffset);
+    if (named) {
+        return Result<OutlinePage>::success(unifiedPage(named.value()));
+    }
+    auto journal = splitJournalEntry(entryId, std::move(authoredText), cursorByteOffset);
+    return journal ? Result<OutlinePage>::success(unifiedPage(journal.value()))
+                   : Result<OutlinePage>::failure(journal.error());
+}
+
+auto NotebookSession::joinEntry(BlockId entryId, std::string authoredText) -> Result<OutlinePage> {
+    auto named = joinPageEntry(entryId, authoredText);
+    if (named) {
+        return Result<OutlinePage>::success(unifiedPage(named.value()));
+    }
+    auto journal = joinJournalEntry(entryId, std::move(authoredText));
+    return journal ? Result<OutlinePage>::success(unifiedPage(journal.value()))
+                   : Result<OutlinePage>::failure(journal.error());
+}
+
+auto NotebookSession::moveEntry(BlockId entryId, EntryMove movement, std::string authoredText)
+    -> Result<OutlinePage> {
+    const auto pageMovement = static_cast<PageEntryMove>(movement);
+    auto named = movePageEntry(entryId, pageMovement, authoredText);
+    if (named) {
+        return Result<OutlinePage>::success(unifiedPage(named.value()));
+    }
+    const auto journalMovement = static_cast<JournalEntryMove>(movement);
+    auto journal = moveJournalEntry(entryId, journalMovement, std::move(authoredText));
+    return journal ? Result<OutlinePage>::success(unifiedPage(journal.value()))
+                   : Result<OutlinePage>::failure(journal.error());
+}
+
+auto NotebookSession::moveEntryToPage(BlockId entryId, PageAddress destination,
+                                      std::optional<BlockId> afterEntry)
+    -> Result<std::vector<OutlinePage>> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<std::vector<OutlinePage>> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<std::vector<OutlinePage>>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        if (const auto* date = std::get_if<JournalDate>(&destination);
+            date != nullptr && !validJournalDate(*date)) {
+            return Result<std::vector<OutlinePage>>::failure(makeError(
+                NotebookErrorCode::invalidJournalDate, impl_->info->path, "invalid Journal date"));
+        }
+        auto moved = impl_->moveEntryToPage(entryId, destination, afterEntry);
+        if (!moved) {
+            return Result<std::vector<OutlinePage>>::failure(moved.error());
+        }
+        std::vector<OutlinePage> pages;
+        pages.reserve(moved.value().size());
+        for (const auto& page : moved.value()) {
+            pages.push_back(unifiedPage(page));
+        }
+        callbacks = impl_->committedCallbacks();
+        return Result<std::vector<OutlinePage>>::success(std::move(pages));
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::deleteEntry(BlockId entryId) -> Result<OutlinePage> {
+    auto named = deletePageEntry(entryId);
+    if (named) {
+        return Result<OutlinePage>::success(unifiedPage(named.value()));
+    }
+    auto journal = deleteJournalEntry(entryId);
+    return journal ? Result<OutlinePage>::success(unifiedPage(journal.value()))
+                   : Result<OutlinePage>::failure(journal.error());
+}
+
+auto NotebookSession::deleteSubtrees(std::vector<BlockId> entryIds) -> Result<OutlinePage> {
+    auto named = deletePageSubtrees(entryIds);
+    if (named) {
+        return Result<OutlinePage>::success(unifiedPage(named.value()));
+    }
+    auto journal = deleteJournalSubtrees(std::move(entryIds));
+    return journal ? Result<OutlinePage>::success(unifiedPage(journal.value()))
+                   : Result<OutlinePage>::failure(journal.error());
+}
+
+auto NotebookSession::editCapabilities() const -> Result<EditCapabilities> {
+    std::scoped_lock lock(impl_->mutex);
+    if (!impl_->info) {
+        return Result<EditCapabilities>::failure(
+            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    bool canUndo = !impl_->crossPageUndo.empty();
+    bool canRedo = !impl_->crossPageRedo.empty();
+    for (const auto& history : impl_->journalHistory) {
+        canUndo = canUndo || !history.undo.empty();
+        canRedo = canRedo || !history.redo.empty();
+    }
+    for (const auto& history : impl_->pageHistories) {
+        canUndo = canUndo || !history.undo.empty();
+        canRedo = canRedo || !history.redo.empty();
+    }
+    return Result<EditCapabilities>::success({canUndo, canRedo});
+}
+
+auto NotebookSession::undoEdit() -> Result<std::vector<OutlinePage>> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<std::vector<OutlinePage>> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<std::vector<OutlinePage>>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        enum class Kind : std::uint8_t { none, journal, named, cross };
+        Kind kind = Kind::none;
+        std::uint64_t sequence = 0;
+        JournalDate journalDate{};
+        BlockId pageId{};
+        for (const auto& history : impl_->journalHistory) {
+            if (!history.undo.empty() && history.undo.back().sequence > sequence) {
+                kind = Kind::journal;
+                sequence = history.undo.back().sequence;
+                journalDate = history.date;
+            }
+        }
+        for (const auto& history : impl_->pageHistories) {
+            if (!history.undo.empty() && history.undo.back().sequence > sequence) {
+                kind = Kind::named;
+                sequence = history.undo.back().sequence;
+                pageId = history.pageId;
+            }
+        }
+        if (!impl_->crossPageUndo.empty() && impl_->crossPageUndo.back().sequence > sequence) {
+            kind = Kind::cross;
+        }
+        std::vector<OutlinePage> pages;
+        if (kind == Kind::journal) {
+            auto applied = impl_->applyHistory(journalDate, JournalHistoryDirection::undo);
+            if (!applied) {
+                return Result<std::vector<OutlinePage>>::failure(applied.error());
+            }
+            pages.push_back(unifiedPage(applied.value()));
+        } else if (kind == Kind::named) {
+            auto applied = impl_->applyPageHistory(pageId, false);
+            if (!applied) {
+                return Result<std::vector<OutlinePage>>::failure(applied.error());
+            }
+            pages.push_back(unifiedPage(applied.value()));
+        } else if (kind == Kind::cross) {
+            auto applied = impl_->applyCrossPageHistory(false);
+            if (!applied) {
+                return Result<std::vector<OutlinePage>>::failure(applied.error());
+            }
+            for (const auto& page : applied.value()) {
+                pages.push_back(unifiedPage(page));
+            }
+        } else {
+            return Result<std::vector<OutlinePage>>::failure(
+                makeError(NotebookErrorCode::undoUnavailable, impl_->info->path,
+                          "no Notebook edit is available to undo"));
+        }
+        callbacks = impl_->committedCallbacks();
+        return Result<std::vector<OutlinePage>>::success(std::move(pages));
+    }();
+    notifyCallbacks(callbacks);
+    return result;
+}
+
+auto NotebookSession::redoEdit() -> Result<std::vector<OutlinePage>> {
+    std::vector<std::function<void()>> callbacks;
+    auto result = [&]() -> Result<std::vector<OutlinePage>> {
+        std::scoped_lock lock(impl_->mutex);
+        if (!impl_->info) {
+            return Result<std::vector<OutlinePage>>::failure(
+                makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+        }
+        enum class Kind : std::uint8_t { none, journal, named, cross };
+        Kind kind = Kind::none;
+        auto sequence = std::numeric_limits<std::uint64_t>::max();
+        JournalDate journalDate{};
+        BlockId pageId{};
+        for (const auto& history : impl_->journalHistory) {
+            if (!history.redo.empty() && history.redo.back().sequence < sequence) {
+                kind = Kind::journal;
+                sequence = history.redo.back().sequence;
+                journalDate = history.date;
+            }
+        }
+        for (const auto& history : impl_->pageHistories) {
+            if (!history.redo.empty() && history.redo.back().sequence < sequence) {
+                kind = Kind::named;
+                sequence = history.redo.back().sequence;
+                pageId = history.pageId;
+            }
+        }
+        if (!impl_->crossPageRedo.empty() && impl_->crossPageRedo.back().sequence < sequence) {
+            kind = Kind::cross;
+        }
+        std::vector<OutlinePage> pages;
+        if (kind == Kind::journal) {
+            auto applied = impl_->applyHistory(journalDate, JournalHistoryDirection::redo);
+            if (!applied) {
+                return Result<std::vector<OutlinePage>>::failure(applied.error());
+            }
+            pages.push_back(unifiedPage(applied.value()));
+        } else if (kind == Kind::named) {
+            auto applied = impl_->applyPageHistory(pageId, true);
+            if (!applied) {
+                return Result<std::vector<OutlinePage>>::failure(applied.error());
+            }
+            pages.push_back(unifiedPage(applied.value()));
+        } else if (kind == Kind::cross) {
+            auto applied = impl_->applyCrossPageHistory(true);
+            if (!applied) {
+                return Result<std::vector<OutlinePage>>::failure(applied.error());
+            }
+            for (const auto& page : applied.value()) {
+                pages.push_back(unifiedPage(page));
+            }
+        } else {
+            return Result<std::vector<OutlinePage>>::failure(
+                makeError(NotebookErrorCode::redoUnavailable, impl_->info->path,
+                          "no Notebook edit is available to redo"));
+        }
+        callbacks = impl_->committedCallbacks();
+        return Result<std::vector<OutlinePage>>::success(std::move(pages));
     }();
     notifyCallbacks(callbacks);
     return result;

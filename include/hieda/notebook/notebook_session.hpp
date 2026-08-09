@@ -74,13 +74,16 @@ struct BlockMetadata {
     auto operator==(const BlockMetadata&) const -> bool = default;
 };
 
-struct JournalEntry {
+struct Entry {
     BlockMetadata metadata;
     std::string authoredText;
     std::optional<BlockId> parentEntry;
 
-    auto operator==(const JournalEntry&) const -> bool = default;
+    auto operator==(const Entry&) const -> bool = default;
 };
+
+using JournalEntry = Entry;
+using PageEntry = Entry;
 
 struct JournalPage {
     JournalDate date;
@@ -88,14 +91,6 @@ struct JournalPage {
     std::vector<JournalEntry> entries;
 
     auto operator==(const JournalPage&) const -> bool = default;
-};
-
-struct PageEntry {
-    BlockMetadata metadata;
-    std::string authoredText;
-    std::optional<BlockId> parentEntry;
-
-    auto operator==(const PageEntry&) const -> bool = default;
 };
 
 struct PageSummary {
@@ -115,6 +110,19 @@ struct Page {
     auto operator==(const Page&) const -> bool = default;
 };
 
+enum class PageKind : std::uint8_t { named, journal };
+
+struct OutlinePage {
+    PageKind kind{PageKind::named};
+    std::optional<BlockMetadata> metadata;
+    std::optional<JournalDate> journalDate;
+    std::string name;
+    std::string displayTitle;
+    std::vector<Entry> entries;
+
+    auto operator==(const OutlinePage&) const -> bool = default;
+};
+
 struct EditCapabilities {
     bool canUndo{false};
     bool canRedo{false};
@@ -122,8 +130,11 @@ struct EditCapabilities {
     auto operator==(const EditCapabilities&) const -> bool = default;
 };
 
-enum class JournalEntryMove : std::uint8_t { indent, outdent, up, down };
-enum class PageEntryMove : std::uint8_t { indent, outdent, up, down };
+enum class EntryMove : std::uint8_t { indent, outdent, up, down };
+using JournalEntryMove = EntryMove;
+using PageEntryMove = EntryMove;
+
+using PageAddress = std::variant<BlockId, JournalDate>;
 
 enum class NotebookErrorCode : std::uint8_t {
     pathNotFound,
@@ -241,6 +252,23 @@ class NotebookSession {
     [[nodiscard]] auto journalEditCapabilities(JournalDate date) const -> Result<EditCapabilities>;
     [[nodiscard]] auto undoJournalEdit(JournalDate date) -> Result<JournalPage>;
     [[nodiscard]] auto redoJournalEdit(JournalDate date) -> Result<JournalPage>;
+    [[nodiscard]] auto outline(PageAddress address) const -> Result<OutlinePage>;
+    [[nodiscard]] auto insertEntry(PageAddress address, std::optional<BlockId> afterEntry,
+                                   std::string authoredText) -> Result<OutlinePage>;
+    [[nodiscard]] auto updateEntry(BlockId entryId, std::string authoredText) -> Result<Entry>;
+    [[nodiscard]] auto splitEntry(BlockId entryId, std::string authoredText,
+                                  std::size_t cursorByteOffset) -> Result<OutlinePage>;
+    [[nodiscard]] auto joinEntry(BlockId entryId, std::string authoredText) -> Result<OutlinePage>;
+    [[nodiscard]] auto moveEntry(BlockId entryId, EntryMove movement, std::string authoredText)
+        -> Result<OutlinePage>;
+    [[nodiscard]] auto moveEntryToPage(BlockId entryId, PageAddress destination,
+                                       std::optional<BlockId> afterEntry)
+        -> Result<std::vector<OutlinePage>>;
+    [[nodiscard]] auto deleteEntry(BlockId entryId) -> Result<OutlinePage>;
+    [[nodiscard]] auto deleteSubtrees(std::vector<BlockId> entryIds) -> Result<OutlinePage>;
+    [[nodiscard]] auto editCapabilities() const -> Result<EditCapabilities>;
+    [[nodiscard]] auto undoEdit() -> Result<std::vector<OutlinePage>>;
+    [[nodiscard]] auto redoEdit() -> Result<std::vector<OutlinePage>>;
     [[nodiscard]] auto subscribeToChanges(std::function<void()> callback) -> NotebookSubscription;
 
   private:

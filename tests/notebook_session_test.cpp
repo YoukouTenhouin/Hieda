@@ -102,6 +102,64 @@ void createNotebookFixture(const std::filesystem::path& path, std::uint32_t fixt
     mdb_env_close(environment);
 }
 
+auto readBlockRecord(const std::filesystem::path& path, hieda::notebook::BlockId blockId)
+    -> std::vector<std::uint8_t> {
+    MDB_env* environment = nullptr;
+    REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
+    REQUIRE(mdb_env_set_maxdbs(environment, 16) == MDB_SUCCESS);
+    const auto encodedPath = lmdbFixturePath(path);
+    REQUIRE(mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR | MDB_RDONLY, 0600) ==
+            MDB_SUCCESS);
+    MDB_txn* transaction = nullptr;
+    REQUIRE(mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction) == MDB_SUCCESS);
+    MDB_dbi blocks = 0;
+    REQUIRE(mdb_dbi_open(transaction, "blocks", 0, &blocks) == MDB_SUCCESS);
+    MDB_val key{blockId.bytes.size(), blockId.bytes.data()};
+    MDB_val value{};
+    REQUIRE(mdb_get(transaction, blocks, &key, &value) == MDB_SUCCESS);
+    const auto* bytes = static_cast<const std::uint8_t*>(value.mv_data);
+    std::vector<std::uint8_t> record(bytes, bytes + value.mv_size);
+    mdb_txn_abort(transaction);
+    mdb_env_close(environment);
+    return record;
+}
+
+void writeBlockRecord(const std::filesystem::path& path, hieda::notebook::BlockId blockId,
+                      std::vector<std::uint8_t> record) {
+    MDB_env* environment = nullptr;
+    REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
+    REQUIRE(mdb_env_set_maxdbs(environment, 16) == MDB_SUCCESS);
+    const auto encodedPath = lmdbFixturePath(path);
+    REQUIRE(mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR, 0600) == MDB_SUCCESS);
+    MDB_txn* transaction = nullptr;
+    REQUIRE(mdb_txn_begin(environment, nullptr, 0, &transaction) == MDB_SUCCESS);
+    MDB_dbi blocks = 0;
+    REQUIRE(mdb_dbi_open(transaction, "blocks", 0, &blocks) == MDB_SUCCESS);
+    MDB_val key{blockId.bytes.size(), blockId.bytes.data()};
+    MDB_val value{record.size(), record.data()};
+    REQUIRE(mdb_put(transaction, blocks, &key, &value, 0) == MDB_SUCCESS);
+    REQUIRE(mdb_txn_commit(transaction) == MDB_SUCCESS);
+    mdb_env_close(environment);
+}
+
+auto blockRecordTags(const std::vector<std::uint8_t>& record) -> std::vector<std::uint16_t> {
+    std::vector<std::uint16_t> tags;
+    auto offset = std::size_t{2};
+    while (offset < record.size()) {
+        REQUIRE(record.size() - offset >= 6);
+        const auto tag = static_cast<std::uint16_t>(
+            (static_cast<std::uint16_t>(record[offset]) << 8U) | record[offset + 1]);
+        const auto length = (static_cast<std::uint32_t>(record[offset + 2]) << 24U) |
+                            (static_cast<std::uint32_t>(record[offset + 3]) << 16U) |
+                            (static_cast<std::uint32_t>(record[offset + 4]) << 8U) |
+                            record[offset + 5];
+        tags.push_back(tag);
+        offset += 6 + length;
+        REQUIRE(offset <= record.size());
+    }
+    return tags;
+}
+
 } // namespace
 
 TEST_CASE("a user can create a Notebook at a selected path") {
@@ -114,7 +172,7 @@ TEST_CASE("a user can create a Notebook at a selected path") {
     REQUIRE(result);
     CHECK(session.isOpen());
     CHECK(result.value().path == notebookPath);
-    CHECK(result.value().schemaVersion == 1);
+    CHECK(result.value().schemaVersion == 2);
     CHECK(std::filesystem::is_regular_file(notebookPath));
 }
 
@@ -208,7 +266,7 @@ TEST_CASE("opening invalid input returns a typed error") {
 TEST_CASE("opening a newer Notebook schema returns an unsupported-version error") {
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath = temporaryDirectory.path() / "newer.hieda";
-    createNotebookFixture(notebookPath, 2);
+    createNotebookFixture(notebookPath, 3);
     hieda::notebook::NotebookSession session;
 
     const auto result = session.open(notebookPath);
@@ -220,7 +278,7 @@ TEST_CASE("opening a newer Notebook schema returns an unsupported-version error"
 TEST_CASE("opening an incomplete Notebook manifest returns an invalid error") {
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath = temporaryDirectory.path() / "incomplete.hieda";
-    createNotebookFixture(notebookPath, 1, false);
+    createNotebookFixture(notebookPath, 2, false);
     hieda::notebook::NotebookSession session;
 
     const auto result = session.open(notebookPath);
@@ -1372,4 +1430,147 @@ TEST_CASE("ordinary Page history shares the Journal memory budget") {
     CHECK(restored.entries.front().authoredText == firstText);
     CHECK_FALSE(session.pageEditCapabilities(page.metadata.id).value().canUndo);
     CHECK(session.pageEditCapabilities(page.metadata.id).value().canRedo);
+}
+
+TEST_CASE("schema v2 persists Page kind separately from one Entry type") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "unified-blocks.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    const auto named = session.createPage("schema", "Schema").value();
+    const hieda::notebook::JournalDate date{2026, 8, 9};
+    const auto journal = session.insertEntry(date, std::nullopt, "entry").value();
+    REQUIRE(journal.metadata);
+    const auto journalMetadata = journal.metadata.value_or(hieda::notebook::BlockMetadata{});
+    const auto entryId = journal.entries.front().metadata.id;
+    session.close();
+
+    const auto namedRecord = readBlockRecord(notebookPath, named.metadata.id);
+    const auto journalRecord = readBlockRecord(notebookPath, journalMetadata.id);
+    const auto entryRecord = readBlockRecord(notebookPath, entryId);
+    REQUIRE(namedRecord.size() >= 2);
+    REQUIRE(journalRecord.size() >= 2);
+    REQUIRE(entryRecord.size() >= 2);
+    CHECK(namedRecord[1] == 2);
+    CHECK(journalRecord[1] == 2);
+    CHECK(entryRecord[1] == 2);
+    REQUIRE(namedRecord.size() > 8);
+    REQUIRE(journalRecord.size() > 8);
+    REQUIRE(entryRecord.size() > 8);
+    CHECK(namedRecord[8] == 1);
+    CHECK(journalRecord[8] == 1);
+    CHECK(entryRecord[8] == 2);
+    const auto namedTags = blockRecordTags(namedRecord);
+    const auto journalTags = blockRecordTags(journalRecord);
+    const auto entryTags = blockRecordTags(entryRecord);
+    CHECK(std::ranges::find(namedTags, 4) != namedTags.end());
+    CHECK(std::ranges::find(journalTags, 4) != journalTags.end());
+    CHECK(std::ranges::find(entryTags, 4) == entryTags.end());
+    CHECK(std::ranges::find(entryTags, 6) != entryTags.end());
+
+    auto invalidNamedRecord = namedRecord;
+    std::vector<std::uint8_t> packedDate;
+    appendU32(packedDate, 20260809);
+    appendField(invalidNamedRecord, 5, packedDate);
+    writeBlockRecord(notebookPath, named.metadata.id, std::move(invalidNamedRecord));
+
+    REQUIRE(session.open(notebookPath));
+    const auto invalid = session.page(named.metadata.id);
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().code == hieda::notebook::NotebookErrorCode::invalidNotebook);
+}
+
+TEST_CASE("Notebook history is chronological across Page kinds") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "notebook-history.hieda"));
+    const auto named = session.createPage("history", "History").value();
+    const hieda::notebook::JournalDate date{2026, 8, 9};
+    REQUIRE(session.insertEntry(named.metadata.id, std::nullopt, "named"));
+    REQUIRE(session.insertEntry(date, std::nullopt, "journal"));
+
+    REQUIRE(session.undoEdit());
+    CHECK(session.outline(date).value().entries.empty());
+    REQUIRE(session.outline(named.metadata.id).value().entries.size() == 1);
+    REQUIRE(session.undoEdit());
+    CHECK(session.outline(named.metadata.id).value().entries.empty());
+
+    REQUIRE(session.redoEdit());
+    REQUIRE(session.outline(named.metadata.id).value().entries.size() == 1);
+    REQUIRE(session.redoEdit());
+    REQUIRE(session.outline(date).value().entries.size() == 1);
+
+    REQUIRE(session.undoEdit());
+    REQUIRE(session.updateEntry(
+        session.outline(named.metadata.id).value().entries.front().metadata.id, "new branch"));
+    CHECK_FALSE(session.editCapabilities().value().canRedo);
+    const auto unavailable = session.redoEdit();
+    REQUIRE_FALSE(unavailable);
+    CHECK(unavailable.error().code == hieda::notebook::NotebookErrorCode::redoUnavailable);
+}
+
+TEST_CASE("an Entry subtree moves atomically between Named and Journal Pages") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "cross-page-move.hieda"));
+    const auto named = session.createPage("ideas", "Ideas").value();
+    const auto namedId = named.metadata.id;
+    auto source = session.insertEntry(namedId, std::nullopt, "parent").value();
+    const auto parent = source.entries.front();
+    source = session.insertEntry(namedId, parent.metadata.id, "child").value();
+    const auto child = source.entries.back();
+    source =
+        session.moveEntry(child.metadata.id, hieda::notebook::EntryMove::indent, child.authoredText)
+            .value();
+    const auto destinationDate = hieda::notebook::JournalDate{2026, 8, 9};
+
+    const auto moved = session.moveEntryToPage(parent.metadata.id, destinationDate, std::nullopt);
+
+    REQUIRE(moved);
+    REQUIRE(moved.value().size() == 2);
+    const auto emptiedSource = session.outline(namedId);
+    REQUIRE(emptiedSource);
+    CHECK(emptiedSource.value().entries.empty());
+    const auto destinationResult = session.outline(destinationDate);
+    REQUIRE(destinationResult);
+    const auto& destination = destinationResult.value();
+    REQUIRE(destination.entries.size() == 2);
+    CHECK(destination.kind == hieda::notebook::PageKind::journal);
+    CHECK(destination.entries[0].metadata.id == parent.metadata.id);
+    CHECK(destination.entries[0].metadata.createdAt == parent.metadata.createdAt);
+    CHECK(destination.entries[0].authoredText == parent.authoredText);
+    CHECK(destination.entries[1].metadata.id == child.metadata.id);
+    CHECK(destination.entries[1].metadata.createdAt == child.metadata.createdAt);
+    CHECK(destination.entries[1].parentEntry == parent.metadata.id);
+
+    REQUIRE(session.undoEdit());
+    CHECK(session.outline(namedId).value().entries == source.entries);
+    CHECK(session.outline(destinationDate).value().entries.empty());
+    REQUIRE(session.redoEdit());
+    CHECK(session.outline(namedId).value().entries.empty());
+    CHECK(session.outline(destinationDate).value().entries == destination.entries);
+
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
+    hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
+    const auto failedMove = session.moveEntryToPage(parent.metadata.id, namedId, std::nullopt);
+    REQUIRE_FALSE(failedMove);
+    CHECK(failedMove.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
+    CHECK(session.outline(namedId).value().entries.empty());
+    CHECK(session.outline(destinationDate).value().entries == destination.entries);
+
+    session.close();
+    REQUIRE(session.open(temporaryDirectory.path() / "cross-page-move.hieda"));
+    CHECK(session.outline(namedId).value().entries.empty());
+    CHECK(session.outline(destinationDate).value().entries == destination.entries);
+
+    const auto archive = session.createPage("archive", "Archive").value();
+    REQUIRE(session.moveEntryToPage(parent.metadata.id, archive.metadata.id, std::nullopt));
+    CHECK(session.outline(destinationDate).value().entries.empty());
+    const auto archived = session.outline(archive.metadata.id).value();
+    REQUIRE(archived.entries.size() == 2);
+    CHECK(archived.entries[0].metadata.id == parent.metadata.id);
+    CHECK(archived.entries[0].metadata.createdAt == parent.metadata.createdAt);
+    CHECK(archived.entries[1].metadata.id == child.metadata.id);
+    CHECK(archived.entries[1].parentEntry == parent.metadata.id);
 }

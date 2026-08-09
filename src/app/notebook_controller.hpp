@@ -150,6 +150,7 @@ class NotebookController final : public QObject {
     void rejectSave(const hieda::notebook::NotebookError& error);
     void loadJournalDate(const QDate& date);
     void loadPage(const hieda::notebook::BlockId& pageId);
+    [[nodiscard]] auto currentPageAddress() const -> hieda::notebook::PageAddress;
     void refreshPages();
     auto moveOutlineEntry(const QString& entryId, const QString& authoredText,
                           OutlineEntryMove movement, int cursorPosition) -> QVariantMap;
