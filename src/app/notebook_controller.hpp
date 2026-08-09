@@ -73,6 +73,7 @@ class PageHierarchyModel final : public QAbstractItemModel {
         -> QModelIndex override;
     [[nodiscard]] auto parent(const QModelIndex& child) const -> QModelIndex override;
     [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const -> int override;
+    [[nodiscard]] auto hasChildren(const QModelIndex& parent = {}) const -> bool override;
     [[nodiscard]] auto columnCount(const QModelIndex& parent = {}) const -> int override;
     [[nodiscard]] auto data(const QModelIndex& index, int role) const -> QVariant override;
     [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;

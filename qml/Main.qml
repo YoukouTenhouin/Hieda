@@ -730,28 +730,25 @@ ApplicationWindow {
                             Layout.fillHeight: true
                             model: notebookController.pageHierarchy
                             clip: true
+                            columnWidthProvider: function(column) { return pageList.width; }
                             Accessible.name: qsTr("Page Hierarchy")
                             onExpanded: function(row, depth) {
-                                const name = notebookController.pageHierarchy.pageName(modelIndex(row));
+                                const name = notebookController.pageHierarchy.pageName(pageList.index(row, 0));
                                 if (hierarchyExpandedNames.indexOf(name) < 0)
                                     hierarchyExpandedNames = hierarchyExpandedNames.concat([name]);
                             }
                             onCollapsed: function(row, recursively) {
-                                const name = notebookController.pageHierarchy.pageName(modelIndex(row));
+                                const name = notebookController.pageHierarchy.pageName(pageList.index(row, 0));
                                 hierarchyExpandedNames = hierarchyExpandedNames.filter(function(candidate) { return candidate !== name; });
                             }
                             onRowsChanged: Qt.callLater(window.restoreHierarchyExpansion)
                             Component.onCompleted: Qt.callLater(window.restoreHierarchyExpansion)
                             delegate: TreeViewDelegate {
                                 required property string pageName
-                                required property string localSegment
-                                required property string displayTitle
-                                required property bool materialized
                                 required property bool revealExpanded
                                 required property bool currentDestination
                                 required property string accessibleDescription
-                                width: TreeView.view.width
-                                text: materialized ? qsTr("%1 — %2").arg(displayTitle).arg(localSegment) : qsTr("%1 (Page Preview)").arg(localSegment)
+                                text: model.display
                                 highlighted: currentDestination
                                 Accessible.name: text
                                 Accessible.description: accessibleDescription

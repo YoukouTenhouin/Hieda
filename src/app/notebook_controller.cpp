@@ -284,6 +284,14 @@ auto PageHierarchyModel::rowCount(const QModelIndex& parentIndex) const -> int {
     return parentIndex.column() > 0 ? 0 : static_cast<int>(children(node(parentIndex)).size());
 }
 
+auto PageHierarchyModel::hasChildren(const QModelIndex& parentIndex) const -> bool {
+    if (!parentIndex.isValid()) {
+        return !roots_.empty();
+    }
+    const auto* parentNode = node(parentIndex);
+    return parentIndex.column() == 0 && parentNode != nullptr && parentNode->node.hasChildren;
+}
+
 auto PageHierarchyModel::columnCount(const QModelIndex& /*parent*/) const -> int {
     return 1;
 }
@@ -296,13 +304,18 @@ auto PageHierarchyModel::data(const QModelIndex& index, int role) const -> QVari
     const auto& hierarchyNode = item->node;
     const auto name = QString::fromUtf8(hierarchyNode.name);
     const auto segment = QString::fromUtf8(hierarchyNode.localSegment);
+    const auto title =
+        hierarchyNode.page ? QString::fromUtf8(hierarchyNode.page->displayTitle) : QString{};
     switch (role) {
+    case Qt::DisplayRole:
+        return hierarchyNode.page ? tr("%1 — %2").arg(title, segment)
+                                  : tr("%1 (Page Preview)").arg(segment);
     case PageNameRole:
         return name;
     case LocalSegmentRole:
         return segment;
     case DisplayTitleRole:
-        return hierarchyNode.page ? QString::fromUtf8(hierarchyNode.page->displayTitle) : QString{};
+        return title;
     case MaterializedRole:
         return hierarchyNode.page.has_value();
     case HasChildrenRole:
@@ -313,8 +326,7 @@ auto PageHierarchyModel::data(const QModelIndex& index, int role) const -> QVari
         return currentName_ == hierarchyNode.name;
     case AccessibleDescriptionRole:
         return hierarchyNode.page
-                   ? tr("Page %1, local segment %2, full Page Name %3")
-                         .arg(QString::fromUtf8(hierarchyNode.page->displayTitle), segment, name)
+                   ? tr("Page %1, local segment %2, full Page Name %3").arg(title, segment, name)
                    : tr("Page Preview %1, full Page Name %2, not materialized").arg(segment, name);
     default:
         return {};
@@ -322,11 +334,15 @@ auto PageHierarchyModel::data(const QModelIndex& index, int role) const -> QVari
 }
 
 auto PageHierarchyModel::roleNames() const -> QHash<int, QByteArray> {
-    return {
-        {PageNameRole, "pageName"},           {LocalSegmentRole, "localSegment"},
-        {DisplayTitleRole, "displayTitle"},   {MaterializedRole, "materialized"},
-        {HasChildrenRole, "hasChildren"},     {ExpandedRole, "revealExpanded"},
-        {SelectedRole, "currentDestination"}, {AccessibleDescriptionRole, "accessibleDescription"}};
+    return {{Qt::DisplayRole, "display"},
+            {PageNameRole, "pageName"},
+            {LocalSegmentRole, "localSegment"},
+            {DisplayTitleRole, "displayTitle"},
+            {MaterializedRole, "materialized"},
+            {HasChildrenRole, "hasChildren"},
+            {ExpandedRole, "revealExpanded"},
+            {SelectedRole, "currentDestination"},
+            {AccessibleDescriptionRole, "accessibleDescription"}};
 }
 
 void PageHierarchyModel::attach(hieda::notebook::NotebookSession* session) {

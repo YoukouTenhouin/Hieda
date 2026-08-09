@@ -47,6 +47,18 @@ void sendKeyClickWithoutProcessingEvents(QQuickWindow* window, Qt::Key key,
     QCoreApplication::sendEvent(window, &release);
 }
 
+void collectQmlWarnings(QQmlEngine& engine, QStringList& messages) {
+    QObject::connect(&engine, &QQmlEngine::warnings, &engine,
+                     [&messages](const QList<QQmlError>& warnings) -> void {
+                         for (const auto& warning : warnings) {
+                             const auto message = warning.toString();
+                             if (!message.isEmpty()) {
+                                 messages.append(message);
+                             }
+                         }
+                     });
+}
+
 } // namespace
 
 TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
@@ -258,7 +270,9 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     controller.navigateToPageName(QStringLiteral("work/client"));
     REQUIRE(controller.currentPagePreview());
 
+    QStringList qmlWarningMessages;
     QQmlEngine engine;
+    collectQmlWarnings(engine, qmlWarningMessages);
     engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
     QQmlComponent component(&engine,
                             QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
@@ -278,12 +292,24 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     REQUIRE(materializeButton != nullptr);
     REQUIRE(materializeDialog != nullptr);
     REQUIRE(materializeTitle != nullptr);
-    REQUIRE(waitUntil([pageList]() -> bool {
+    const auto hierarchyDelegateAt = [pageList](int row) -> QQuickItem* {
         QVariant item;
-        return QMetaObject::invokeMethod(pageList, "pageItemAt", Q_RETURN_ARG(QVariant, item),
-                                         Q_ARG(QVariant, 1)) &&
-               item.value<QObject*>() != nullptr;
-    }));
+        if (!QMetaObject::invokeMethod(pageList, "pageItemAt", Q_RETURN_ARG(QVariant, item),
+                                       Q_ARG(QVariant, row))) {
+            return nullptr;
+        }
+        return qobject_cast<QQuickItem*>(item.value<QObject*>());
+    };
+    REQUIRE(
+        waitUntil([&hierarchyDelegateAt]() -> bool { return hierarchyDelegateAt(1) != nullptr; }));
+    auto* clientDelegate = hierarchyDelegateAt(1);
+    REQUIRE(clientDelegate != nullptr);
+    CHECK(clientDelegate->property("text").toString() == QStringLiteral("client (Page Preview)"));
+    CHECK(clientDelegate->isVisible());
+    CHECK(clientDelegate->width() > 0);
+    CHECK(clientDelegate->height() > 0);
+    INFO(qmlWarningMessages.join(QLatin1Char('\n')).toStdString());
+    CHECK(qmlWarningMessages.isEmpty());
     CHECK(heading->property("text").toString() == QStringLiteral("work/client — Page Preview"));
     CHECK(materializeButton->isVisible());
 
@@ -293,6 +319,16 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     materializeTitle->setProperty("text", QStringLiteral("Client"));
     REQUIRE(QMetaObject::invokeMethod(materializeDialog, "accept"));
     REQUIRE(waitUntil([&controller]() -> bool { return !controller.currentPagePreview(); }));
+    REQUIRE(waitUntil([&hierarchyDelegateAt]() -> bool {
+        const auto* delegate = hierarchyDelegateAt(1);
+        return delegate != nullptr &&
+               delegate->property("text").toString() == QStringLiteral("Client — client");
+    }));
+    clientDelegate = hierarchyDelegateAt(1);
+    REQUIRE(clientDelegate != nullptr);
+    CHECK(clientDelegate->property("text").toString() == QStringLiteral("Client — client"));
+    CHECK(clientDelegate->isVisible());
+    CHECK(qmlWarningMessages.isEmpty());
     CHECK(controller.currentPageName() == QStringLiteral("work/client"));
     CHECK(heading->property("text").toString() == QStringLiteral("Client — work/client"));
 
@@ -301,11 +337,107 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     CHECK(deleteButton->isVisible());
     REQUIRE(QMetaObject::invokeMethod(deleteButton, "clicked"));
     REQUIRE(waitUntil([&controller]() -> bool { return controller.currentPagePreview(); }));
+    CHECK(qmlWarningMessages.isEmpty());
     CHECK(heading->property("text").toString() == QStringLiteral("work/client — Page Preview"));
     controller.closeNotebook();
     REQUIRE(waitUntil([root = root.get()]() -> bool {
         return root->property("hierarchyExpandedNames").toList().isEmpty();
     }));
+    INFO(qmlWarningMessages.join(QLatin1Char('\n')).toStdString());
+    CHECK(qmlWarningMessages.isEmpty());
+}
+
+TEST_CASE("the platform TreeViewDelegate expands lazy Page Hierarchy nodes") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("hierarchy-delegate.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"), QStringLiteral("Alpha")));
+    controller.navigateToPageName(QStringLiteral("work"));
+    auto* hierarchyModel = controller.pageHierarchy();
+    const auto rootIndex = hierarchyModel->index(0, 0);
+    REQUIRE(rootIndex.isValid());
+    CHECK(hierarchyModel->data(rootIndex, PageHierarchyModel::HasChildrenRole).toBool());
+    CHECK(hierarchyModel->canFetchMore(rootIndex));
+    CHECK(hierarchyModel->hasChildren(rootIndex));
+
+    QStringList qmlWarningMessages;
+    QQmlEngine engine;
+    collectQmlWarnings(engine, qmlWarningMessages);
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine);
+    component.setData(R"QML(
+import QtQuick
+import QtQuick.Controls
+
+ApplicationWindow {
+    width: 320
+    height: 240
+    visible: true
+
+    TreeView {
+        id: hierarchy
+        objectName: "hierarchy"
+        anchors.fill: parent
+        model: notebookController.pageHierarchy
+
+        function hierarchyItemAt(row) {
+            return itemAtCell(Qt.point(0, row));
+        }
+
+        function rootIsExpanded() {
+            return isExpanded(0)
+        }
+
+        delegate: TreeViewDelegate {
+            required property string pageName
+            onClicked: notebookController.navigateToPageName(pageName)
+        }
+    }
+}
+)QML",
+                      QUrl(QStringLiteral("inline:hierarchy-delegate.qml")));
+    REQUIRE(
+        waitUntil([&component]() -> bool { return component.status() != QQmlComponent::Loading; }));
+    INFO(component.errorString().toStdString());
+    REQUIRE(component.status() == QQmlComponent::Ready);
+    std::unique_ptr<QObject> root(component.create());
+    REQUIRE(root != nullptr);
+    auto* hierarchy = root->findChild<QQuickItem*>(QStringLiteral("hierarchy"));
+    REQUIRE(hierarchy != nullptr);
+    REQUIRE(waitUntil([hierarchy]() -> bool {
+        QVariant item;
+        return QMetaObject::invokeMethod(hierarchy, "hierarchyItemAt", Q_RETURN_ARG(QVariant, item),
+                                         Q_ARG(QVariant, 0)) &&
+               item.value<QObject*>() != nullptr;
+    }));
+    QVariant item;
+    REQUIRE(QMetaObject::invokeMethod(hierarchy, "hierarchyItemAt", Q_RETURN_ARG(QVariant, item),
+                                      Q_ARG(QVariant, 0)));
+    auto* delegate = item.value<QObject*>();
+    REQUIRE(delegate != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    auto* indicator = qobject_cast<QQuickItem*>(delegate->property("indicator").value<QObject*>());
+    REQUIRE(window != nullptr);
+    REQUIRE(indicator != nullptr);
+    const auto indicatorCenter = indicator->mapToItem(
+        window->contentItem(), QPointF(indicator->width() / 2, indicator->height() / 2));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, indicatorCenter.toPoint());
+    REQUIRE(waitUntil([hierarchy]() -> bool {
+        QVariant expanded;
+        return QMetaObject::invokeMethod(hierarchy, "rootIsExpanded",
+                                         Q_RETURN_ARG(QVariant, expanded)) &&
+               expanded.toBool();
+    }));
+    REQUIRE(waitUntil([hierarchy]() -> bool {
+        QVariant child;
+        return QMetaObject::invokeMethod(hierarchy, "hierarchyItemAt",
+                                         Q_RETURN_ARG(QVariant, child), Q_ARG(QVariant, 1)) &&
+               child.value<QObject*>() != nullptr;
+    }));
+    INFO(qmlWarningMessages.join(QLatin1Char('\n')).toStdString());
+    CHECK(qmlWarningMessages.isEmpty());
 }
 
 TEST_CASE("the Page editor preserves consecutive outline key presses") {

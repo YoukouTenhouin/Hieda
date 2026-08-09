@@ -228,6 +228,8 @@ TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy preview
     auto root = hierarchy->index(0, 0);
     CHECK(hierarchy->data(root, PageHierarchyModel::PageNameRole).toString() ==
           QStringLiteral("work"));
+    CHECK(hierarchy->data(root, Qt::DisplayRole).toString() ==
+          QStringLiteral("work (Page Preview)"));
     CHECK_FALSE(hierarchy->data(root, PageHierarchyModel::MaterializedRole).toBool());
     CHECK(hierarchy->data(root, PageHierarchyModel::HasChildrenRole).toBool());
     auto client = hierarchy->index(0, 0, root);
@@ -235,6 +237,8 @@ TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy preview
           QStringLiteral("client"));
     CHECK(hierarchy->data(client, PageHierarchyModel::PageNameRole).toString() ==
           QStringLiteral("work/client"));
+    CHECK(hierarchy->data(client, Qt::DisplayRole).toString() ==
+          QStringLiteral("client (Page Preview)"));
     CHECK_FALSE(hierarchy->data(client, PageHierarchyModel::MaterializedRole).toBool());
     CHECK(hierarchy->data(client, PageHierarchyModel::AccessibleDescriptionRole)
               .toString()
@@ -253,6 +257,7 @@ TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy preview
     CHECK_FALSE(createdId.isEmpty());
     client = hierarchy->index(0, 0, hierarchy->index(0, 0));
     CHECK(hierarchy->data(client, PageHierarchyModel::MaterializedRole).toBool());
+    CHECK(hierarchy->data(client, Qt::DisplayRole).toString() == QStringLiteral("Client — client"));
     REQUIRE(controller.deleteCurrentPage());
     CHECK(controller.currentPagePreview());
     CHECK(controller.currentPageName() == QStringLiteral("work/client"));
