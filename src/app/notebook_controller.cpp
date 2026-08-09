@@ -545,6 +545,9 @@ auto NotebookController::journalDate() const -> QDate {
 auto NotebookController::outlineEntries() -> QAbstractItemModel* {
     return &outlineEntries_;
 }
+auto NotebookController::pagePreviewSources() -> QAbstractItemModel* {
+    return &pagePreviewSources_;
+}
 auto NotebookController::pageHierarchy() -> QAbstractItemModel* {
     return &pageHierarchy_;
 }
@@ -631,6 +634,7 @@ void NotebookController::closeNotebook() {
     pageChoices_.clear();
     pageIds_.clear();
     outlineEntries_.setEntries({});
+    pagePreviewSources_.setEntries({});
     pageHierarchy_.clear();
     emit stateChanged();
     emit destinationChanged();
@@ -1486,6 +1490,7 @@ void NotebookController::loadJournalDate(const QDate& date) {
         currentPageName_.clear();
         currentPageTitle_.clear();
         outlineEntries_.setEntries(asOutlineEntries(result.value().entries));
+        pagePreviewSources_.setEntries({});
         static_cast<void>(pageHierarchy_.refresh({}));
         emit destinationChanged();
         emit stateChanged();
@@ -1508,6 +1513,7 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
         currentPageName_ = QString::fromUtf8(result.value().name);
         currentPageTitle_ = QString::fromUtf8(result.value().displayTitle);
         outlineEntries_.setEntries(asOutlineEntries(result.value().entries));
+        pagePreviewSources_.setEntries({});
         static_cast<void>(pageHierarchy_.refresh(currentPageName_));
         error_.clear();
         emit destinationChanged();
@@ -1533,8 +1539,9 @@ void NotebookController::loadPagePreview(const QString& pageName) {
     journalDate_ = {};
     currentPageName_ = pageName;
     currentPageTitle_.clear();
-    outlineEntries_.setEntries(preview ? asOutlineEntries(preview.value().sources)
-                                       : std::vector<OutlineEntry>{});
+    outlineEntries_.setEntries({});
+    pagePreviewSources_.setEntries(preview ? asOutlineEntries(preview.value().sources)
+                                           : std::vector<OutlineEntry>{});
     error_.clear();
     static_cast<void>(pageHierarchy_.refresh(currentPageName_));
     emit destinationChanged();

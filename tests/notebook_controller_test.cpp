@@ -296,15 +296,18 @@ TEST_CASE("the Qt adapter follows committed Page Links and presents unresolved s
         controller.followPageLink(sourceId, 20, QStringLiteral("[[target]] and [[missing/page]]")));
     CHECK(controller.currentPagePreview());
     CHECK(controller.currentPageName() == QStringLiteral("missing/page"));
-    REQUIRE(controller.outlineEntries()->rowCount() == 1);
-    CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+    CHECK(controller.outlineEntries()->rowCount() == 0);
+    REQUIRE(controller.pagePreviewSources()->rowCount() == 1);
+    CHECK(controller.pagePreviewSources()
+              ->data(controller.pagePreviewSources()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("[[target]] and [[missing/page]]"));
 
     controller.navigateToPageName(QStringLiteral("source"));
     controller.navigateToPageName(QStringLiteral("missing/page"));
     CHECK(controller.currentPagePreview());
-    CHECK(controller.outlineEntries()->rowCount() == 1);
+    CHECK(controller.outlineEntries()->rowCount() == 0);
+    CHECK(controller.pagePreviewSources()->rowCount() == 1);
 
     controller.navigateToPageName(QStringLiteral("source"));
     CHECK_FALSE(controller.followPageLink(sourceId, 3, QStringLiteral("draft [[target]]")));

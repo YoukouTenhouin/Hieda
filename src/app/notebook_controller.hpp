@@ -117,6 +117,7 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
     Q_PROPERTY(QDate journalDate READ journalDate NOTIFY destinationChanged)
     Q_PROPERTY(QAbstractItemModel* outlineEntries READ outlineEntries CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* pagePreviewSources READ pagePreviewSources CONSTANT)
     Q_PROPERTY(QAbstractItemModel* pageHierarchy READ pageHierarchy CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
@@ -136,6 +137,7 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto errorMessage() const -> QString;
     [[nodiscard]] auto journalDate() const -> QDate;
     [[nodiscard]] auto outlineEntries() -> QAbstractItemModel*;
+    [[nodiscard]] auto pagePreviewSources() -> QAbstractItemModel*;
     [[nodiscard]] auto pageHierarchy() -> QAbstractItemModel*;
     [[nodiscard]] auto canUndo() const -> bool;
     [[nodiscard]] auto canRedo() const -> bool;
@@ -236,6 +238,7 @@ class NotebookController final : public QObject {
     QStringList pageChoices_;
     std::vector<hieda::notebook::BlockId> pageIds_;
     OutlineEntryModel outlineEntries_;
+    OutlineEntryModel pagePreviewSources_;
     PageHierarchyModel pageHierarchy_;
     QTimer midnightTimer_;
 };

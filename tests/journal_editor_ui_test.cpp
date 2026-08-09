@@ -368,8 +368,10 @@ TEST_CASE(
     REQUIRE(root != nullptr);
     auto* window = qobject_cast<QQuickWindow*>(root.get());
     auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* previewSourceList = root->findChild<QQuickItem*>(QStringLiteral("pagePreviewSourceList"));
     REQUIRE(window != nullptr);
     REQUIRE(outlineList != nullptr);
+    REQUIRE(previewSourceList != nullptr);
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
@@ -406,11 +408,19 @@ TEST_CASE(
     QTest::keyClick(window, Qt::Key_Return, structureModifier);
     REQUIRE(waitUntil([&controller]() -> bool { return controller.currentPagePreview(); }));
     CHECK(controller.currentPageName() == QStringLiteral("missing/page"));
-    REQUIRE(waitUntil([&entryAt]() -> bool { return entryAt(0) != nullptr; }));
-    entry = entryAt(0);
-    editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
-    REQUIRE(editor != nullptr);
-    CHECK(editor->property("readOnly").toBool());
+    REQUIRE(waitUntil([outlineList, previewSourceList]() -> bool {
+        return outlineList->property("count").toInt() == 0 &&
+               previewSourceList->property("count").toInt() == 1;
+    }));
+    CHECK(previewSourceList->isVisible());
+    QVariant previewSourceValue;
+    REQUIRE(QMetaObject::invokeMethod(previewSourceList, "sourceItemAt",
+                                      Q_RETURN_ARG(QVariant, previewSourceValue),
+                                      Q_ARG(QVariant, 0)));
+    auto* previewSource = qobject_cast<QQuickItem*>(previewSourceValue.value<QObject*>());
+    REQUIRE(previewSource != nullptr);
+    CHECK(previewSource->property("text").toString().contains(QStringLiteral("missing/page")));
+    CHECK(root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) == nullptr);
 
     controller.navigateToPageName(QStringLiteral("source"));
     REQUIRE(waitUntil([&entryAt]() -> bool { return entryAt(0) != nullptr; }));

@@ -805,7 +805,10 @@ ApplicationWindow {
 
                     header: Item {
                         width: outlineList.width
-                        height: dateHeading.implicitHeight + destinationActions.implicitHeight + (window.uiSpacing * 7)
+                        height: dateHeading.implicitHeight + destinationActions.implicitHeight +
+                            (window.uiSpacing * 7) + (notebookController.currentPagePreview ?
+                            previewSourcesHeading.implicitHeight + pagePreviewSourceList.height +
+                            (window.uiSpacing * 3) : 0)
 
                         Label {
                             id: dateHeading
@@ -840,6 +843,57 @@ ApplicationWindow {
                                 visible: !notebookController.isJournalPage && !notebookController.currentPagePreview
                                 text: qsTr("Delete Page")
                                 onClicked: notebookController.deleteCurrentPage()
+                            }
+                        }
+
+                        Label {
+                            id: previewSourcesHeading
+
+                            objectName: "pagePreviewSourcesHeading"
+                            anchors.top: destinationActions.bottom
+                            anchors.topMargin: window.uiSpacing * 2
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            visible: notebookController.currentPagePreview
+                            text: pagePreviewSourceList.count === 0 ? qsTr("No unresolved Page Links") : qsTr("Linked references")
+                            font.weight: Font.DemiBold
+                            Accessible.role: Accessible.Heading
+                        }
+
+                        ListView {
+                            id: pagePreviewSourceList
+
+                            function sourceItemAt(row) {
+                                return itemAtIndex(row);
+                            }
+
+                            objectName: "pagePreviewSourceList"
+                            anchors.top: previewSourcesHeading.bottom
+                            anchors.topMargin: window.uiSpacing
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            height: visible ? contentHeight : 0
+                            visible: notebookController.currentPagePreview
+                            interactive: false
+                            spacing: window.uiSpacing
+                            model: notebookController.pagePreviewSources
+                            Accessible.role: Accessible.List
+                            Accessible.name: qsTr("Unresolved Page Link sources")
+
+                            delegate: Label {
+                                required property string entryId
+                                required property string authoredText
+
+                                width: pagePreviewSourceList.width
+                                padding: window.uiSpacing
+                                text: notebookController.committedEntryPresentation(entryId, authoredText)
+                                textFormat: Text.StyledText
+                                wrapMode: Text.Wrap
+                                background: Rectangle {
+                                    color: palette.alternateBase
+                                }
+                                Accessible.role: Accessible.ListItem
+                                Accessible.name: text
                             }
                         }
 
