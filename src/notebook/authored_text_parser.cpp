@@ -2,6 +2,7 @@
 #include "authored_text_parser.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <ranges>
 
 namespace hieda::notebook::authored_text {
@@ -41,8 +42,35 @@ auto propertyDelimiter(std::string_view line, std::size_t start) -> std::size_t 
                : std::string_view::npos;
 }
 
+auto parseUuid(std::string_view value) -> std::optional<BlockId> {
+    if (value.size() != 36) {
+        return std::nullopt;
+    }
+    BlockId identifier;
+    std::size_t byteIndex = 0;
+    for (std::size_t index = 0; index < value.size();) {
+        if (index == 8 || index == 13 || index == 18 || index == 23) {
+            if (value[index++] != '-') {
+                return std::nullopt;
+            }
+            continue;
+        }
+        unsigned int byte = 0;
+        const auto* begin = value.data() + index;
+        const auto* end = begin + 2;
+        const auto [position, error] = std::from_chars(begin, end, byte, 16);
+        if (error != std::errc{} || position != end || byteIndex >= identifier.bytes.size()) {
+            return std::nullopt;
+        }
+        identifier.bytes[byteIndex++] = static_cast<std::byte>(byte);
+        index += 2;
+    }
+    return byteIndex == identifier.bytes.size() ? std::optional{identifier} : std::nullopt;
+}
+
 void scanInline(std::string_view source, std::size_t begin, std::size_t end,
-                std::vector<PageLinkOccurrence>& links) {
+                std::vector<PageLinkOccurrence>* pageLinks,
+                std::vector<BlockReferenceOccurrence>* blockReferences) {
     auto index = begin;
     while (index < end) {
         if (source[index] == '\\') {
@@ -71,17 +99,23 @@ void scanInline(std::string_view source, std::size_t begin, std::size_t end,
             break;
         }
         const auto body = source.substr(index + 2, closer - index - 2);
-        if (validPageName(body)) {
-            links.push_back({index, closer + 2 - index, std::string(body)});
+        if (pageLinks != nullptr && validPageName(body)) {
+            pageLinks->push_back({index, closer + 2 - index, std::string(body)});
+        }
+        constexpr std::string_view blockPrefix = "block:";
+        const auto uuid =
+            body.starts_with(blockPrefix) ? body.substr(blockPrefix.size()) : std::string_view{};
+        if (blockReferences != nullptr) {
+            if (const auto targetId = parseUuid(uuid)) {
+                blockReferences->push_back({index, closer + 2 - index, *targetId});
+            }
         }
         index = closer + 2;
     }
 }
 
-} // namespace
-
-auto pageLinks(std::string_view source) -> std::vector<PageLinkOccurrence> {
-    std::vector<PageLinkOccurrence> links;
+void scan(std::string_view source, std::vector<PageLinkOccurrence>* pageLinks,
+          std::vector<BlockReferenceOccurrence>* blockReferences) {
     for (std::size_t lineStart = 0; lineStart <= source.size();) {
         const auto newline = source.find('\n', lineStart);
         const auto lineEnd = newline == std::string_view::npos ? source.size() : newline;
@@ -93,14 +127,27 @@ auto pageLinks(std::string_view source) -> std::vector<PageLinkOccurrence> {
             const auto inlineStart = escapedProperty == std::string_view::npos
                                          ? lineStart
                                          : lineStart + escapedProperty + 2;
-            scanInline(source, inlineStart, lineEnd, links);
+            scanInline(source, inlineStart, lineEnd, pageLinks, blockReferences);
         }
         if (newline == std::string_view::npos) {
             break;
         }
         lineStart = newline + 1;
     }
+}
+
+} // namespace
+
+auto pageLinks(std::string_view source) -> std::vector<PageLinkOccurrence> {
+    std::vector<PageLinkOccurrence> links;
+    scan(source, &links, nullptr);
     return links;
+}
+
+auto blockReferences(std::string_view source) -> std::vector<BlockReferenceOccurrence> {
+    std::vector<BlockReferenceOccurrence> references;
+    scan(source, nullptr, &references);
+    return references;
 }
 
 } // namespace hieda::notebook::authored_text
