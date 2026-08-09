@@ -52,6 +52,9 @@ ApplicationWindow {
     }
 
     function beginDraft(afterId) {
+        if (notebookController.currentPagePreview)
+            return ;
+
         draftText = "";
         draftAfterId = afterId;
         Qt.callLater(function() {
@@ -60,6 +63,9 @@ ApplicationWindow {
     }
 
     function beginTrailingDraft() {
+        if (notebookController.currentPagePreview)
+            return ;
+
         if (activeOutlineEditor && activeOutlineEditor.isDraftEditor && !activeOutlineEditor.commit(false))
             return ;
 
@@ -181,6 +187,9 @@ ApplicationWindow {
     }
 
     function cutOutlineSelection() {
+        if (notebookController.currentPagePreview)
+            return ;
+
         if (!copyOutlineSelection())
             return ;
 
@@ -394,7 +403,7 @@ ApplicationWindow {
         text: qsTr("Cu&t")
         icon.name: "edit-cut"
         shortcut: StandardKey.Cut
-        enabled: window.outlineSelectionCount > 0 || (window.activeOutlineEditor && window.activeOutlineEditor.activeFocus && window.activeOutlineEditor.selectedText.length > 0)
+        enabled: !notebookController.currentPagePreview && (window.outlineSelectionCount > 0 || (window.activeOutlineEditor && window.activeOutlineEditor.activeFocus && window.activeOutlineEditor.selectedText.length > 0))
         onTriggered: {
             if (window.outlineSelectionCount > 0)
                 window.cutOutlineSelection();
@@ -852,7 +861,7 @@ ApplicationWindow {
                         readonly property bool outlineSelected: window.isOutlineSelected(entryId)
                         readonly property real outlineIndent: depth * window.uiSpacing * 3
                         readonly property var contextMenu: entryMenu
-                        readonly property real editorHeight: Math.max(entryEditor.contentHeight, entryEditor.font.pixelSize * 1.45) + (window.uiSpacing * 0.7)
+                        readonly property real editorHeight: Math.max(entryEditor.contentHeight, committedPresentation.contentHeight, entryEditor.font.pixelSize * 1.45) + (window.uiSpacing * 0.7)
 
                         function focusEditor(cursorPosition) {
                             window.clearOutlineSelection();
@@ -1014,13 +1023,22 @@ ApplicationWindow {
                                     action: copyAction
                                 }
 
+                                MenuItem {
+                                    objectName: "followPageLinkMenuItem-" + entryRoot.index
+                                    text: qsTr("Follow Page Link")
+                                    enabled: !entryEditor.hasPendingEdit
+                                    onTriggered: notebookController.followPageLink(
+                                        entryRoot.entryId, entryEditor.cursorPosition,
+                                        entryEditor.text)
+                                }
+
                                 MenuSeparator {
                                 }
 
                                 MenuItem {
                                     objectName: "journalIndentMenuItem-" + entryRoot.index
                                     text: qsTr("Indent")
-                                    enabled: entryRoot.canIndent && window.outlineSelectionRoots.length <= 1
+                                    enabled: !notebookController.currentPagePreview && entryRoot.canIndent && window.outlineSelectionRoots.length <= 1
                                     onTriggered: {
                                         if (!entryRoot.beginMenuStructureEdit())
                                             return ;
@@ -1032,7 +1050,7 @@ ApplicationWindow {
 
                                 MenuItem {
                                     text: qsTr("Outdent")
-                                    enabled: entryRoot.canOutdent && window.outlineSelectionRoots.length <= 1
+                                    enabled: !notebookController.currentPagePreview && entryRoot.canOutdent && window.outlineSelectionRoots.length <= 1
                                     onTriggered: {
                                         if (!entryRoot.beginMenuStructureEdit())
                                             return ;
@@ -1044,7 +1062,7 @@ ApplicationWindow {
 
                                 MenuItem {
                                     text: qsTr("Move Up")
-                                    enabled: entryRoot.canMoveUp && window.outlineSelectionRoots.length <= 1
+                                    enabled: !notebookController.currentPagePreview && entryRoot.canMoveUp && window.outlineSelectionRoots.length <= 1
                                     onTriggered: {
                                         if (!entryRoot.beginMenuStructureEdit())
                                             return ;
@@ -1056,7 +1074,7 @@ ApplicationWindow {
 
                                 MenuItem {
                                     text: qsTr("Move Down")
-                                    enabled: entryRoot.canMoveDown && window.outlineSelectionRoots.length <= 1
+                                    enabled: !notebookController.currentPagePreview && entryRoot.canMoveDown && window.outlineSelectionRoots.length <= 1
                                     onTriggered: {
                                         if (!entryRoot.beginMenuStructureEdit())
                                             return ;
@@ -1071,7 +1089,7 @@ ApplicationWindow {
 
                                 MenuItem {
                                     text: qsTr("Delete Entry")
-                                    enabled: entryRoot.canDelete
+                                    enabled: !notebookController.currentPagePreview && entryRoot.canDelete
                                     onTriggered: {
                                         window.deferJournalFocusCommit = false;
                                         if (!entryEditor.commit(false)) {
@@ -1086,7 +1104,7 @@ ApplicationWindow {
                                 }
                             }
 
-                            TextArea {
+                            TextEdit {
                                 id: entryEditor
 
                                 readonly property bool isDraftEditor: false
@@ -1106,6 +1124,8 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 Layout.alignment: Qt.AlignTop
                                 text: entryRoot.authoredText
+                                readOnly: notebookController.currentPagePreview
+                                color: committedPresentation.visible ? "transparent" : palette.text
                                 wrapMode: TextEdit.Wrap
                                 selectByMouse: true
                                 padding: 0
@@ -1148,6 +1168,15 @@ ApplicationWindow {
                                             event.accepted = true;
 
                                         return ;
+                                    } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && (event.modifiers & window.structureModifier)) {
+                                        event.accepted = true;
+                                        if (!hasPendingEdit)
+                                            notebookController.followPageLink(entryRoot.entryId, cursorPosition, text);
+                                    } else if (notebookController.currentPagePreview &&
+                                               (event.key === Qt.Key_Return || event.key === Qt.Key_Enter ||
+                                                event.key === Qt.Key_Backspace || event.key === Qt.Key_Delete ||
+                                                event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab)) {
+                                        event.accepted = true;
                                     } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && window.textModifiers(event.modifiers) === Qt.NoModifier) {
                                         event.accepted = true;
                                         window.activeOutlineEditor = null;
@@ -1198,7 +1227,38 @@ ApplicationWindow {
                                     }
                                 }
 
-                                background: Item {
+                                Label {
+                                    id: committedPresentation
+
+                                    objectName: "outlineEntryPresentation-" + entryRoot.index
+                                    anchors.fill: parent
+                                    visible: !entryEditor.activeFocus || notebookController.currentPagePreview
+                                    z: 1
+                                    text: notebookController.committedEntryPresentation(
+                                        entryRoot.entryId, entryRoot.authoredText)
+                                    textFormat: Text.StyledText
+                                    wrapMode: Text.Wrap
+                                    color: palette.text
+                                    Accessible.name: text
+                                    onLinkActivated: function(link) {
+                                        notebookController.followPageLink(
+                                            entryRoot.entryId, Number(link),
+                                            entryRoot.authoredText);
+                                    }
+
+                                    TapHandler {
+                                        onTapped: function(eventPoint) {
+                                            if (notebookController.currentPagePreview ||
+                                                committedPresentation.linkAt(
+                                                    eventPoint.position.x,
+                                                    eventPoint.position.y).length > 0)
+                                                return ;
+
+                                            entryRoot.focusEditor(entryEditor.positionAt(
+                                                eventPoint.position.x,
+                                                eventPoint.position.y));
+                                        }
+                                    }
                                 }
 
                             }
@@ -1214,14 +1274,14 @@ ApplicationWindow {
                             width: parent.width - x
                             insertionAfterId: entryRoot.entryId
                             anchorRow: entryRoot.index
-                            activeDraft: entryRoot.index + 1 < outlineList.count && window.draftAfterId === entryRoot.entryId
+                            activeDraft: !notebookController.currentPagePreview && entryRoot.index + 1 < outlineList.count && window.draftAfterId === entryRoot.entryId
                         }
 
                     }
 
                     footer: Item {
                         readonly property string lastEntryId: outlineList.count > 0 ? notebookController.outlineEntryId(outlineList.count - 1) : ""
-                        readonly property bool hasTrailingDraft: window.draftAfterId === "" || window.draftAfterId === lastEntryId
+                        readonly property bool hasTrailingDraft: !notebookController.currentPagePreview && (window.draftAfterId === "" || window.draftAfterId === lastEntryId)
 
                         width: outlineList.width
                         height: Math.max(trailingDraft.implicitHeight + (window.uiSpacing * 10), outlineList.height * 0.45)
@@ -1389,7 +1449,7 @@ ApplicationWindow {
 
             }
 
-            TextArea {
+            TextEdit {
                 id: draftEditor
 
                 readonly property bool isDraftEditor: true
@@ -1476,9 +1536,6 @@ ApplicationWindow {
 
                         }
                     }
-                }
-
-                background: Item {
                 }
 
             }

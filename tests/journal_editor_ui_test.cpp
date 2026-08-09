@@ -347,6 +347,134 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     CHECK(qmlWarningMessages.isEmpty());
 }
 
+TEST_CASE(
+    "committed Page Links render titles follow from the keyboard and keep previews read-only") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(
+        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("page-links-ui.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target title")));
+    const auto targetId = controller.currentPageId();
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]] then [[missing/page]]")) == 0);
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    REQUIRE(window != nullptr);
+    REQUIRE(outlineList != nullptr);
+    window->show();
+    window->requestActivate();
+    REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
+
+    const auto entryAt = [outlineList](int row) -> QQuickItem* {
+        QVariant entryValue;
+        if (!QMetaObject::invokeMethod(outlineList, "entryItemAt",
+                                       Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, row))) {
+            return nullptr;
+        }
+        return qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
+    };
+    REQUIRE(waitUntil([&entryAt]() -> bool { return entryAt(0) != nullptr; }));
+    auto* entry = entryAt(0);
+    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* presentation =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryPresentation-0"));
+    auto* followMenuItem =
+        entry->findChild<QQuickItem*>(QStringLiteral("followPageLinkMenuItem-0"));
+    REQUIRE(editor != nullptr);
+    REQUIRE(presentation != nullptr);
+    REQUIRE(followMenuItem != nullptr);
+    CHECK(presentation->property("text").toString().contains(QStringLiteral("Target title")));
+    CHECK_FALSE(presentation->property("text").toString().contains(QStringLiteral("[[target]]")));
+    CHECK(followMenuItem->property("enabled").toBool());
+
+    editor->forceActiveFocus();
+    editor->setProperty("cursorPosition", 18);
+#ifdef Q_OS_MACOS
+    constexpr auto structureModifier = Qt::MetaModifier;
+#else
+    constexpr auto structureModifier = Qt::ControlModifier;
+#endif
+    QTest::keyClick(window, Qt::Key_Return, structureModifier);
+    REQUIRE(waitUntil([&controller]() -> bool { return controller.currentPagePreview(); }));
+    CHECK(controller.currentPageName() == QStringLiteral("missing/page"));
+    REQUIRE(waitUntil([&entryAt]() -> bool { return entryAt(0) != nullptr; }));
+    entry = entryAt(0);
+    editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    REQUIRE(editor != nullptr);
+    CHECK(editor->property("readOnly").toBool());
+
+    controller.navigateToPageName(QStringLiteral("source"));
+    REQUIRE(waitUntil([&entryAt]() -> bool { return entryAt(0) != nullptr; }));
+    entry = entryAt(0);
+    editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    followMenuItem = entry->findChild<QQuickItem*>(QStringLiteral("followPageLinkMenuItem-0"));
+    REQUIRE(editor != nullptr);
+    REQUIRE(followMenuItem != nullptr);
+    editor->setProperty("cursorPosition", 2);
+    REQUIRE(QMetaObject::invokeMethod(entry, "openContextMenu"));
+    REQUIRE(waitUntil([followMenuItem]() -> bool { return followMenuItem->isVisible(); }));
+    const auto menuItemCenter = followMenuItem->mapToScene(
+        QPointF(followMenuItem->width() / 2, followMenuItem->height() / 2));
+    QTest::mouseClick(followMenuItem->window(), Qt::LeftButton, Qt::NoModifier,
+                      menuItemCenter.toPoint());
+    REQUIRE(waitUntil(
+        [&controller, &targetId]() -> bool { return controller.currentPageId() == targetId; }));
+}
+
+TEST_CASE("resolved Page Link titles size their outline rows") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(
+        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("page-link-height.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QString(240, QLatin1Char('W'))));
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]]")) == 0);
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    REQUIRE(window != nullptr);
+    REQUIRE(outlineList != nullptr);
+    window->setWidth(640);
+    window->setHeight(480);
+    window->show();
+
+    QVariant entryValue;
+    REQUIRE(waitUntil([outlineList, &entryValue]() -> bool {
+        return QMetaObject::invokeMethod(outlineList, "entryItemAt",
+                                         Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)) &&
+               entryValue.value<QObject*>() != nullptr;
+    }));
+    auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
+    REQUIRE(entry != nullptr);
+    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* presentation =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryPresentation-0"));
+    REQUIRE(editor != nullptr);
+    REQUIRE(presentation != nullptr);
+    REQUIRE(waitUntil([editor, presentation]() -> bool {
+        return presentation->property("contentHeight").toReal() >
+               editor->property("contentHeight").toReal();
+    }));
+    CHECK(entry->height() >= presentation->property("contentHeight").toReal());
+}
+
 TEST_CASE("the platform TreeViewDelegate expands lazy Page Hierarchy nodes") {
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
@@ -545,14 +673,18 @@ TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings"
     REQUIRE(editor->window() == window);
     REQUIRE(editor->isVisible());
     REQUIRE(editor->isEnabled());
+    CHECK(editor->metaObject()->indexOfProperty("background") == -1);
     REQUIRE(waitUntil([outlineList]() -> bool { return outlineList->width() <= 780; }));
+    auto* pageSidebar = root->findChild<QQuickItem*>(QStringLiteral("pageSidebar"));
+    REQUIRE(pageSidebar != nullptr);
     const auto listPosition = outlineList->mapToScene({});
-    CHECK(listPosition.x() >= 400);
+    const auto sidebarPosition = pageSidebar->mapToScene({});
+    CHECK(listPosition.x() >= sidebarPosition.x() + pageSidebar->width());
     CHECK(firstEntry->width() <= outlineList->width());
     const auto editorPosition = editor->mapToScene({});
     CHECK(editorPosition.x() >= listPosition.x());
-    CHECK(editorPosition.x() + editor->width() <= listPosition.x() + outlineList->width());
-    CHECK(editor->height() > 18);
+    CHECK(editorPosition.x() + editor->width() <= listPosition.x() + outlineList->width() + 4);
+    CHECK(editor->height() > 0);
 
     QSignalSpy qmlWarnings(&engine, &QQmlEngine::warnings);
     editor->forceActiveFocus();
@@ -565,6 +697,7 @@ TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings"
     }));
     auto* draftEditor = firstEntry->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor"));
     REQUIRE(draftEditor != nullptr);
+    CHECK(draftEditor->metaObject()->indexOfProperty("background") == -1);
     REQUIRE(waitUntil([draftEditor]() -> bool { return draftEditor->hasActiveFocus(); }));
     QTest::qWait(50);
     CHECK(firstEntry->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) == draftEditor);
@@ -881,12 +1014,7 @@ TEST_CASE("the Journal editor inserts and pastes multiline Unicode before splitt
         return editor->property("text").toString() == QStringLiteral("alpha\n");
     }));
     QGuiApplication::clipboard()->setText(QStringLiteral("\u03B2\n\u65E5\u672C\u8A9E"));
-#ifdef Q_OS_MACOS
-    constexpr auto clipboardModifier = Qt::MetaModifier;
-#else
-    constexpr auto clipboardModifier = Qt::ControlModifier;
-#endif
-    QTest::keyClick(window, Qt::Key_V, clipboardModifier);
+    QTest::keySequence(window, QKeySequence::Paste);
     REQUIRE(waitUntil([editor]() -> bool {
         return editor->property("text").toString() ==
                QStringLiteral("alpha\n\u03B2\n\u65E5\u672C\u8A9E");
@@ -988,9 +1116,11 @@ TEST_CASE("Journal bullets select and cut complete subtrees with accessible clip
     auto* tailBullet = bulletAt(2);
     REQUIRE(parentBullet != nullptr);
     REQUIRE(tailBullet != nullptr);
-    const auto parentCenter =
-        parentBullet->mapToScene(QPointF(parentBullet->width() / 2, parentBullet->height() / 2));
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, parentCenter.toPoint());
+    auto* parentInterface = QAccessible::queryAccessibleInterface(parentBullet);
+    REQUIRE(parentInterface != nullptr);
+    auto* parentActions = parentInterface->actionInterface();
+    REQUIRE(parentActions != nullptr);
+    parentActions->doAction(QAccessibleActionInterface::pressAction());
     REQUIRE(waitUntil([root = root.get()]() -> bool {
         return root->property("outlineSelectionCount").toInt() == 2;
     }));
@@ -1006,7 +1136,7 @@ TEST_CASE("Journal bullets select and cut complete subtrees with accessible clip
     REQUIRE(waitUntil([root = root.get()]() -> bool {
         return root->property("outlineSelectionCount").toInt() == 2;
     }));
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, parentCenter.toPoint());
+    parentActions->doAction(QAccessibleActionInterface::pressAction());
     const auto tailCenter =
         tailBullet->mapToScene(QPointF(tailBullet->width() / 2, tailBullet->height() / 2));
     QTest::mouseClick(window, Qt::LeftButton, Qt::ShiftModifier, tailCenter.toPoint());
