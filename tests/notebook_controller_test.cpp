@@ -302,8 +302,9 @@ TEST_CASE("the Qt adapter follows committed Page Links and presents unresolved s
               ->data(controller.pagePreviewSources()->index(0, 0),
                      OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("[[target]] and [[missing/page]]"));
+    REQUIRE(controller.followPagePreviewSource(sourceId));
+    CHECK(controller.currentPageName() == QStringLiteral("source"));
 
-    controller.navigateToPageName(QStringLiteral("source"));
     controller.navigateToPageName(QStringLiteral("missing/page"));
     CHECK(controller.currentPagePreview());
     CHECK(controller.outlineEntries()->rowCount() == 0);
@@ -335,6 +336,165 @@ TEST_CASE("the Qt adapter presents dense Unicode Page Links at exact cursor offs
     const auto lastCharacterOffset = ((repetitions - 1) * 11) + 1;
     CHECK(presentation.contains(
         QStringLiteral("<a href=\"%1\">Target</a>").arg(lastCharacterOffset)));
+}
+
+TEST_CASE("the Qt adapter inserts presents and follows Block References") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "block-reference-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("target text")) == 0);
+    const auto targetPageId = controller.currentPageId();
+    const auto targetId = controller.outlineEntryId(0);
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("before after")) == 0);
+    const auto sourceId = controller.outlineEntryId(0);
+
+    REQUIRE(controller.selectBlockReferenceTarget(targetId));
+    CHECK(controller.selectedBlockReferenceTargetId() == targetId);
+    REQUIRE(controller.insertSelectedBlockReference(sourceId, 7, QStringLiteral("before after")));
+
+    const auto notation = NotebookController::blockReferenceNotation(targetId);
+    CHECK(controller.outlineEntries()
+              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("before ") + notation + QStringLiteral("after"));
+    const auto presentation = controller.committedEntryPresentation(
+        sourceId, QStringLiteral("before ") + notation + QStringLiteral("after"));
+    CHECK(presentation.contains(QStringLiteral(">Block ") + targetId.first(8) +
+                                QStringLiteral("</a>")));
+    REQUIRE(controller.browseLinkedReferences(targetId));
+    CHECK(controller.blockLinkedReferenceTargetId() == targetId);
+    CHECK(controller.blockLinkedReferenceTotal() == 1);
+    REQUIRE(controller.blockLinkedReferenceSources()->rowCount() == 1);
+    CHECK(controller.blockLinkedReferenceSources()
+              ->data(controller.blockLinkedReferenceSources()->index(0, 0),
+                     OutlineEntryModel::LinkedReferenceContextRole)
+              .toString() == QStringLiteral("Top level"));
+    CHECK(controller.blockLinkedReferenceSources()
+              ->data(controller.blockLinkedReferenceSources()->index(0, 0),
+                     OutlineEntryModel::LinkedReferenceGroupRole)
+              .toString() == QStringLiteral("Source — source"));
+    REQUIRE(controller.followBlockReference(
+        sourceId, 10, QStringLiteral("before ") + notation + QStringLiteral("after")));
+    CHECK(controller.currentPageId() == targetPageId);
+    CHECK(controller.identifiedBlockId() == targetId);
+    CHECK(controller.linkedReferenceSources()->rowCount() == 0);
+}
+
+TEST_CASE("Page and Block Linked Reference views remain independent") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "independent-views.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("page-target"), QStringLiteral("Page Target")));
+    const auto pageTargetId = controller.currentPageId();
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("block target")) == 0);
+    const auto blockTargetId = controller.outlineEntryId(0);
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(
+                QStringLiteral("[[page-target]] [[block:%1]]").arg(blockTargetId)) == 0);
+
+    controller.navigateToPage(pageTargetId);
+    REQUIRE(controller.linkedReferenceSources()->rowCount() == 1);
+    REQUIRE(controller.browseLinkedReferences(blockTargetId));
+
+    CHECK(controller.linkedReferenceTargetId() == pageTargetId);
+    CHECK(controller.linkedReferenceSources()->rowCount() == 1);
+    CHECK(controller.blockLinkedReferenceTargetId() == blockTargetId);
+    CHECK(controller.blockLinkedReferenceSources()->rowCount() == 1);
+}
+
+TEST_CASE("the Qt adapter incrementally loads Linked Reference occurrence snippets") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "occurrence-snippets.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    const auto targetId = controller.currentPageId();
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(
+                QStringLiteral("first [[target]]\nsecond [[target]]\nthird [[target]]\nfourth "
+                               "context [[target]] tail")) == 0);
+    const auto sourceId = controller.outlineEntryId(0);
+    controller.navigateToPage(targetId);
+
+    const auto index = controller.linkedReferenceSources()->index(0, 0);
+    CHECK(controller.linkedReferenceSources()
+              ->data(index, OutlineEntryModel::LinkedReferenceOccurrenceCountRole)
+              .toLongLong() == 4);
+    REQUIRE(controller.linkedReferenceSources()
+                ->data(index, OutlineEntryModel::LinkedReferenceHasMoreOccurrencesRole)
+                .toBool());
+    REQUIRE(controller.loadMoreLinkedReferenceOccurrences(sourceId));
+    CHECK_FALSE(controller.linkedReferenceSources()
+                    ->data(index, OutlineEntryModel::LinkedReferenceHasMoreOccurrencesRole)
+                    .toBool());
+    CHECK(controller.linkedReferenceSources()
+              ->data(index, OutlineEntryModel::LinkedReferencePresentationRole)
+              .toString()
+              .contains(QStringLiteral("fourth context")));
+}
+
+TEST_CASE("the Qt adapter refreshes a visible Linked Reference view after edits") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "live-linked-reference-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    const auto targetPageId = controller.currentPageId();
+
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("self [[target]]")) == 0);
+    REQUIRE(controller.linkedReferenceSources()->rowCount() == 1);
+    const auto sourceId = controller.outlineEntryId(0);
+    REQUIRE(controller.updateOutlineEntry(sourceId, QStringLiteral("removed")));
+    CHECK(controller.currentPageId() == targetPageId);
+    CHECK(controller.linkedReferenceSources()->rowCount() == 0);
+    CHECK(controller.linkedReferenceTotal() == 0);
+}
+
+TEST_CASE("the Qt adapter browses incoming Page Linked References") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "linked-reference-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    const auto targetPageId = controller.currentPageId();
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    const auto sourcePageId = controller.currentPageId();
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("mentions [[target]]")) == 0);
+    const auto sourceId = controller.outlineEntryId(0);
+
+    controller.navigateToPage(targetPageId);
+
+    REQUIRE(controller.linkedReferenceSources()->rowCount() == 1);
+    CHECK(controller.linkedReferenceSources()
+              ->data(controller.linkedReferenceSources()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("mentions [[target]]"));
+    REQUIRE(controller.followLinkedReferenceSource(sourceId));
+    CHECK(controller.currentPageId() == sourcePageId);
+}
+
+TEST_CASE("the Qt adapter loads Linked References in bounded batches") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "linked-reference-batches-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    const auto targetPageId = controller.currentPageId();
+    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    for (auto index = 0; index < 101; ++index) {
+        REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]]")) >= 0);
+    }
+
+    controller.navigateToPage(targetPageId);
+
+    CHECK(controller.linkedReferenceTotal() == 101);
+    CHECK(controller.linkedReferenceSources()->rowCount() == 100);
+    REQUIRE(controller.hasMoreLinkedReferences());
+    REQUIRE(controller.loadMoreLinkedReferences());
+    CHECK(controller.linkedReferenceSources()->rowCount() == 101);
+    CHECK_FALSE(controller.hasMoreLinkedReferences());
 }
 
 TEST_CASE("the Qt hierarchy model fetches every revision-bound child batch") {

@@ -5,6 +5,7 @@
 
 #include <QAbstractListModel>
 #include <QDate>
+#include <QHash>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -16,6 +17,11 @@ struct OutlineEntry {
     hieda::notebook::BlockMetadata metadata;
     std::string authoredText;
     std::optional<hieda::notebook::BlockId> parentEntry;
+    QString linkedReferenceContext;
+    QString linkedReferenceGroup;
+    QString linkedReferencePresentation;
+    qsizetype linkedReferenceOccurrenceCount{0};
+    bool linkedReferenceHasMoreOccurrences{false};
 };
 
 class OutlineEntryModel final : public QAbstractListModel {
@@ -33,6 +39,11 @@ class OutlineEntryModel final : public QAbstractListModel {
         CanMoveUpRole,
         CanMoveDownRole,
         CanDeleteRole,
+        LinkedReferenceContextRole,
+        LinkedReferenceGroupRole,
+        LinkedReferencePresentationRole,
+        LinkedReferenceOccurrenceCountRole,
+        LinkedReferenceHasMoreOccurrencesRole,
     };
 
     explicit OutlineEntryModel(QObject* parent = nullptr);
@@ -40,8 +51,11 @@ class OutlineEntryModel final : public QAbstractListModel {
     [[nodiscard]] auto data(const QModelIndex& index, int role) const -> QVariant override;
     [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;
     void setEntries(std::vector<OutlineEntry> entries);
+    void appendEntries(std::vector<OutlineEntry> entries);
     void insertEntry(int row, OutlineEntry entry);
     void updateEntry(const OutlineEntry& entry);
+    void appendLinkedReferencePresentation(const hieda::notebook::BlockId& entryId,
+                                           const QString& presentation, bool hasMore);
     [[nodiscard]] auto entryId(int row) const -> QString;
     [[nodiscard]] auto entryText(int row) const -> QString;
     [[nodiscard]] auto entryParentId(int row) const -> QString;
@@ -118,6 +132,13 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QDate journalDate READ journalDate NOTIFY destinationChanged)
     Q_PROPERTY(QAbstractItemModel* outlineEntries READ outlineEntries CONSTANT)
     Q_PROPERTY(QAbstractItemModel* pagePreviewSources READ pagePreviewSources CONSTANT)
+    Q_PROPERTY(qsizetype pagePreviewUnresolvedPageLinkSourceTotal READ
+                   pagePreviewUnresolvedPageLinkSourceTotal NOTIFY stateChanged)
+    Q_PROPERTY(bool hasMorePagePreviewUnresolvedPageLinkSources READ
+                   hasMorePagePreviewUnresolvedPageLinkSources NOTIFY stateChanged)
+    Q_PROPERTY(QAbstractItemModel* linkedReferenceSources READ linkedReferenceSources CONSTANT)
+    Q_PROPERTY(
+        QAbstractItemModel* blockLinkedReferenceSources READ blockLinkedReferenceSources CONSTANT)
     Q_PROPERTY(QAbstractItemModel* pageHierarchy READ pageHierarchy CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
@@ -127,6 +148,18 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QString currentPageTitle READ currentPageTitle NOTIFY destinationChanged)
     Q_PROPERTY(bool currentPagePreview READ currentPagePreview NOTIFY destinationChanged)
     Q_PROPERTY(QStringList pageChoices READ pageChoices NOTIFY stateChanged)
+    Q_PROPERTY(QString selectedBlockReferenceTargetId READ selectedBlockReferenceTargetId NOTIFY
+                   stateChanged)
+    Q_PROPERTY(QString linkedReferenceTargetId READ linkedReferenceTargetId NOTIFY stateChanged)
+    Q_PROPERTY(qsizetype linkedReferenceTotal READ linkedReferenceTotal NOTIFY stateChanged)
+    Q_PROPERTY(bool hasMoreLinkedReferences READ hasMoreLinkedReferences NOTIFY stateChanged)
+    Q_PROPERTY(
+        QString blockLinkedReferenceTargetId READ blockLinkedReferenceTargetId NOTIFY stateChanged)
+    Q_PROPERTY(
+        qsizetype blockLinkedReferenceTotal READ blockLinkedReferenceTotal NOTIFY stateChanged)
+    Q_PROPERTY(
+        bool hasMoreBlockLinkedReferences READ hasMoreBlockLinkedReferences NOTIFY stateChanged)
+    Q_PROPERTY(QString identifiedBlockId READ identifiedBlockId NOTIFY stateChanged)
 
   public:
     explicit NotebookController(QObject* parent = nullptr);
@@ -138,6 +171,10 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto journalDate() const -> QDate;
     [[nodiscard]] auto outlineEntries() -> QAbstractItemModel*;
     [[nodiscard]] auto pagePreviewSources() -> QAbstractItemModel*;
+    [[nodiscard]] auto pagePreviewUnresolvedPageLinkSourceTotal() const -> qsizetype;
+    [[nodiscard]] auto hasMorePagePreviewUnresolvedPageLinkSources() const -> bool;
+    [[nodiscard]] auto linkedReferenceSources() -> QAbstractItemModel*;
+    [[nodiscard]] auto blockLinkedReferenceSources() -> QAbstractItemModel*;
     [[nodiscard]] auto pageHierarchy() -> QAbstractItemModel*;
     [[nodiscard]] auto canUndo() const -> bool;
     [[nodiscard]] auto canRedo() const -> bool;
@@ -147,6 +184,16 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto currentPageTitle() const -> QString;
     [[nodiscard]] auto currentPagePreview() const -> bool;
     [[nodiscard]] auto pageChoices() const -> QStringList;
+    [[nodiscard]] auto selectedBlockReferenceTargetId() const -> QString;
+    [[nodiscard]] auto linkedReferenceTargetId() const -> QString;
+    [[nodiscard]] auto linkedReferenceTotal() const -> qsizetype;
+    [[nodiscard]] auto hasMoreLinkedReferences() const -> bool;
+    [[nodiscard]] auto blockLinkedReferenceTargetId() const -> QString;
+    [[nodiscard]] auto blockLinkedReferenceTotal() const -> qsizetype;
+    [[nodiscard]] auto hasMoreBlockLinkedReferences() const -> bool;
+    [[nodiscard]] auto identifiedBlockId() const -> QString;
+    // Qt 6.8 moc emits invalid metadata for invokable methods with trailing return types.
+    // NOLINTBEGIN(modernize-use-trailing-return-type)
     [[nodiscard]] Q_INVOKABLE QString pageIdAt(qsizetype index) const;
     [[nodiscard]] Q_INVOKABLE QString pageIdForChoice(const QString& choice) const;
 
@@ -162,6 +209,27 @@ class NotebookController final : public QObject {
     Q_INVOKABLE void navigateToPageName(const QString& pageName);
     Q_INVOKABLE bool followPageLink(const QString& entryId, int characterOffset,
                                     const QString& editorText);
+    Q_INVOKABLE bool followBlockReference(const QString& entryId, int characterOffset,
+                                          const QString& editorText);
+    Q_INVOKABLE bool followSemanticReference(const QString& entryId, int characterOffset,
+                                             const QString& editorText);
+    Q_INVOKABLE bool insertBlockReference(const QString& sourceEntryId, int characterOffset,
+                                          const QString& editorText, const QString& targetId);
+    Q_INVOKABLE bool selectBlockReferenceTarget(const QString& targetId);
+    Q_INVOKABLE bool insertSelectedBlockReference(const QString& sourceEntryId, int characterOffset,
+                                                  const QString& editorText);
+    Q_INVOKABLE bool browseLinkedReferences(const QString& targetId);
+    Q_INVOKABLE bool loadMoreLinkedReferences();
+    Q_INVOKABLE bool loadMoreBlockLinkedReferences();
+    Q_INVOKABLE bool loadMoreLinkedReferenceOccurrences(const QString& sourceEntryId);
+    Q_INVOKABLE bool loadMoreBlockLinkedReferenceOccurrences(const QString& sourceEntryId);
+    Q_INVOKABLE bool followLinkedReferenceSource(const QString& sourceEntryId);
+    Q_INVOKABLE bool followBlockLinkedReferenceSource(const QString& sourceEntryId);
+    Q_INVOKABLE bool followPagePreviewSource(const QString& sourceEntryId);
+    Q_INVOKABLE bool loadMorePagePreviewUnresolvedPageLinkSources();
+    Q_INVOKABLE bool loadMorePagePreviewUnresolvedPageLinkOccurrences(const QString& sourceEntryId);
+    [[nodiscard]] Q_INVOKABLE QString linkedReferenceContext(const QString& sourceEntryId) const;
+    [[nodiscard]] Q_INVOKABLE static QString blockReferenceNotation(const QString& targetId);
     Q_INVOKABLE void navigateToJournalDate(const QDate& date);
     Q_INVOKABLE void navigateToJournalDateText(const QString& isoDate);
     Q_INVOKABLE void navigateToToday();
@@ -198,6 +266,7 @@ class NotebookController final : public QObject {
                                             int cursorPosition = 0);
     void requestJournalDateRollover(const QDate& date);
     Q_INVOKABLE void completeJournalDateRollover();
+    // NOLINTEND(modernize-use-trailing-return-type)
 
   signals:
     void stateChanged();
@@ -210,6 +279,13 @@ class NotebookController final : public QObject {
   private:
     enum class OutlineHistoryDirection : std::uint8_t { undo, redo };
     enum class OutlineEntryMove : std::uint8_t { indent, outdent, up, down };
+    struct IncomingSourcesViewState {
+        std::optional<hieda::notebook::BlockId> targetId;
+        qsizetype total{0};
+        std::optional<std::string> cursor;
+        QHash<QString, QString> contexts;
+        QHash<QString, std::string> occurrenceCursors;
+    };
 
     void accept(const hieda::notebook::NotebookInfo& info);
     void reject(const hieda::notebook::NotebookError& error);
@@ -217,8 +293,23 @@ class NotebookController final : public QObject {
     void loadJournalDate(const QDate& date);
     void loadPage(const hieda::notebook::BlockId& pageId);
     void loadPagePreview(const QString& pageName);
+    void appendPagePreviewUnresolvedPageLinkSourcesBatch(
+        const hieda::notebook::UnresolvedPageLinkSourcesBatch& batch);
     [[nodiscard]] auto currentPageAddress() const -> hieda::notebook::PageAddress;
     void refreshPages();
+    void refreshLinkedReferences();
+    void refreshBlockLinkedReferences();
+    template <typename Batch>
+    void appendIncomingSourcesBatch(const Batch& batch, IncomingSourcesViewState& view,
+                                    OutlineEntryModel& model);
+    auto loadMoreLinkedReferenceOccurrencesFor(const hieda::notebook::BlockId& targetId,
+                                               const QString& sourceEntryId,
+                                               OutlineEntryModel& model,
+                                               QHash<QString, std::string>& occurrenceCursors)
+        -> bool;
+    [[nodiscard]] auto navigateToOutlinePage(const hieda::notebook::OutlinePage& page) -> bool;
+    auto followLinkedReferenceSourceFor(const QString& sourceEntryId,
+                                        const IncomingSourcesViewState& view) -> bool;
     auto moveOutlineEntry(const QString& entryId, const QString& authoredText,
                           OutlineEntryMove movement, int cursorPosition) -> QVariantMap;
     auto applyOutlineHistory(OutlineHistoryDirection direction, const QString& preferredEntryId,
@@ -226,6 +317,7 @@ class NotebookController final : public QObject {
     void scheduleMidnightRefresh();
 
     hieda::notebook::NotebookSession session_;
+    hieda::notebook::NotebookSubscription subscription_;
     QString path_;
     QString name_;
     QString error_;
@@ -235,10 +327,19 @@ class NotebookController final : public QObject {
     bool currentPagePreview_{false};
     QString currentPageName_;
     QString currentPageTitle_;
+    qsizetype pagePreviewUnresolvedPageLinkSourceTotal_{0};
+    std::optional<std::string> pagePreviewUnresolvedPageLinkSourcesCursor_;
+    QHash<QString, std::string> pagePreviewUnresolvedPageLinkOccurrenceCursors_;
     QStringList pageChoices_;
     std::vector<hieda::notebook::BlockId> pageIds_;
+    std::optional<hieda::notebook::BlockId> selectedBlockReferenceTargetId_;
+    std::optional<hieda::notebook::BlockId> identifiedBlockId_;
+    IncomingSourcesViewState pageLinkedReferences_;
+    IncomingSourcesViewState blockLinkedReferences_;
     OutlineEntryModel outlineEntries_;
     OutlineEntryModel pagePreviewSources_;
+    OutlineEntryModel linkedReferenceSources_;
+    OutlineEntryModel blockLinkedReferenceSources_;
     PageHierarchyModel pageHierarchy_;
     QTimer midnightTimer_;
 };
