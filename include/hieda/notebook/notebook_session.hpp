@@ -107,6 +107,24 @@ struct Page {
     auto operator==(const Page&) const -> bool = default;
 };
 
+struct PageLink {
+    std::size_t sourceByteOffset{0};
+    std::size_t sourceByteLength{0};
+    std::string pageName;
+    std::optional<PageSummary> target;
+
+    auto operator==(const PageLink&) const -> bool = default;
+};
+
+struct PagePreview {
+    std::string name;
+    std::vector<Entry> sources;
+
+    auto operator==(const PagePreview&) const -> bool = default;
+};
+
+using PageLinkDestination = std::variant<PageSummary, PagePreview>;
+
 struct PageHierarchyNode {
     std::string name;
     std::string localSegment;
@@ -172,6 +190,7 @@ enum class NotebookErrorCode : std::uint8_t {
     pageNameConflict,
     pageNotFound,
     staleHierarchyCursor,
+    pageLinkNotFound,
 };
 
 struct NotebookError {
@@ -240,6 +259,10 @@ class NotebookSession {
     [[nodiscard]] auto deletePage(BlockId pageId) -> Result<Page>;
     [[nodiscard]] auto renamePage(BlockId pageId, std::string name, std::string displayTitle)
         -> Result<Page>;
+    [[nodiscard]] auto pageLinks(BlockId entryId) const -> Result<std::vector<PageLink>>;
+    [[nodiscard]] auto followPageLink(BlockId entryId, std::size_t sourceByteOffset) const
+        -> Result<PageLinkDestination>;
+    [[nodiscard]] auto pagePreview(std::string name) const -> Result<PagePreview>;
     [[nodiscard]] auto outline(PageAddress address) const -> Result<OutlinePage>;
     [[nodiscard]] auto insertEntry(PageAddress address, std::optional<BlockId> afterEntry,
                                    std::string authoredText) -> Result<OutlinePage>;

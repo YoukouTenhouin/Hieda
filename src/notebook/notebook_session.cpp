@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "hieda/notebook/notebook_session.hpp"
+#include "authored_text_parser.hpp"
 #include "notebook_session_test_access.hpp"
 #include "platform_file.hpp"
 
@@ -379,10 +380,8 @@ auto validJournalDate(JournalDate date) -> bool {
 }
 
 auto validAuthoredText(std::string_view text) -> bool {
-    if (text.size() > std::numeric_limits<std::uint32_t>::max()) {
-        return false;
-    }
-    if (text.find('\r') != std::string_view::npos) {
+    constexpr std::size_t maximumAuthoredTextBytes = 1024ULL * 1024ULL;
+    if (text.size() > maximumAuthoredTextBytes) {
         return false;
     }
     std::size_t index = 0;
@@ -391,6 +390,9 @@ auto validAuthoredText(std::string_view text) -> bool {
         std::size_t continuationCount = 0;
         std::uint32_t codePoint = 0;
         if (first <= 0x7FU) {
+            if ((first <= 0x1FU && first != '\n') || first == 0x7FU) {
+                return false;
+            }
             ++index;
             continue;
         }
@@ -426,38 +428,12 @@ auto validAuthoredText(std::string_view text) -> bool {
             (codePoint >= 0xD800U && codePoint <= 0xDFFFU)) {
             return false;
         }
+        if (codePoint >= 0x80U && codePoint <= 0x9FU) {
+            return false;
+        }
         index += continuationCount + 1;
     }
     return true;
-}
-
-auto validPageName(std::string_view name) -> bool {
-    if (name.empty() || name.size() > 255) {
-        return false;
-    }
-    std::size_t segmentStart = 0;
-    while (segmentStart < name.size()) {
-        const auto separator = name.find('/', segmentStart);
-        const auto segmentLength =
-            (separator == std::string_view::npos ? name.size() : separator) - segmentStart;
-        if (segmentLength == 0 || segmentLength > 64 || name[segmentStart] < 'a' ||
-            name[segmentStart] > 'z') {
-            return false;
-        }
-        const auto segment = name.substr(segmentStart, segmentLength);
-        if (!std::ranges::all_of(segment, [](char character) -> bool {
-                return (character >= 'a' && character <= 'z') ||
-                       (character >= '0' && character <= '9') || character == '_' ||
-                       character == '-';
-            })) {
-            return false;
-        }
-        if (separator == std::string_view::npos) {
-            return true;
-        }
-        segmentStart = separator + 1;
-    }
-    return false;
 }
 
 auto validPageTitle(std::string_view title) -> bool {
@@ -568,7 +544,7 @@ auto decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
           validJournalDate(block.journalDate.value_or(JournalDate{})) && block.pageName.empty() &&
           block.displayTitle.empty()) ||
          (block.pageKind == PageKind::named && !block.journalDate &&
-          validPageName(block.pageName) && validPageTitle(block.displayTitle))) &&
+          authored_text::validPageName(block.pageName) && validPageTitle(block.displayTitle))) &&
         block.authoredText.empty();
     const auto validEntry = block.type == BlockType::entry && !hasPageKind && !block.journalDate &&
                             block.pageName.empty() && block.displayTitle.empty() &&
@@ -693,7 +669,26 @@ struct JournalDatabases {
     MDB_dbi containmentByChild{0};
     MDB_dbi journalByDate{0};
     MDB_dbi pagesByName{0};
+    MDB_dbi referencesBySource{0};
+    MDB_dbi referencesByTarget{0};
 };
+
+enum class PageLinkTargetIndexKind : std::uint8_t { resolved = 'R', unresolved = 'U' };
+
+auto resolvedPageLinkTargetPrefix(const BlockId& pageId) -> std::vector<std::uint8_t> {
+    std::vector<std::uint8_t> prefix{static_cast<std::uint8_t>(PageLinkTargetIndexKind::resolved)};
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(pageId.bytes.data());
+    prefix.insert(prefix.end(), bytes, bytes + pageId.bytes.size());
+    return prefix;
+}
+
+auto unresolvedPageLinkTargetPrefix(std::string_view pageName) -> std::vector<std::uint8_t> {
+    std::vector<std::uint8_t> prefix{
+        static_cast<std::uint8_t>(PageLinkTargetIndexKind::unresolved)};
+    appendU16(prefix, static_cast<std::uint16_t>(pageName.size()));
+    prefix.insert(prefix.end(), pageName.begin(), pageName.end());
+    return prefix;
+}
 
 struct ParentLink {
     BlockId parent;
@@ -735,10 +730,17 @@ struct JournalPageHistory {
     std::deque<JournalHistoryAction> redo;
 };
 
+struct MechanicalTextChange {
+    BlockId sourceId;
+    std::string before;
+    std::string after;
+};
+
 struct PageHistoryAction {
     std::uint64_t sequence{0};
     std::optional<Page> before;
     std::optional<Page> after;
+    std::vector<MechanicalTextChange> mechanicalTextChanges;
     std::size_t estimatedBytes{0};
 };
 
@@ -759,10 +761,10 @@ struct CrossPageHistoryAction {
 
 enum class OutlineEditKind : std::uint8_t { split, join, indent, outdent, up, down, erase };
 
-auto openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path)
-    -> Result<JournalDatabases> {
+auto openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path,
+                          bool createPageLinkIndexes = false) -> Result<JournalDatabases> {
     JournalDatabases databases;
-    const std::array<std::pair<const char*, MDB_dbi*>, 7> names{{
+    const std::array<std::pair<const char*, MDB_dbi*>, 9> names{{
         {"metadata", &databases.metadata},
         {"blocks", &databases.blocks},
         {"blocks_by_type", &databases.blocksByType},
@@ -770,9 +772,15 @@ auto openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& pat
         {"containment_by_child", &databases.containmentByChild},
         {"journal_by_date", &databases.journalByDate},
         {"pages_by_title", &databases.pagesByName},
+        {"references_by_source", &databases.referencesBySource},
+        {"references_by_target", &databases.referencesByTarget},
     }};
-    for (const auto& [name, database] : names) {
-        const auto result = mdb_dbi_open(transaction, name, 0, database);
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        const auto& [name, database] = names[index];
+        const auto flags = createPageLinkIndexes && index >= names.size() - 2
+                               ? static_cast<unsigned int>(MDB_CREATE)
+                               : 0U;
+        const auto result = mdb_dbi_open(transaction, name, flags, database);
         if (result != MDB_SUCCESS) {
             return Result<JournalDatabases>::failure(
                 errorFromLmdb(path, result, "open Journal database"));
@@ -808,8 +816,8 @@ auto writeBlock(MDB_txn* transaction, MDB_dbi database, const BlockRecord& block
     return std::nullopt;
 }
 
-auto incrementRevision(MDB_txn* transaction, MDB_dbi metadata, const std::filesystem::path& path)
-    -> std::optional<NotebookError> {
+auto writeIncrementedRevision(MDB_txn* transaction, MDB_dbi metadata,
+                              const std::filesystem::path& path) -> std::optional<NotebookError> {
     constexpr std::string_view keyText = "manifest";
     MDB_val key{keyText.size(), const_cast<char*>(keyText.data())};
     MDB_val value{};
@@ -865,6 +873,170 @@ auto writeTypeIndex(MDB_txn* transaction, MDB_dbi database, BlockType type,
         return errorFromLmdb(path, result, "index Block type");
     }
     return std::nullopt;
+}
+
+auto rebuildPageLinkIndexes(MDB_txn* transaction, const JournalDatabases& databases,
+                            const std::filesystem::path& path) -> std::optional<NotebookError> {
+    auto result = mdb_drop(transaction, databases.referencesBySource, 0);
+    if (result == MDB_SUCCESS) {
+        result = mdb_drop(transaction, databases.referencesByTarget, 0);
+    }
+    if (result != MDB_SUCCESS) {
+        return errorFromLmdb(path, result, "clear Page Link indexes");
+    }
+
+    MDB_cursor* cursor = nullptr;
+    result = mdb_cursor_open(transaction, databases.blocksByType, &cursor);
+    if (result != MDB_SUCCESS) {
+        return errorFromLmdb(path, result, "open Page Link source scan");
+    }
+    BlockId lowerId{};
+    auto lower = typeIndexKey(BlockType::entry, lowerId);
+    MDB_val key{lower.size(), lower.data()};
+    MDB_val value{};
+    result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+    while (result == MDB_SUCCESS && key.mv_size == lower.size() &&
+           static_cast<const std::uint8_t*>(key.mv_data)[0] ==
+               static_cast<std::uint8_t>(BlockType::entry)) {
+        BlockId sourceId;
+        std::memcpy(sourceId.bytes.data(), static_cast<const std::uint8_t*>(key.mv_data) + 1,
+                    sourceId.bytes.size());
+        auto source = readBlock(transaction, databases.blocks, sourceId, path);
+        if (!source) {
+            mdb_cursor_close(cursor);
+            return source.error();
+        }
+        const auto links = authored_text::pageLinks(source.value().authoredText);
+        if (!links.empty()) {
+            std::vector<std::uint8_t> encoded;
+            appendU16(encoded, 1);
+            appendU32(encoded, static_cast<std::uint32_t>(links.size()));
+            for (const auto& link : links) {
+                appendU32(encoded, static_cast<std::uint32_t>(link.sourceByteOffset));
+                appendU32(encoded, static_cast<std::uint32_t>(link.sourceByteLength));
+                appendU16(encoded, static_cast<std::uint16_t>(link.pageName.size()));
+                encoded.insert(encoded.end(), link.pageName.begin(), link.pageName.end());
+
+                MDB_val nameKey{link.pageName.size(), const_cast<char*>(link.pageName.data())};
+                MDB_val pageValue{};
+                const auto lookup =
+                    mdb_get(transaction, databases.pagesByName, &nameKey, &pageValue);
+                const auto resolved =
+                    lookup == MDB_SUCCESS && pageValue.mv_size == sourceId.bytes.size();
+                encoded.push_back(resolved ? 1U : 0U);
+                if (resolved) {
+                    const auto* target = static_cast<const std::uint8_t*>(pageValue.mv_data);
+                    encoded.insert(encoded.end(), target, target + sourceId.bytes.size());
+                } else if (lookup != MDB_NOTFOUND) {
+                    mdb_cursor_close(cursor);
+                    return lookup == MDB_SUCCESS
+                               ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                           "Page name index contains an invalid identity")
+                               : errorFromLmdb(path, lookup, "resolve Page Link");
+                }
+            }
+            auto sourceKey = blockKey(sourceId);
+            MDB_val sourceValue{encoded.size(), encoded.data()};
+            const auto put =
+                mdb_put(transaction, databases.referencesBySource, &sourceKey, &sourceValue, 0);
+            if (put != MDB_SUCCESS) {
+                mdb_cursor_close(cursor);
+                return errorFromLmdb(path, put, "write Page Link source index");
+            }
+        }
+        result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+    }
+    mdb_cursor_close(cursor);
+    if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+        return errorFromLmdb(path, result, "scan Page Link sources");
+    }
+
+    MDB_cursor* sourceCursor = nullptr;
+    result = mdb_cursor_open(transaction, databases.referencesBySource, &sourceCursor);
+    if (result != MDB_SUCCESS) {
+        return errorFromLmdb(path, result, "open Page Link reverse indexing scan");
+    }
+    MDB_val sourceKey{};
+    MDB_val sourceValue{};
+    result = mdb_cursor_get(sourceCursor, &sourceKey, &sourceValue, MDB_FIRST);
+    while (result == MDB_SUCCESS) {
+        const auto* bytes = static_cast<const std::uint8_t*>(sourceValue.mv_data);
+        if (sourceKey.mv_size != BlockId{}.bytes.size() || sourceValue.mv_size < 6 ||
+            readU16(bytes) != 1) {
+            mdb_cursor_close(sourceCursor);
+            return makeError(NotebookErrorCode::invalidNotebook, path,
+                             "Page Link source index is invalid");
+        }
+        const auto count = readU32(bytes + 2);
+        std::size_t offset = 6;
+        for (std::uint32_t index = 0; index < count; ++index) {
+            if (sourceValue.mv_size - offset < 11) {
+                mdb_cursor_close(sourceCursor);
+                return makeError(NotebookErrorCode::invalidNotebook, path,
+                                 "Page Link occurrence index is truncated");
+            }
+            const auto nameLength = readU16(bytes + offset + 8);
+            offset += 10;
+            if (sourceValue.mv_size - offset < static_cast<std::size_t>(nameLength) + 1) {
+                mdb_cursor_close(sourceCursor);
+                return makeError(NotebookErrorCode::invalidNotebook, path,
+                                 "Page Link occurrence name is truncated");
+            }
+            std::vector<std::uint8_t> reverseKey;
+            const auto resolved = bytes[offset + nameLength] != 0;
+            reverseKey.push_back(
+                static_cast<std::uint8_t>(resolved ? PageLinkTargetIndexKind::resolved
+                                                   : PageLinkTargetIndexKind::unresolved));
+            if (resolved) {
+                if (sourceValue.mv_size - offset <
+                    static_cast<std::size_t>(nameLength) + 1 + BlockId{}.bytes.size()) {
+                    mdb_cursor_close(sourceCursor);
+                    return makeError(NotebookErrorCode::invalidNotebook, path,
+                                     "resolved Page Link target is truncated");
+                }
+                const auto* target = bytes + offset + nameLength + 1;
+                reverseKey.insert(reverseKey.end(), target, target + BlockId{}.bytes.size());
+                offset += nameLength + 1 + BlockId{}.bytes.size();
+            } else {
+                const auto name =
+                    std::string_view{reinterpret_cast<const char*>(bytes + offset), nameLength};
+                reverseKey = unresolvedPageLinkTargetPrefix(name);
+                offset += nameLength + 1;
+            }
+            const auto* source = static_cast<const std::uint8_t*>(sourceKey.mv_data);
+            reverseKey.insert(reverseKey.end(), source, source + sourceKey.mv_size);
+            MDB_val reverseKeyValue{reverseKey.size(), reverseKey.data()};
+            MDB_val empty{0, nullptr};
+            const auto put =
+                mdb_put(transaction, databases.referencesByTarget, &reverseKeyValue, &empty, 0);
+            if (put != MDB_SUCCESS) {
+                mdb_cursor_close(sourceCursor);
+                return errorFromLmdb(path, put, "write Page Link reverse index");
+            }
+        }
+        if (offset != sourceValue.mv_size) {
+            mdb_cursor_close(sourceCursor);
+            return makeError(NotebookErrorCode::invalidNotebook, path,
+                             "Page Link source index has trailing bytes");
+        }
+        result = mdb_cursor_get(sourceCursor, &sourceKey, &sourceValue, MDB_NEXT);
+    }
+    mdb_cursor_close(sourceCursor);
+    return result == MDB_NOTFOUND ? std::nullopt
+                                  : std::optional<NotebookError>{errorFromLmdb(
+                                        path, result, "scan Page Link reverse sources")};
+}
+
+auto incrementRevision(MDB_txn* transaction, MDB_dbi metadata, const std::filesystem::path& path)
+    -> std::optional<NotebookError> {
+    auto databases = openJournalDatabases(transaction, path);
+    if (!databases) {
+        return databases.error();
+    }
+    if (auto error = rebuildPageLinkIndexes(transaction, databases.value(), path)) {
+        return error;
+    }
+    return writeIncrementedRevision(transaction, metadata, path);
 }
 
 } // namespace
@@ -969,10 +1141,54 @@ class NotebookSession::Impl {
         }
 
         auto manifest = decodeManifest(value, path);
+        bool pageLinkIndexesMissing = false;
+        if (manifest) {
+            for (const auto* name : {"references_by_source", "references_by_target"}) {
+                MDB_dbi database = 0;
+                result = mdb_dbi_open(transaction, name, 0, &database);
+                if (result == MDB_NOTFOUND) {
+                    pageLinkIndexesMissing = true;
+                } else if (result != MDB_SUCCESS) {
+                    break;
+                }
+            }
+        }
         mdb_txn_abort(transaction);
         if (!manifest) {
             mdb_env_close(openedEnvironment);
             return Result<NotebookInfo>::failure(manifest.error());
+        }
+        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+            mdb_env_close(openedEnvironment);
+            return Result<NotebookInfo>::failure(
+                errorFromLmdb(path, result, "inspect Page Link indexes"));
+        }
+        if (pageLinkIndexesMissing) {
+            transaction = nullptr;
+            result = mdb_txn_begin(openedEnvironment, nullptr, 0, &transaction);
+            if (result == MDB_SUCCESS) {
+                auto databases = openJournalDatabases(transaction, path, true);
+                if (!databases) {
+                    mdb_txn_abort(transaction);
+                    mdb_env_close(openedEnvironment);
+                    return Result<NotebookInfo>::failure(databases.error());
+                }
+                if (auto error = rebuildPageLinkIndexes(transaction, databases.value(), path)) {
+                    mdb_txn_abort(transaction);
+                    mdb_env_close(openedEnvironment);
+                    return Result<NotebookInfo>::failure(std::move(*error));
+                }
+                result = mdb_txn_commit(transaction);
+                transaction = nullptr;
+            }
+            if (result != MDB_SUCCESS) {
+                if (transaction != nullptr) {
+                    mdb_txn_abort(transaction);
+                }
+                mdb_env_close(openedEnvironment);
+                return Result<NotebookInfo>::failure(
+                    errorFromLmdb(path, result, "backfill Page Link indexes"));
+            }
         }
 
         environment = openedEnvironment;
@@ -1625,6 +1841,174 @@ class NotebookSession::Impl {
         return Result<Page>::success(publicPage(std::move(outline).value()));
     }
 
+    auto readPageLinks(BlockId entryId) const -> Result<std::vector<PageLink>> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<std::vector<PageLink>>::failure(
+                errorFromLmdb(path, result, "begin Page Link read"));
+        }
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            mdb_txn_abort(transaction);
+            return Result<std::vector<PageLink>>::failure(databases.error());
+        }
+        auto entry = readBlock(transaction, databases.value().blocks, entryId, path);
+        if (!entry || entry.value().type != BlockType::entry) {
+            mdb_txn_abort(transaction);
+            return Result<std::vector<PageLink>>::failure(
+                entry ? makeError(NotebookErrorCode::blockNotFound, path, "Block is not an Entry")
+                      : entry.error());
+        }
+        auto sourceKey = blockKey(entryId);
+        MDB_val encoded{};
+        result = mdb_get(transaction, databases.value().referencesBySource, &sourceKey, &encoded);
+        if (result == MDB_NOTFOUND) {
+            mdb_txn_abort(transaction);
+            return Result<std::vector<PageLink>>::success({});
+        }
+        if (result != MDB_SUCCESS || encoded.mv_size < 6) {
+            mdb_txn_abort(transaction);
+            return Result<std::vector<PageLink>>::failure(
+                result == MDB_SUCCESS ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                                  "Page Link source index is truncated")
+                                      : errorFromLmdb(path, result, "read Page Link source index"));
+        }
+        const auto* bytes = static_cast<const std::uint8_t*>(encoded.mv_data);
+        if (readU16(bytes) != 1) {
+            mdb_txn_abort(transaction);
+            return Result<std::vector<PageLink>>::failure(makeError(
+                NotebookErrorCode::invalidNotebook, path, "unsupported Page Link index version"));
+        }
+        const auto count = readU32(bytes + 2);
+        std::size_t offset = 6;
+        std::vector<PageLink> links;
+        links.reserve(count);
+        for (std::uint32_t index = 0; index < count; ++index) {
+            if (encoded.mv_size - offset < 11) {
+                mdb_txn_abort(transaction);
+                return Result<std::vector<PageLink>>::failure(makeError(
+                    NotebookErrorCode::invalidNotebook, path, "Page Link occurrence is truncated"));
+            }
+            const auto sourceOffset = readU32(bytes + offset);
+            const auto sourceLength = readU32(bytes + offset + 4);
+            const auto nameLength = readU16(bytes + offset + 8);
+            offset += 10;
+            if (encoded.mv_size - offset < static_cast<std::size_t>(nameLength) + 1) {
+                mdb_txn_abort(transaction);
+                return Result<std::vector<PageLink>>::failure(makeError(
+                    NotebookErrorCode::invalidNotebook, path, "Page Link name is truncated"));
+            }
+            std::string pageName(reinterpret_cast<const char*>(bytes + offset), nameLength);
+            offset += nameLength;
+            const auto resolved = bytes[offset++] != 0;
+            std::optional<PageSummary> target;
+            if (resolved) {
+                if (encoded.mv_size - offset < BlockId{}.bytes.size()) {
+                    mdb_txn_abort(transaction);
+                    return Result<std::vector<PageLink>>::failure(makeError(
+                        NotebookErrorCode::invalidNotebook, path, "Page Link target is truncated"));
+                }
+                BlockId targetId;
+                std::memcpy(targetId.bytes.data(), bytes + offset, targetId.bytes.size());
+                offset += targetId.bytes.size();
+                auto block = readBlock(transaction, databases.value().blocks, targetId, path);
+                if (!block || block.value().type != BlockType::page ||
+                    block.value().pageKind != PageKind::named) {
+                    mdb_txn_abort(transaction);
+                    return Result<std::vector<PageLink>>::failure(
+                        block ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                          "Page Link target is not a Named Page")
+                              : block.error());
+                }
+                target = PageSummary{block.value().metadata, block.value().pageName,
+                                     block.value().displayTitle};
+            }
+            links.push_back({sourceOffset, sourceLength, std::move(pageName), std::move(target)});
+        }
+        if (offset != encoded.mv_size) {
+            mdb_txn_abort(transaction);
+            return Result<std::vector<PageLink>>::failure(
+                makeError(NotebookErrorCode::invalidNotebook, path,
+                          "Page Link source index has trailing bytes"));
+        }
+        mdb_txn_abort(transaction);
+        return Result<std::vector<PageLink>>::success(std::move(links));
+    }
+
+    auto readPagePreview(const std::string& name) const -> Result<PagePreview> {
+        const auto path = info.value_or(NotebookInfo{}).path;
+        MDB_txn* transaction = nullptr;
+        auto result = mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
+        if (result != MDB_SUCCESS) {
+            return Result<PagePreview>::failure(
+                errorFromLmdb(path, result, "begin Page Preview read"));
+        }
+        const auto fail = [&](NotebookError error) -> Result<PagePreview> {
+            mdb_txn_abort(transaction);
+            return Result<PagePreview>::failure(std::move(error));
+        };
+        auto databases = openJournalDatabases(transaction, path);
+        if (!databases) {
+            return fail(databases.error());
+        }
+        auto materialized = namedPageByName(transaction, databases.value(), name);
+        if (!materialized) {
+            return fail(materialized.error());
+        }
+        if (materialized.value()) {
+            return fail(makeError(NotebookErrorCode::pageNameConflict, path,
+                                  "Page Preview name is materialized"));
+        }
+
+        PagePreview preview{name, {}};
+        MDB_cursor* cursor = nullptr;
+        result = mdb_cursor_open(transaction, databases.value().referencesByTarget, &cursor);
+        if (result != MDB_SUCCESS) {
+            return fail(errorFromLmdb(path, result, "open Page Preview source scan"));
+        }
+        auto prefix = unresolvedPageLinkTargetPrefix(name);
+        MDB_val key{prefix.size(), prefix.data()};
+        MDB_val value{};
+        result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+        while (result == MDB_SUCCESS && key.mv_size == prefix.size() + BlockId{}.bytes.size() &&
+               std::memcmp(key.mv_data, prefix.data(), prefix.size()) == 0) {
+            BlockId sourceId;
+            std::memcpy(sourceId.bytes.data(),
+                        static_cast<const std::uint8_t*>(key.mv_data) + prefix.size(),
+                        sourceId.bytes.size());
+            auto source = readBlock(transaction, databases.value().blocks, sourceId, path);
+            if (!source) {
+                mdb_cursor_close(cursor);
+                return fail(source.error());
+            }
+            auto parent = parentOf(transaction, databases.value(), sourceId);
+            if (!parent) {
+                mdb_cursor_close(cursor);
+                return fail(parent.error());
+            }
+            auto parentBlock =
+                readBlock(transaction, databases.value().blocks, parent.value().parent, path);
+            if (!parentBlock) {
+                mdb_cursor_close(cursor);
+                return fail(parentBlock.error());
+            }
+            const auto parentEntry = parentBlock.value().type == BlockType::entry
+                                         ? std::optional<BlockId>{parent.value().parent}
+                                         : std::nullopt;
+            preview.sources.push_back(
+                {source.value().metadata, source.value().authoredText, parentEntry});
+            result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+        }
+        mdb_cursor_close(cursor);
+        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+            return fail(errorFromLmdb(path, result, "scan Page Preview sources"));
+        }
+        mdb_txn_abort(transaction);
+        return Result<PagePreview>::success(std::move(preview));
+    }
+
     auto readPages() const -> Result<std::vector<PageSummary>> {
         const auto path = info.value_or(NotebookInfo{}).path;
         MDB_txn* transaction = nullptr;
@@ -1925,7 +2309,7 @@ class NotebookSession::Impl {
 
     auto deletePage(BlockId pageId) -> Result<Page> {
         lastCommandCommitted = false;
-        const auto before = readPage(pageId);
+        auto before = readPage(pageId);
         if (!before) {
             return before;
         }
@@ -1939,6 +2323,7 @@ class NotebookSession::Impl {
 
     auto renamePage(BlockId pageId, std::string name, std::string displayTitle) -> Result<Page> {
         lastCommandCommitted = false;
+        lastMechanicalTextChanges.clear();
         const auto path = info.value_or(NotebookInfo{}).path;
         MDB_txn* transaction = nullptr;
         auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
@@ -1962,6 +2347,66 @@ class NotebookSession::Impl {
             return fail(makeError(NotebookErrorCode::pageNotFound, path, "Block is not a Page"));
         }
         auto block = std::move(loaded).value();
+        const auto oldName = block.pageName;
+        std::vector<MechanicalTextChange> textChanges;
+        if (oldName != name) {
+            MDB_cursor* cursor = nullptr;
+            result = mdb_cursor_open(transaction, databases.value().referencesByTarget, &cursor);
+            if (result != MDB_SUCCESS) {
+                return fail(errorFromLmdb(path, result, "open Page Link rewrite scan"));
+            }
+            auto prefix = resolvedPageLinkTargetPrefix(pageId);
+            MDB_val key{prefix.size(), prefix.data()};
+            MDB_val value{};
+            result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+            while (result == MDB_SUCCESS && key.mv_size == prefix.size() + BlockId{}.bytes.size() &&
+                   std::memcmp(key.mv_data, prefix.data(), prefix.size()) == 0) {
+                BlockId sourceId;
+                std::memcpy(sourceId.bytes.data(),
+                            static_cast<const std::uint8_t*>(key.mv_data) + prefix.size(),
+                            sourceId.bytes.size());
+                auto source = readBlock(transaction, databases.value().blocks, sourceId, path);
+                if (!source) {
+                    mdb_cursor_close(cursor);
+                    return fail(source.error());
+                }
+                auto rewritten = source.value().authoredText;
+                const auto links = authored_text::pageLinks(rewritten);
+                for (const auto& occurrence : std::views::reverse(links)) {
+                    if (occurrence.pageName == oldName) {
+                        rewritten.replace(occurrence.sourceByteOffset + 2,
+                                          occurrence.sourceByteLength - 4, name);
+                    }
+                }
+                if (rewritten != source.value().authoredText) {
+                    if (!validAuthoredText(rewritten)) {
+                        mdb_cursor_close(cursor);
+                        return fail(makeError(NotebookErrorCode::invalidAuthoredText, path,
+                                              "Page Link rewrite exceeds Authored Text limits"));
+                    }
+                    textChanges.push_back(
+                        {sourceId, source.value().authoredText, std::move(rewritten)});
+                }
+                result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+            }
+            mdb_cursor_close(cursor);
+            if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+                return fail(errorFromLmdb(path, result, "scan Page Link rewrite sources"));
+            }
+            for (const auto& change : textChanges) {
+                auto source =
+                    readBlock(transaction, databases.value().blocks, change.sourceId, path);
+                if (!source) {
+                    return fail(source.error());
+                }
+                auto rewritten = std::move(source).value();
+                rewritten.authoredText = change.after;
+                if (auto error =
+                        writeBlock(transaction, databases.value().blocks, rewritten, path)) {
+                    return fail(std::move(*error));
+                }
+            }
+        }
         if (block.pageName != name) {
             MDB_val newKey{name.size(), name.data()};
             MDB_val existing{};
@@ -2000,6 +2445,7 @@ class NotebookSession::Impl {
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
+        lastMechanicalTextChanges = std::move(textChanges);
         auto reread = readPage(pageId);
         return reread;
     }
@@ -2159,8 +2605,12 @@ class NotebookSession::Impl {
         return found == pageHistories.end() ? nullptr : &*found;
     }
 
-    void recordPageHistory(std::optional<Page> before, std::optional<Page> after) {
+    void recordPageHistory(std::optional<Page> before, std::optional<Page> after,
+                           std::vector<MechanicalTextChange> mechanicalTextChanges = {}) {
         clearRedoHistory();
+        if (!before && !after) {
+            throw NotebookException("Page history action has no state");
+        }
         const auto pageId = before ? before->metadata.id : after->metadata.id;
         auto& history = pageHistory(pageId);
         const auto estimatePageBytes = [](const std::optional<Page>& page) -> std::size_t {
@@ -2173,16 +2623,22 @@ class NotebookSession::Impl {
             }
             return bytes;
         };
-        PageHistoryAction action{nextHistorySequence++, std::move(before), std::move(after), 0};
+        PageHistoryAction action{nextHistorySequence++, std::move(before), std::move(after),
+                                 std::move(mechanicalTextChanges), 0};
         action.estimatedBytes = sizeof(PageHistoryAction) + estimatePageBytes(action.before) +
                                 estimatePageBytes(action.after);
+        for (const auto& change : action.mechanicalTextChanges) {
+            action.estimatedBytes +=
+                sizeof(MechanicalTextChange) + change.before.size() + change.after.size();
+        }
         historyBytes += action.estimatedBytes;
         history.undo.push_back(std::move(action));
         enforceHistoryBudget();
     }
 
-    auto restorePageState(BlockId pageId, const std::optional<Page>& target)
-        -> Result<std::optional<Page>> {
+    auto restorePageState(BlockId pageId, const std::optional<Page>& target,
+                          const std::vector<MechanicalTextChange>& textChanges = {},
+                          bool restoreAfterText = false) -> Result<std::optional<Page>> {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
         MDB_txn* transaction = nullptr;
@@ -2242,7 +2698,25 @@ class NotebookSession::Impl {
         } else if (currentBlock.error().code != NotebookErrorCode::blockNotFound) {
             return fail(currentBlock.error());
         }
+        const auto restoreMechanicalText = [&]() -> std::optional<NotebookError> {
+            for (const auto& change : textChanges) {
+                auto source =
+                    readBlock(transaction, databases.value().blocks, change.sourceId, path);
+                if (!source) {
+                    return source.error();
+                }
+                auto block = std::move(source).value();
+                block.authoredText = restoreAfterText ? change.after : change.before;
+                if (auto error = writeBlock(transaction, databases.value().blocks, block, path)) {
+                    return error;
+                }
+            }
+            return std::nullopt;
+        };
         if (!target) {
+            if (auto error = restoreMechanicalText()) {
+                return fail(std::move(*error));
+            }
             if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
                 return fail(std::move(*error));
             }
@@ -2292,6 +2766,9 @@ class NotebookSession::Impl {
         if (auto error = rewriteContainment(transaction, databases.value(), empty, restored)) {
             return fail(std::move(*error));
         }
+        if (auto error = restoreMechanicalText()) {
+            return fail(std::move(*error));
+        }
         if (auto error = incrementRevision(transaction, databases.value().metadata, path)) {
             return fail(std::move(*error));
         }
@@ -2314,7 +2791,7 @@ class NotebookSession::Impl {
                 info.value_or(NotebookInfo{}).path, "no Page edit is available"));
         }
         const auto target = redo ? source.back().after : source.back().before;
-        auto result = restorePageState(pageId, target);
+        auto result = restorePageState(pageId, target, source.back().mechanicalTextChanges, redo);
         if (!result) {
             return result;
         }
@@ -3636,6 +4113,7 @@ class NotebookSession::Impl {
     std::unique_ptr<JournalCommitAdapter> commitAdapter;
     std::shared_ptr<SubscriptionState> subscriptions;
     bool lastCommandCommitted{false};
+    std::vector<MechanicalTextChange> lastMechanicalTextChanges;
     std::vector<JournalPageHistory> journalHistory;
     std::vector<PageHistory> pageHistories;
     std::deque<CrossPageHistoryAction> crossPageUndo;
@@ -3809,7 +4287,7 @@ auto NotebookSession::pageHierarchyNode(std::string name) const
         return Result<std::optional<PageHierarchyNode>>::failure(
             makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
     }
-    if (!validPageName(name)) {
+    if (!authored_text::validPageName(name)) {
         return Result<std::optional<PageHierarchyNode>>::failure(
             makeError(NotebookErrorCode::invalidPageName, impl_->info->path, "invalid Page name"));
     }
@@ -3824,7 +4302,7 @@ auto NotebookSession::pageHierarchyChildren(std::optional<std::string> parentNam
         return Result<PageHierarchyBatch>::failure(
             makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
     }
-    if (parentName && !validPageName(*parentName)) {
+    if (parentName && !authored_text::validPageName(*parentName)) {
         return Result<PageHierarchyBatch>::failure(makeError(
             NotebookErrorCode::invalidPageName, impl_->info->path, "invalid parent Page name"));
     }
@@ -3848,7 +4326,7 @@ auto NotebookSession::createPage(std::string name, std::string displayTitle) -> 
             return Result<Page>::failure(
                 makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
         }
-        if (!validPageName(name)) {
+        if (!authored_text::validPageName(name)) {
             return Result<Page>::failure(makeError(NotebookErrorCode::invalidPageName,
                                                    impl_->info->path, "invalid Page name"));
         }
@@ -3893,7 +4371,7 @@ auto NotebookSession::renamePage(BlockId pageId, std::string name, std::string d
             return Result<Page>::failure(
                 makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
         }
-        if (!validPageName(name)) {
+        if (!authored_text::validPageName(name)) {
             return Result<Page>::failure(makeError(NotebookErrorCode::invalidPageName,
                                                    impl_->info->path, "invalid Page name"));
         }
@@ -3901,7 +4379,15 @@ auto NotebookSession::renamePage(BlockId pageId, std::string name, std::string d
             return Result<Page>::failure(makeError(NotebookErrorCode::invalidPageTitle,
                                                    impl_->info->path, "invalid Page title"));
         }
+        auto before = impl_->readPage(pageId);
+        if (!before) {
+            return before;
+        }
         auto outcome = impl_->renamePage(pageId, std::move(name), std::move(displayTitle));
+        if (outcome && before.value() != outcome.value()) {
+            impl_->recordPageHistory(std::move(before).value(), outcome.value(),
+                                     std::move(impl_->lastMechanicalTextChanges));
+        }
         if (impl_->lastCommandCommitted) {
             callbacks = impl_->committedCallbacks();
         }
@@ -3909,6 +4395,57 @@ auto NotebookSession::renamePage(BlockId pageId, std::string name, std::string d
     }();
     notifyCallbacks(callbacks);
     return result;
+}
+
+auto NotebookSession::pageLinks(BlockId entryId) const -> Result<std::vector<PageLink>> {
+    std::scoped_lock lock(impl_->mutex);
+    if (!impl_->info) {
+        return Result<std::vector<PageLink>>::failure(
+            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    return impl_->readPageLinks(entryId);
+}
+
+auto NotebookSession::followPageLink(BlockId entryId, std::size_t sourceByteOffset) const
+    -> Result<PageLinkDestination> {
+    std::scoped_lock lock(impl_->mutex);
+    if (!impl_->info) {
+        return Result<PageLinkDestination>::failure(
+            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    auto links = impl_->readPageLinks(entryId);
+    if (!links) {
+        return Result<PageLinkDestination>::failure(links.error());
+    }
+    const auto found = std::ranges::find_if(links.value(), [&](const auto& link) -> bool {
+        return sourceByteOffset >= link.sourceByteOffset &&
+               sourceByteOffset < link.sourceByteOffset + link.sourceByteLength;
+    });
+    if (found == links.value().end()) {
+        return Result<PageLinkDestination>::failure(
+            makeError(NotebookErrorCode::pageLinkNotFound, impl_->info->path,
+                      "no committed Page Link contains the source offset"));
+    }
+    if (found->target) {
+        return Result<PageLinkDestination>::success(*found->target);
+    }
+    auto preview = impl_->readPagePreview(found->pageName);
+    return preview ? Result<PageLinkDestination>::success(std::move(preview).value())
+                   : Result<PageLinkDestination>::failure(preview.error());
+}
+
+// NOLINTNEXTLINE(performance-unnecessary-value-param)
+auto NotebookSession::pagePreview(std::string name) const -> Result<PagePreview> {
+    std::scoped_lock lock(impl_->mutex);
+    if (!impl_->info) {
+        return Result<PagePreview>::failure(
+            makeError(NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    if (!authored_text::validPageName(name)) {
+        return Result<PagePreview>::failure(makeError(
+            NotebookErrorCode::invalidPageName, impl_->info->path, "invalid Page Preview name"));
+    }
+    return impl_->readPagePreview(name);
 }
 
 auto NotebookSession::insertPageEntry(BlockId pageId, std::optional<BlockId> afterEntry,

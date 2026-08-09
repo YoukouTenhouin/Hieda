@@ -142,6 +142,23 @@ void writeBlockRecord(const std::filesystem::path& path, hieda::notebook::BlockI
     mdb_env_close(environment);
 }
 
+void removePageLinkIndexes(const std::filesystem::path& path) {
+    MDB_env* environment = nullptr;
+    REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
+    REQUIRE(mdb_env_set_maxdbs(environment, 16) == MDB_SUCCESS);
+    const auto encodedPath = lmdbFixturePath(path);
+    REQUIRE(mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR, 0600) == MDB_SUCCESS);
+    MDB_txn* transaction = nullptr;
+    REQUIRE(mdb_txn_begin(environment, nullptr, 0, &transaction) == MDB_SUCCESS);
+    for (const auto* name : {"references_by_source", "references_by_target"}) {
+        MDB_dbi database = 0;
+        REQUIRE(mdb_dbi_open(transaction, name, 0, &database) == MDB_SUCCESS);
+        REQUIRE(mdb_drop(transaction, database, 1) == MDB_SUCCESS);
+    }
+    REQUIRE(mdb_txn_commit(transaction) == MDB_SUCCESS);
+    mdb_env_close(environment);
+}
+
 auto blockRecordTags(const std::vector<std::uint8_t>& record) -> std::vector<std::uint16_t> {
     std::vector<std::uint16_t> tags;
     auto offset = std::size_t{2};
@@ -486,7 +503,7 @@ TEST_CASE("Page Hierarchy derives previews and pages from hierarchical names") {
     const auto descendant = session.createPage("work/client/alpha", "Alpha");
     REQUIRE(descendant);
     CHECK(notifications == 1);
-    CHECK(session.current().value_or({}).revision == 1);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == 1);
     REQUIRE(session.createPage("work/zeta", "Zeta"));
     const auto archive = session.createPage("archive", "Archive");
     REQUIRE(archive);
@@ -494,11 +511,11 @@ TEST_CASE("Page Hierarchy derives previews and pages from hierarchical names") {
     CHECK_FALSE(session.createPage("work/Uppercase", "Broken"));
     CHECK_FALSE(session.createPage(std::string(256, 'a'), "Broken"));
     CHECK(notifications == 3);
-    CHECK(session.current().value_or({}).revision == 3);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == 3);
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
     const auto failedCreate = session.createPage("failed/hierarchy", "Failed");
     REQUIRE_FALSE(failedCreate);
-    CHECK(session.current().value_or({}).revision == 3);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == 3);
     CHECK(notifications == 3);
     CHECK_FALSE(session.pageHierarchyNode("failed").value());
 
@@ -558,22 +575,26 @@ TEST_CASE("Page Hierarchy derives previews and pages from hierarchical names") {
     const auto materialized = session.createPage("work/client", "Client");
     REQUIRE(materialized);
     REQUIRE(session.pageHierarchyNode("work/client").value()->page);
-    const auto materializedRevision = session.current().value_or({}).revision;
+    const auto materializedRevision =
+        session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
     const auto failedUndo = session.undoEdit();
     REQUIRE_FALSE(failedUndo);
-    CHECK(session.current().value_or({}).revision == materializedRevision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision ==
+          materializedRevision);
     REQUIRE(session.pageHierarchyNode("work/client").value()->page);
     CHECK(session.editCapabilities().value().canUndo);
     REQUIRE(session.undoEdit());
-    CHECK(session.current().value_or({}).revision == materializedRevision + 1);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision ==
+          materializedRevision + 1);
     REQUIRE(session.pageHierarchyNode("work/client").value());
     CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
-    const auto undoneRevision = session.current().value_or({}).revision;
+    const auto undoneRevision =
+        session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
     const auto failedRedo = session.redoEdit();
     REQUIRE_FALSE(failedRedo);
-    CHECK(session.current().value_or({}).revision == undoneRevision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == undoneRevision);
     CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
     CHECK(session.editCapabilities().value().canRedo);
     REQUIRE(session.redoEdit());
@@ -600,12 +621,12 @@ TEST_CASE("Page Hierarchy derives previews and pages from hierarchical names") {
     REQUIRE(session.redoEdit());
     CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
 
-    const auto revision = session.current().value_or({}).revision;
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     const auto notificationCount = notifications;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
     const auto failedDelete = session.deletePage(descendant.value().metadata.id);
     REQUIRE_FALSE(failedDelete);
-    CHECK(session.current().value_or({}).revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     CHECK(notifications == notificationCount);
     REQUIRE(session.pageHierarchyNode("work/client/alpha").value()->page);
 
@@ -614,6 +635,277 @@ TEST_CASE("Page Hierarchy derives previews and pages from hierarchical names") {
     REQUIRE(session.pageHierarchyNode("work/client/alpha").value()->page);
     REQUIRE(session.pageHierarchyNode("work/client").value());
     CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
+}
+
+TEST_CASE("committed Page Link notation resolves exact names and keeps invalid text inert") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "page-links.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(path));
+    const auto target = session.createPage("work/client_alpha", "Client Alpha").value();
+    const auto source = session.createPage("source", "Source").value();
+    const auto text = std::string{"See [[work/client_alpha]] and [[missing/page]].\n"
+                                  "Escaped \\[[work/client_alpha]] and malformed [[Uppercase]].\n"
+                                  "opaque::[[work/client_alpha]]"};
+    const auto entry =
+        session.insertEntry(source.metadata.id, std::nullopt, text).value().entries[0];
+
+    const auto links = session.pageLinks(entry.metadata.id);
+
+    REQUIRE(links);
+    REQUIRE(links.value().size() == 2);
+    CHECK(links.value()[0].pageName == "work/client_alpha");
+    REQUIRE(links.value()[0].target);
+    CHECK(links.value()[0].target.value_or(hieda::notebook::PageSummary{}).metadata.id ==
+          target.metadata.id);
+    CHECK(links.value()[0].target.value_or(hieda::notebook::PageSummary{}).displayTitle ==
+          "Client Alpha");
+    CHECK(text.substr(links.value()[0].sourceByteOffset, links.value()[0].sourceByteLength) ==
+          "[[work/client_alpha]]");
+    CHECK(links.value()[1].pageName == "missing/page");
+    CHECK_FALSE(links.value()[1].target);
+}
+
+TEST_CASE("Page Link parsing applies line-local pairing property opacity and escape parity") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "page-link-grammar.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(path));
+    REQUIRE(session.createPage("target", "Target"));
+    const auto sourcePage = session.createPage("source", "Source").value();
+    const auto text = std::string{R"([[target]] \[[target]] \\[[target]] [[bad[[target]]]]
+work/client::[[target]]
+\work/client::[[target]])"};
+    const auto entry =
+        session.insertEntry(sourcePage.metadata.id, std::nullopt, text).value().entries[0];
+
+    const auto links = session.pageLinks(entry.metadata.id);
+
+    REQUIRE(links);
+    REQUIRE(links.value().size() == 3);
+    CHECK(std::ranges::all_of(links.value(), [](const auto& link) -> bool {
+        return link.pageName == "target" && link.target.has_value();
+    }));
+    CHECK(text.substr(links.value()[0].sourceByteOffset, links.value()[0].sourceByteLength) ==
+          "[[target]]");
+    CHECK(text.substr(links.value()[1].sourceByteOffset, links.value()[1].sourceByteLength) ==
+          "[[target]]");
+    CHECK(text.substr(links.value()[2].sourceByteOffset, links.value()[2].sourceByteLength) ==
+          "[[target]]");
+}
+
+TEST_CASE("Authored Text accepts one MiB and rejects forbidden controls or larger input") {
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "authored-text-limits.hieda"));
+    const auto page = session.createPage("limits", "Limits").value();
+
+    REQUIRE(
+        session.insertEntry(page.metadata.id, std::nullopt, std::string(1024ULL * 1024ULL, 'a')));
+    CHECK_FALSE(session.insertEntry(page.metadata.id, std::nullopt,
+                                    std::string((1024ULL * 1024ULL) + 1, 'a')));
+    CHECK_FALSE(session.insertEntry(page.metadata.id, std::nullopt, "tab\ttext"));
+    CHECK_FALSE(session.insertEntry(page.metadata.id, std::nullopt,
+                                    std::string{"c1"} + std::string{"\xC2\x80", 2}));
+}
+
+TEST_CASE("following Page Links opens materialized Pages or exact non-materialized previews") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "follow-page-links.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(path));
+    const auto target = session.createPage("target", "Target title").value();
+    const auto sourcePage = session.createPage("source", "Source").value();
+    const auto first =
+        session
+            .insertEntry(sourcePage.metadata.id, std::nullopt, "[[target]] then [[missing/exact]]")
+            .value()
+            .entries[0];
+    const auto second = session
+                            .insertEntry(sourcePage.metadata.id, first.metadata.id,
+                                         "again [[missing/exact]] not [[missing/other]]")
+                            .value()
+                            .entries[1];
+    const auto links = session.pageLinks(first.metadata.id).value();
+
+    const auto resolved = session.followPageLink(first.metadata.id, links[0].sourceByteOffset + 3);
+    REQUIRE(resolved);
+    REQUIRE(std::holds_alternative<hieda::notebook::PageSummary>(resolved.value()));
+    CHECK(std::get<hieda::notebook::PageSummary>(resolved.value()).metadata.id ==
+          target.metadata.id);
+
+    const auto unresolved = session.followPageLink(first.metadata.id, links[1].sourceByteOffset);
+    REQUIRE(unresolved);
+    REQUIRE(std::holds_alternative<hieda::notebook::PagePreview>(unresolved.value()));
+    const auto& preview = std::get<hieda::notebook::PagePreview>(unresolved.value());
+    CHECK(preview.name == "missing/exact");
+    REQUIRE(preview.sources.size() == 2);
+    CHECK(std::ranges::any_of(preview.sources, [&](const auto& source) -> bool {
+        return source.metadata.id == first.metadata.id;
+    }));
+    CHECK(std::ranges::any_of(preview.sources, [&](const auto& source) -> bool {
+        return source.metadata.id == second.metadata.id;
+    }));
+    CHECK_FALSE(session.pageHierarchyNode("missing/exact").value());
+
+    const auto directPreview = session.pagePreview("missing/exact");
+    REQUIRE(directPreview);
+    CHECK(directPreview.value() == preview);
+}
+
+TEST_CASE("Page rename atomically rewrites resolved Page Links without touching source times") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "rename-page-links.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(path));
+    const auto target = session.createPage("work/alpha", "Alpha").value();
+    const auto sourcePage = session.createPage("source", "Source").value();
+    const auto originalText =
+        std::string{"[[work/alpha]] twice [[work/alpha]] and waiting [[work/beta]]; "
+                    "escaped \\[[work/alpha]]"};
+    const auto source =
+        session.insertEntry(sourcePage.metadata.id, std::nullopt, originalText).value().entries[0];
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
+
+    hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
+    const auto failedRename = session.renamePage(target.metadata.id, "work/gamma", "Gamma");
+    REQUIRE_FALSE(failedRename);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
+    CHECK(session.outline(target.metadata.id).value().name == "work/alpha");
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].authoredText == originalText);
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].metadata.updatedAt ==
+          source.metadata.updatedAt);
+
+    const auto renamed = session.renamePage(target.metadata.id, "work/beta", "Beta");
+
+    REQUIRE(renamed);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision + 1);
+    const auto rewritten = session.outline(sourcePage.metadata.id).value().entries[0];
+    CHECK(rewritten.authoredText ==
+          "[[work/beta]] twice [[work/beta]] and waiting [[work/beta]]; escaped "
+          "\\[[work/alpha]]");
+    CHECK(rewritten.metadata.updatedAt == source.metadata.updatedAt);
+    const auto rewrittenLinks = session.pageLinks(source.metadata.id).value();
+    REQUIRE(rewrittenLinks.size() == 3);
+    CHECK(std::ranges::all_of(rewrittenLinks, [&](const auto& link) -> bool {
+        return link.target && link.target.value().metadata.id == target.metadata.id;
+    }));
+
+    const auto undone = session.undoEdit();
+    REQUIRE(undone);
+    CHECK(session.outline(target.metadata.id).value().name == "work/alpha");
+    const auto restored = session.outline(sourcePage.metadata.id).value().entries[0];
+    CHECK(restored.authoredText == originalText);
+    CHECK(restored.metadata.updatedAt == source.metadata.updatedAt);
+
+    REQUIRE(session.redoEdit());
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].authoredText ==
+          rewritten.authoredText);
+    session.close();
+    REQUIRE(session.open(path));
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].authoredText ==
+          rewritten.authoredText);
+}
+
+TEST_CASE("Page deletion and recreation transition incoming links by conceptual name") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "delete-page-links.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(path));
+    const auto target = session.createPage("concept", "Concept").value();
+    const auto sourcePage = session.createPage("source", "Source").value();
+    const auto source =
+        session.insertEntry(sourcePage.metadata.id, std::nullopt, "[[concept]]").value().entries[0];
+
+    REQUIRE(session.deletePage(target.metadata.id));
+    const auto unresolved = session.pageLinks(source.metadata.id).value()[0];
+    CHECK_FALSE(unresolved.target);
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].metadata.updatedAt ==
+          source.metadata.updatedAt);
+    CHECK(session.pagePreview("concept").value().sources.size() == 1);
+
+    REQUIRE(session.undoEdit());
+    const auto restored = session.pageLinks(source.metadata.id).value()[0];
+    REQUIRE(restored.target);
+    CHECK(restored.target.value_or(hieda::notebook::PageSummary{}).metadata.id ==
+          target.metadata.id);
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].metadata.updatedAt ==
+          source.metadata.updatedAt);
+
+    REQUIRE(session.redoEdit());
+    const auto recreated = session.createPage("concept", "Recreated").value();
+    CHECK(recreated.metadata.id != target.metadata.id);
+    const auto reresolved = session.pageLinks(source.metadata.id).value()[0];
+    REQUIRE(reresolved.target);
+    CHECK(reresolved.target.value_or(hieda::notebook::PageSummary{}).metadata.id ==
+          recreated.metadata.id);
+    CHECK(session.outline(sourcePage.metadata.id).value().entries[0].metadata.updatedAt ==
+          source.metadata.updatedAt);
+}
+
+TEST_CASE("Entry commits replace Page Link meaning atomically and persist it across reopen") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "edit-page-links.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(path));
+    const auto firstTarget = session.createPage("first", "First").value();
+    const auto secondTarget = session.createPage("second", "Second").value();
+    const auto sourcePage = session.createPage("source", "Source").value();
+    const auto entry =
+        session.insertEntry(sourcePage.metadata.id, std::nullopt, "[[first]]").value().entries[0];
+    REQUIRE(session.pageLinks(entry.metadata.id).value()[0].target);
+    CHECK(session.pageLinks(entry.metadata.id)
+              .value()[0]
+              .target.value_or(hieda::notebook::PageSummary{})
+              .metadata.id == firstTarget.metadata.id);
+
+    hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
+    const auto failed = session.updateEntry(entry.metadata.id, "[[second]]");
+    REQUIRE_FALSE(failed);
+    REQUIRE(session.pageLinks(entry.metadata.id).value()[0].target);
+    CHECK(session.pageLinks(entry.metadata.id)
+              .value()[0]
+              .target.value_or(hieda::notebook::PageSummary{})
+              .metadata.id == firstTarget.metadata.id);
+
+    REQUIRE(session.updateEntry(entry.metadata.id, "[[second]] [[second]]"));
+    const auto replaced = session.pageLinks(entry.metadata.id).value();
+    REQUIRE(replaced.size() == 2);
+    CHECK(std::ranges::all_of(replaced, [&](const auto& link) -> bool {
+        return link.target && link.target.value().metadata.id == secondTarget.metadata.id;
+    }));
+    REQUIRE(session.updateEntry(entry.metadata.id, "plain [[incomplete"));
+    CHECK(session.pageLinks(entry.metadata.id).value().empty());
+
+    session.close();
+    REQUIRE(session.open(path));
+    CHECK(session.pageLinks(entry.metadata.id).value().empty());
+}
+
+TEST_CASE("opening a schema v2 Notebook backfills missing Page Link indexes") {
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "page-link-backfill.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    REQUIRE(session.createPage("target", "Target"));
+    const auto source = session.createPage("source", "Source").value();
+    const auto entry =
+        session.insertEntry(source.metadata.id, std::nullopt, "[[target]]").value().entries[0];
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
+
+    session.close();
+    removePageLinkIndexes(notebookPath);
+
+    const auto reopened = session.open(notebookPath);
+    REQUIRE(reopened);
+    CHECK(reopened.value().revision == revision);
+    const auto links = session.pageLinks(entry.metadata.id);
+    REQUIRE(links);
+    REQUIRE(links.value().size() == 1);
+    CHECK(links.value()[0].pageName == "target");
+    REQUIRE(links.value()[0].target);
+    CHECK(links.value()[0].target.value_or(hieda::notebook::PageSummary{}).displayTitle ==
+          "Target");
 }
 
 TEST_CASE("Page Entries provide complete shared outline commands and notifications") {
@@ -826,13 +1118,13 @@ TEST_CASE("editing a Journal Entry acknowledges exact multiline Unicode text") {
 
 TEST_CASE("Journal commands report closed sessions and invalid insertion points") {
     const hieda::notebook::JournalDate date{2026, 8, 7};
+    TemporaryDirectory temporaryDirectory;
     hieda::notebook::NotebookSession session;
 
     const auto closed = session.outline(date);
     REQUIRE_FALSE(closed);
     CHECK(closed.error().code == hieda::notebook::NotebookErrorCode::notebookNotOpen);
 
-    TemporaryDirectory temporaryDirectory;
     REQUIRE(session.create(temporaryDirectory.path() / "positions.hieda"));
     hieda::notebook::BlockId missing;
     missing.bytes.front() = std::byte{1};
@@ -853,14 +1145,16 @@ TEST_CASE("a rejected Journal commit leaves the acknowledged state intact") {
     const auto inserted = session.insertEntry(date, std::nullopt, "durable");
     REQUIRE(inserted);
     const auto entryId = inserted.value().entries.front().metadata.id;
-    const auto revisionBeforeFailure = session.current().value_or({}).revision;
+    const auto revisionBeforeFailure =
+        session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
 
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
     const auto rejected = session.updateEntry(entryId, "not committed");
 
     REQUIRE_FALSE(rejected);
     CHECK(rejected.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
-    CHECK(session.current().value_or({}).revision == revisionBeforeFailure);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision ==
+          revisionBeforeFailure);
     const auto current = session.outline(date);
     REQUIRE(current);
     CHECK(current.value().entries.front().authoredText == "durable");
@@ -928,7 +1222,7 @@ TEST_CASE("a failing subscriber cannot make a committed Journal command appear r
     const auto inserted = session.insertEntry(date, std::nullopt, "committed");
 
     REQUIRE(inserted);
-    CHECK(session.current().value_or({}).revision == 1);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == 1);
     session.close();
     REQUIRE(session.open(temporaryDirectory.path() / "subscriber-failure.hieda"));
     REQUIRE(session.outline(date));
@@ -1080,7 +1374,7 @@ TEST_CASE("invalid and failed structural edits leave the acknowledged outline in
     REQUIRE(inserted);
     const auto entryId = inserted.value().entries.front().metadata.id;
     const auto& acknowledged = inserted.value();
-    const auto revision = session.current().value_or({}).revision;
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
 
     const auto invalidCursor = session.splitEntry(entryId, emojiText, 3);
     REQUIRE_FALSE(invalidCursor);
@@ -1088,14 +1382,14 @@ TEST_CASE("invalid and failed structural edits leave the acknowledged outline in
     const auto invalidMove = session.moveEntry(entryId, hieda::notebook::EntryMove::up, "changed");
     REQUIRE_FALSE(invalidMove);
     CHECK(invalidMove.error().code == hieda::notebook::NotebookErrorCode::invalidStructuralMove);
-    CHECK(session.current().value_or({}).revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     REQUIRE(session.outline(date).value() == acknowledged);
 
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
     const auto failedSplit = session.splitEntry(entryId, emojiText, 2);
     REQUIRE_FALSE(failedSplit);
     CHECK(failedSplit.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
-    CHECK(session.current().value_or({}).revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     CHECK(session.outline(date).value() == acknowledged);
     session.close();
     REQUIRE(session.open(notebookPath));
@@ -1294,12 +1588,12 @@ TEST_CASE("Journal structural commands match a reference outline model") {
     expected.erase(expected.begin() + 2);
     checkModel(actual.value());
 
-    const auto revision = session.current().value_or({}).revision;
+    const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
     const auto failedMove = session.moveEntry(fourthId, hieda::notebook::EntryMove::up, "dirty D");
     REQUIRE_FALSE(failedMove);
     CHECK(failedMove.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
-    CHECK(session.current().value_or({}).revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     checkModel(session.outline(date).value());
 
     const auto rejectedParentDelete = session.deleteEntry(firstId);
@@ -1311,7 +1605,7 @@ TEST_CASE("Journal structural commands match a reference outline model") {
     REQUIRE_FALSE(rejectedOutdent);
     CHECK(rejectedOutdent.error().code ==
           hieda::notebook::NotebookErrorCode::invalidStructuralMove);
-    CHECK(session.current().value_or({}).revision == revision);
+    CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
     checkModel(session.outline(date).value());
 }
 
@@ -1523,16 +1817,23 @@ TEST_CASE("Journal history evicts old actions under its memory budget") {
     hieda::notebook::NotebookSession session;
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "bounded-history.hieda"));
-    const std::string firstText(17ULL * 1024ULL * 1024ULL, 'a');
-    const std::string secondText(17ULL * 1024ULL * 1024ULL, 'b');
+    const std::string firstText(1024ULL * 1024ULL, 'a');
     const auto inserted = session.insertEntry(date, std::nullopt, firstText).value();
     const auto id = inserted.entries.front().metadata.id;
-    REQUIRE(session.updateEntry(id, secondText));
+    for (int index = 0; index < 20; ++index) {
+        REQUIRE(
+            session.updateEntry(id, std::string(1024ULL * 1024ULL, index % 2 == 0 ? 'b' : 'c')));
+    }
 
     const auto restored = session.undoEdit().value().front();
     REQUIRE(restored.entries.size() == 1);
-    CHECK(restored.entries.front().authoredText == firstText);
-    CHECK_FALSE(session.editCapabilities().value().canUndo);
+    CHECK(restored.entries.front().authoredText == std::string(1024ULL * 1024ULL, 'b'));
+    auto undoCount = std::size_t{1};
+    while (session.editCapabilities().value().canUndo) {
+        REQUIRE(session.undoEdit());
+        ++undoCount;
+    }
+    CHECK(undoCount < 21);
     CHECK(session.editCapabilities().value().canRedo);
 }
 
@@ -1542,19 +1843,26 @@ TEST_CASE("ordinary Page history shares the Journal memory budget") {
     REQUIRE(session.create(temporaryDirectory.path() / "bounded-page-history.hieda"));
     const auto page = session.createPage("bounded", "Bounded").value();
     const hieda::notebook::JournalDate date{2026, 8, 8};
-    const std::string firstText(17ULL * 1024ULL * 1024ULL, 'a');
-    const std::string secondText(17ULL * 1024ULL * 1024ULL, 'b');
+    const std::string firstText(1024ULL * 1024ULL, 'a');
     REQUIRE(session.insertEntry(date, std::nullopt, firstText));
     CHECK(session.editCapabilities().value().canUndo);
     const auto inserted = session.insertEntry(page.metadata.id, std::nullopt, firstText).value();
     const auto id = inserted.entries.front().metadata.id;
     CHECK(session.editCapabilities().value().canUndo);
-    REQUIRE(session.updateEntry(id, secondText));
+    for (int index = 0; index < 20; ++index) {
+        REQUIRE(
+            session.updateEntry(id, std::string(1024ULL * 1024ULL, index % 2 == 0 ? 'b' : 'c')));
+    }
 
     const auto restored = session.undoEdit().value().front();
     REQUIRE(restored.entries.size() == 1);
-    CHECK(restored.entries.front().authoredText == firstText);
-    CHECK_FALSE(session.editCapabilities().value().canUndo);
+    CHECK(restored.entries.front().authoredText == std::string(1024ULL * 1024ULL, 'b'));
+    auto undoCount = std::size_t{1};
+    while (session.editCapabilities().value().canUndo) {
+        REQUIRE(session.undoEdit());
+        ++undoCount;
+    }
+    CHECK(undoCount < 23);
     CHECK(session.editCapabilities().value().canRedo);
 }
 
