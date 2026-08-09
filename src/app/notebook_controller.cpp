@@ -64,6 +64,59 @@ auto outlineOutcome(bool succeeded, int row = -1, int cursorPosition = 0) -> QVa
             {QStringLiteral("cursorPosition"), cursorPosition}};
 }
 
+struct CommittedEntryPosition {
+    hieda::notebook::BlockId entryId;
+    std::size_t byteOffset{0};
+};
+
+auto committedEntryPosition(const OutlineEntryModel& entries, const QString& entryIdText,
+                            int characterOffset, const QString& editorText)
+    -> std::optional<CommittedEntryPosition> {
+    const auto entryId = blockId(entryIdText);
+    const auto row = entryId ? entries.rowForId(*entryId) : -1;
+    if (!entryId || row < 0 || characterOffset < 0 || characterOffset > editorText.size() ||
+        editorText != entries.entryText(row)) {
+        return std::nullopt;
+    }
+    return CommittedEntryPosition{
+        *entryId, static_cast<std::size_t>(editorText.first(characterOffset).toUtf8().size())};
+}
+
+template <typename Occurrence>
+auto linkedReferenceSnippet(std::string_view authoredText, const Occurrence& occurrence)
+    -> QString {
+    const auto lineStart = authoredText.rfind('\n', occurrence.sourceByteOffset);
+    const auto lineEnd =
+        authoredText.find('\n', occurrence.sourceByteOffset + occurrence.sourceByteLength);
+    const auto unboundedStart =
+        lineStart == std::string_view::npos ? std::size_t{0} : lineStart + 1;
+    auto snippetStart = unboundedStart;
+    const auto boundedLineEnd = lineEnd == std::string_view::npos ? authoredText.size() : lineEnd;
+    if (occurrence.sourceByteOffset > snippetStart + 60) {
+        snippetStart = occurrence.sourceByteOffset - 60;
+        while (snippetStart < occurrence.sourceByteOffset &&
+               (static_cast<unsigned char>(authoredText[snippetStart]) & 0xC0U) == 0x80U) {
+            ++snippetStart;
+        }
+    }
+    auto snippetEnd = std::min(boundedLineEnd, occurrence.sourceByteOffset +
+                                                   occurrence.sourceByteLength + std::size_t{60});
+    while (snippetEnd < boundedLineEnd &&
+           (static_cast<unsigned char>(authoredText[snippetEnd]) & 0xC0U) == 0x80U) {
+        ++snippetEnd;
+    }
+    auto snippet = QString::fromUtf8(authoredText.data() + snippetStart,
+                                     static_cast<qsizetype>(snippetEnd - snippetStart))
+                       .toHtmlEscaped();
+    if (snippetStart > unboundedStart) {
+        snippet.prepend(QStringLiteral("…"));
+    }
+    if (snippetEnd < boundedLineEnd) {
+        snippet.append(QStringLiteral("…"));
+    }
+    return snippet;
+}
+
 template <typename DomainEntry>
 auto asOutlineEntries(const std::vector<DomainEntry>& domainEntries) -> std::vector<OutlineEntry> {
     std::vector<OutlineEntry> entries;
@@ -97,6 +150,21 @@ auto OutlineEntryModel::data(const QModelIndex& index, int role) const -> QVaria
     }
     if (role == ParentEntryIdRole) {
         return entry.parentEntry ? displayId(*entry.parentEntry) : QString{};
+    }
+    if (role == LinkedReferenceContextRole) {
+        return entry.linkedReferenceContext;
+    }
+    if (role == LinkedReferenceGroupRole) {
+        return entry.linkedReferenceGroup;
+    }
+    if (role == LinkedReferencePresentationRole) {
+        return entry.linkedReferencePresentation;
+    }
+    if (role == LinkedReferenceOccurrenceCountRole) {
+        return entry.linkedReferenceOccurrenceCount;
+    }
+    if (role == LinkedReferenceHasMoreOccurrencesRole) {
+        return entry.linkedReferenceHasMoreOccurrences;
     }
     const auto parent = entry.parentEntry;
     const auto hasChildren = std::ranges::any_of(entries_, [&](const auto& candidate) -> bool {
@@ -146,13 +214,30 @@ auto OutlineEntryModel::roleNames() const -> QHash<int, QByteArray> {
             {CanOutdentRole, "canOutdent"},
             {CanMoveUpRole, "canMoveUp"},
             {CanMoveDownRole, "canMoveDown"},
-            {CanDeleteRole, "canDelete"}};
+            {CanDeleteRole, "canDelete"},
+            {LinkedReferenceContextRole, "linkedReferenceContext"},
+            {LinkedReferenceGroupRole, "linkedReferenceGroup"},
+            {LinkedReferencePresentationRole, "linkedReferencePresentation"},
+            {LinkedReferenceOccurrenceCountRole, "linkedReferenceOccurrenceCount"},
+            {LinkedReferenceHasMoreOccurrencesRole, "linkedReferenceHasMoreOccurrences"}};
 }
 
 void OutlineEntryModel::setEntries(std::vector<OutlineEntry> entries) {
     beginResetModel();
     entries_ = std::move(entries);
     endResetModel();
+}
+
+void OutlineEntryModel::appendEntries(std::vector<OutlineEntry> entries) {
+    if (entries.empty()) {
+        return;
+    }
+    const auto first = static_cast<int>(entries_.size());
+    const auto last = first + static_cast<int>(entries.size()) - 1;
+    beginInsertRows({}, first, last);
+    entries_.insert(entries_.end(), std::make_move_iterator(entries.begin()),
+                    std::make_move_iterator(entries.end()));
+    endInsertRows();
 }
 
 void OutlineEntryModel::insertEntry(int row, OutlineEntry entry) {
@@ -180,6 +265,27 @@ void OutlineEntryModel::updateEntry(const OutlineEntry& entry) {
     const auto row = static_cast<int>(std::distance(entries_.begin(), found));
     const auto changed = index(row);
     emit dataChanged(changed, changed, {AuthoredTextRole});
+}
+
+void OutlineEntryModel::appendLinkedReferencePresentation(const hieda::notebook::BlockId& entryId,
+                                                          const QString& presentation,
+                                                          bool hasMore) {
+    const auto found = std::ranges::find_if(
+        entries_, [&](const auto& current) -> bool { return current.metadata.id == entryId; });
+    if (found == entries_.end()) {
+        return;
+    }
+    if (!presentation.isEmpty()) {
+        if (!found->linkedReferencePresentation.isEmpty()) {
+            found->linkedReferencePresentation.append(QStringLiteral("<br>"));
+        }
+        found->linkedReferencePresentation.append(presentation);
+    }
+    found->linkedReferenceHasMoreOccurrences = hasMore;
+    const auto row = static_cast<int>(std::distance(entries_.begin(), found));
+    const auto changed = index(row);
+    emit dataChanged(changed, changed,
+                     {LinkedReferencePresentationRole, LinkedReferenceHasMoreOccurrencesRole});
 }
 
 auto OutlineEntryModel::entryId(int row) const -> QString {
@@ -512,8 +618,14 @@ auto PageHierarchyModel::pageName(const QModelIndex& index) -> QString {
 }
 
 NotebookController::NotebookController(QObject* parent)
-    : QObject(parent), outlineEntries_(this), pageHierarchy_(this), midnightTimer_(this) {
+    : QObject(parent), outlineEntries_(this), pagePreviewSources_(this),
+      linkedReferenceSources_(this), blockLinkedReferenceSources_(this), pageHierarchy_(this),
+      midnightTimer_(this) {
     pageHierarchy_.attach(&session_);
+    subscription_ = session_.subscribeToChanges([this]() -> void {
+        refreshLinkedReferences();
+        refreshBlockLinkedReferences();
+    });
     midnightTimer_.setSingleShot(true);
     connect(&midnightTimer_, &QTimer::timeout, this, [this]() -> void {
         if (hasOpenNotebook() && isJournalPage()) {
@@ -547,6 +659,19 @@ auto NotebookController::outlineEntries() -> QAbstractItemModel* {
 }
 auto NotebookController::pagePreviewSources() -> QAbstractItemModel* {
     return &pagePreviewSources_;
+}
+auto NotebookController::pagePreviewUnresolvedPageLinkSourceTotal() const -> qsizetype {
+    return pagePreviewUnresolvedPageLinkSourceTotal_;
+}
+auto NotebookController::hasMorePagePreviewUnresolvedPageLinkSources() const -> bool {
+    return pagePreviewUnresolvedPageLinkSourcesCursor_.has_value();
+}
+
+auto NotebookController::linkedReferenceSources() -> QAbstractItemModel* {
+    return &linkedReferenceSources_;
+}
+auto NotebookController::blockLinkedReferenceSources() -> QAbstractItemModel* {
+    return &blockLinkedReferenceSources_;
 }
 auto NotebookController::pageHierarchy() -> QAbstractItemModel* {
     return &pageHierarchy_;
@@ -582,6 +707,32 @@ auto NotebookController::currentPagePreview() const -> bool {
 }
 auto NotebookController::pageChoices() const -> QStringList {
     return pageChoices_;
+}
+auto NotebookController::selectedBlockReferenceTargetId() const -> QString {
+    return selectedBlockReferenceTargetId_ ? displayId(*selectedBlockReferenceTargetId_)
+                                           : QString{};
+}
+auto NotebookController::linkedReferenceTargetId() const -> QString {
+    return pageLinkedReferences_.targetId ? displayId(*pageLinkedReferences_.targetId) : QString{};
+}
+auto NotebookController::linkedReferenceTotal() const -> qsizetype {
+    return pageLinkedReferences_.total;
+}
+auto NotebookController::hasMoreLinkedReferences() const -> bool {
+    return pageLinkedReferences_.cursor.has_value();
+}
+auto NotebookController::blockLinkedReferenceTargetId() const -> QString {
+    return blockLinkedReferences_.targetId ? displayId(*blockLinkedReferences_.targetId)
+                                           : QString{};
+}
+auto NotebookController::blockLinkedReferenceTotal() const -> qsizetype {
+    return blockLinkedReferences_.total;
+}
+auto NotebookController::hasMoreBlockLinkedReferences() const -> bool {
+    return blockLinkedReferences_.cursor.has_value();
+}
+auto NotebookController::identifiedBlockId() const -> QString {
+    return identifiedBlockId_ ? displayId(*identifiedBlockId_) : QString{};
 }
 auto NotebookController::pageIdAt(qsizetype index) const -> QString {
     return index >= 0 && static_cast<std::size_t>(index) < pageIds_.size()
@@ -631,10 +782,19 @@ void NotebookController::closeNotebook() {
     currentPagePreview_ = false;
     currentPageName_.clear();
     currentPageTitle_.clear();
+    pagePreviewUnresolvedPageLinkSourceTotal_ = 0;
+    pagePreviewUnresolvedPageLinkSourcesCursor_.reset();
+    pagePreviewUnresolvedPageLinkOccurrenceCursors_.clear();
     pageChoices_.clear();
     pageIds_.clear();
+    selectedBlockReferenceTargetId_.reset();
+    pageLinkedReferences_ = {};
+    blockLinkedReferences_ = {};
+    identifiedBlockId_.reset();
     outlineEntries_.setEntries({});
     pagePreviewSources_.setEntries({});
+    linkedReferenceSources_.setEntries({});
+    blockLinkedReferenceSources_.setEntries({});
     pageHierarchy_.clear();
     emit stateChanged();
     emit destinationChanged();
@@ -1291,14 +1451,12 @@ void NotebookController::navigateToPageName(const QString& pageName) {
 
 auto NotebookController::followPageLink(const QString& entryId, int characterOffset,
                                         const QString& editorText) -> bool {
-    const auto id = blockId(entryId);
-    const auto row = id ? outlineEntries_.rowForId(*id) : -1;
-    if (!id || row < 0 || characterOffset < 0 || characterOffset > editorText.size() ||
-        editorText != outlineEntries_.entryText(row)) {
+    const auto position =
+        committedEntryPosition(outlineEntries_, entryId, characterOffset, editorText);
+    if (!position) {
         return false;
     }
-    const auto prefix = editorText.first(characterOffset).toUtf8();
-    const auto destination = session_.followPageLink(*id, static_cast<std::size_t>(prefix.size()));
+    const auto destination = session_.followPageLink(position->entryId, position->byteOffset);
     if (!destination) {
         if (destination.error().code != hieda::notebook::NotebookErrorCode::pageLinkNotFound) {
             reject(destination.error());
@@ -1312,6 +1470,169 @@ auto NotebookController::followPageLink(const QString& entryId, int characterOff
             QString::fromUtf8(std::get<hieda::notebook::PagePreview>(destination.value()).name));
     }
     return true;
+}
+
+auto NotebookController::followBlockReference(const QString& entryId, int characterOffset,
+                                              const QString& editorText) -> bool {
+    const auto position =
+        committedEntryPosition(outlineEntries_, entryId, characterOffset, editorText);
+    if (!position) {
+        return false;
+    }
+    const auto destination = session_.followBlockReference(position->entryId, position->byteOffset);
+    if (!destination) {
+        if (destination.error().code == hieda::notebook::NotebookErrorCode::blockNotFound) {
+            error_ = tr("Block not found.");
+            emit stateChanged();
+        } else if (destination.error().code !=
+                   hieda::notebook::NotebookErrorCode::blockReferenceNotFound) {
+            reject(destination.error());
+        }
+        return false;
+    }
+    static_cast<void>(navigateToOutlinePage(destination.value().structuralPage));
+    identifiedBlockId_ = destination.value().target.id;
+    emit stateChanged();
+    return true;
+}
+
+auto NotebookController::followSemanticReference(const QString& entryId, int characterOffset,
+                                                 const QString& editorText) -> bool {
+    identifiedBlockId_.reset();
+    return followPageLink(entryId, characterOffset, editorText) ||
+           followBlockReference(entryId, characterOffset, editorText);
+}
+
+auto NotebookController::insertBlockReference(const QString& sourceEntryId, int characterOffset,
+                                              const QString& editorText,
+                                              const QString& targetIdText) -> bool {
+    const auto sourcePosition =
+        committedEntryPosition(outlineEntries_, sourceEntryId, characterOffset, editorText);
+    const auto targetId = blockId(targetIdText);
+    if (!sourcePosition || !targetId) {
+        return false;
+    }
+    const auto result = session_.insertBlockReference(sourcePosition->entryId,
+                                                      sourcePosition->byteOffset, *targetId);
+    if (!result) {
+        rejectSave(result.error());
+        return false;
+    }
+    outlineEntries_.updateEntry(
+        {result.value().metadata, result.value().authoredText, result.value().parentEntry});
+    error_.clear();
+    emit stateChanged();
+    return true;
+}
+
+auto NotebookController::blockReferenceNotation(const QString& targetId) -> QString {
+    return blockId(targetId) ? QStringLiteral("[[block:%1]]").arg(targetId.toLower()) : QString{};
+}
+
+auto NotebookController::selectBlockReferenceTarget(const QString& targetIdText) -> bool {
+    const auto targetId = blockId(targetIdText);
+    if (!targetId) {
+        return false;
+    }
+    const auto linked = session_.linkedReferences(*targetId);
+    if (!linked) {
+        reject(linked.error());
+        return false;
+    }
+    selectedBlockReferenceTargetId_ = targetId;
+    error_.clear();
+    emit stateChanged();
+    return true;
+}
+
+auto NotebookController::insertSelectedBlockReference(const QString& sourceEntryId,
+                                                      int characterOffset,
+                                                      const QString& editorText) -> bool {
+    return selectedBlockReferenceTargetId_ &&
+           insertBlockReference(sourceEntryId, characterOffset, editorText,
+                                displayId(*selectedBlockReferenceTargetId_));
+}
+
+auto NotebookController::browseLinkedReferences(const QString& targetIdText) -> bool {
+    const auto targetId = blockId(targetIdText);
+    if (!targetId) {
+        return false;
+    }
+    const auto linked = session_.linkedReferences(*targetId);
+    if (!linked) {
+        reject(linked.error());
+        return false;
+    }
+    blockLinkedReferences_.targetId = targetId;
+    refreshBlockLinkedReferences();
+    emit stateChanged();
+    return true;
+}
+
+auto NotebookController::followLinkedReferenceSource(const QString& sourceEntryId) -> bool {
+    return followLinkedReferenceSourceFor(sourceEntryId, pageLinkedReferences_);
+}
+
+auto NotebookController::followBlockLinkedReferenceSource(const QString& sourceEntryId) -> bool {
+    return followLinkedReferenceSourceFor(sourceEntryId, blockLinkedReferences_);
+}
+
+auto NotebookController::followLinkedReferenceSourceFor(const QString& sourceEntryId,
+                                                        const IncomingSourcesViewState& view)
+    -> bool {
+    const auto sourceId = blockId(sourceEntryId);
+    if (!sourceId || !view.targetId) {
+        return false;
+    }
+    std::optional<std::string> cursor;
+    do {
+        const auto linked = session_.linkedReferences(*view.targetId, cursor);
+        if (!linked) {
+            reject(linked.error());
+            return false;
+        }
+        const auto found = std::ranges::find_if(linked.value().sources, [&](const auto& source) {
+            return source.source.metadata.id == *sourceId;
+        });
+        if (found != linked.value().sources.end()) {
+            return navigateToOutlinePage(found->structuralPage);
+        }
+        cursor = linked.value().continuationCursor;
+    } while (cursor);
+    return false;
+}
+
+auto NotebookController::linkedReferenceContext(const QString& sourceEntryId) const -> QString {
+    return pageLinkedReferences_.contexts.value(sourceEntryId);
+}
+
+auto NotebookController::followPagePreviewSource(const QString& sourceEntryId) -> bool {
+    const auto sourceId = blockId(sourceEntryId);
+    if (!sourceId || !currentPagePreview_) {
+        return false;
+    }
+    const auto destination = session_.locateBlock(*sourceId);
+    if (!destination) {
+        reject(destination.error());
+        return false;
+    }
+    static_cast<void>(navigateToOutlinePage(destination.value().structuralPage));
+    identifiedBlockId_ = *sourceId;
+    emit stateChanged();
+    return true;
+}
+
+auto NotebookController::navigateToOutlinePage(const hieda::notebook::OutlinePage& page) -> bool {
+    if (page.kind == hieda::notebook::PageKind::journal) {
+        const auto date = page.journalDate.value_or(hieda::notebook::JournalDate{});
+        loadJournalDate(QDate(date.year, date.month, date.day));
+        return true;
+    }
+    if (page.metadata) {
+        loadPage(page.metadata->id);
+        return true;
+    }
+    return false;
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
@@ -1330,25 +1651,43 @@ auto NotebookController::committedEntryPresentation(const QString& entryId,
     }
     const auto utf8 = authoredText.toUtf8();
     const std::string_view source{utf8.constData(), static_cast<std::size_t>(utf8.size())};
-    const auto links = session_.pageLinks(*id);
-    if (!links) {
+    const auto pageLinks = session_.pageLinks(*id);
+    const auto blockReferences = session_.blockReferences(*id);
+    if (!pageLinks || !blockReferences) {
         return escapeText(decodeText(source));
     }
+    struct SemanticReferencePresentation {
+        std::size_t offset{0};
+        std::size_t length{0};
+        QString label;
+    };
+    std::vector<SemanticReferencePresentation> references;
+    references.reserve(pageLinks.value().size() + blockReferences.value().size());
+    for (const auto& link : pageLinks.value()) {
+        references.push_back(
+            {link.sourceByteOffset, link.sourceByteLength,
+             QString::fromUtf8(link.target ? link.target->displayTitle : link.pageName)});
+    }
+    for (const auto& reference : blockReferences.value()) {
+        const auto prefix = QString::fromStdString(reference.targetId.toString()).first(8);
+        references.push_back(
+            {reference.sourceByteOffset, reference.sourceByteLength,
+             reference.target ? tr("Block %1").arg(prefix) : tr("Missing Block %1").arg(prefix)});
+    }
+    std::ranges::sort(references, {}, &SemanticReferencePresentation::offset);
     QString presentation;
     std::size_t sourceOffset = 0;
     qsizetype characterOffset = 0;
-    for (const auto& link : links.value()) {
+    for (const auto& reference : references) {
         const auto prefix =
-            decodeText(source.substr(sourceOffset, link.sourceByteOffset - sourceOffset));
+            decodeText(source.substr(sourceOffset, reference.offset - sourceOffset));
         presentation += escapeText(prefix);
         characterOffset += prefix.size();
-        const auto displayText = link.target ? link.target->displayTitle : link.pageName;
         presentation += QStringLiteral("<a href=\"%1\">%2</a>")
                             .arg(characterOffset)
-                            .arg(QString::fromUtf8(displayText).toHtmlEscaped());
-        characterOffset +=
-            decodeText(source.substr(link.sourceByteOffset, link.sourceByteLength)).size();
-        sourceOffset = link.sourceByteOffset + link.sourceByteLength;
+                            .arg(reference.label.toHtmlEscaped());
+        characterOffset += decodeText(source.substr(reference.offset, reference.length)).size();
+        sourceOffset = reference.offset + reference.length;
     }
     presentation += escapeText(decodeText(source.substr(sourceOffset)));
     return presentation;
@@ -1464,6 +1803,12 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
     case NotebookErrorCode::pageLinkNotFound:
         error_ = tr("Place the cursor inside a committed Page Link before following it.");
         break;
+    case NotebookErrorCode::blockReferenceNotFound:
+        error_ = tr("Place the cursor inside a committed Block Reference before following it.");
+        break;
+    case NotebookErrorCode::staleLinkedReferencesCursor:
+        error_ = tr("Linked References changed; reload them from the beginning.");
+        break;
     }
     emit stateChanged();
 }
@@ -1491,6 +1836,11 @@ void NotebookController::loadJournalDate(const QDate& date) {
         currentPageTitle_.clear();
         outlineEntries_.setEntries(asOutlineEntries(result.value().entries));
         pagePreviewSources_.setEntries({});
+        pageLinkedReferences_.targetId =
+            result.value().metadata
+                ? std::optional<hieda::notebook::BlockId>{result.value().metadata->id}
+                : std::nullopt;
+        refreshLinkedReferences();
         static_cast<void>(pageHierarchy_.refresh({}));
         emit destinationChanged();
         emit stateChanged();
@@ -1514,6 +1864,8 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
         currentPageTitle_ = QString::fromUtf8(result.value().displayTitle);
         outlineEntries_.setEntries(asOutlineEntries(result.value().entries));
         pagePreviewSources_.setEntries({});
+        pageLinkedReferences_.targetId = pageId;
+        refreshLinkedReferences();
         static_cast<void>(pageHierarchy_.refresh(currentPageName_));
         error_.clear();
         emit destinationChanged();
@@ -1526,8 +1878,8 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
 
 void NotebookController::loadPagePreview(const QString& pageName) {
     const auto utf8 = pageName.toUtf8();
-    const auto preview =
-        session_.pagePreview({utf8.constData(), static_cast<std::size_t>(utf8.size())});
+    const std::string name{utf8.constData(), static_cast<std::size_t>(utf8.size())};
+    const auto preview = session_.unresolvedPageLinkSources(name);
     if (!preview) {
         if (preview.error().code != hieda::notebook::NotebookErrorCode::pageNameConflict) {
             reject(preview.error());
@@ -1540,17 +1892,298 @@ void NotebookController::loadPagePreview(const QString& pageName) {
     currentPageName_ = pageName;
     currentPageTitle_.clear();
     outlineEntries_.setEntries({});
-    pagePreviewSources_.setEntries(preview ? asOutlineEntries(preview.value().sources)
-                                           : std::vector<OutlineEntry>{});
+    pageLinkedReferences_.targetId.reset();
+    linkedReferenceSources_.setEntries({});
+    pageLinkedReferences_.contexts.clear();
+    pageLinkedReferences_.total = 0;
+    pagePreviewSources_.setEntries({});
+    pagePreviewUnresolvedPageLinkOccurrenceCursors_.clear();
+    pagePreviewUnresolvedPageLinkSourceTotal_ = 0;
+    pagePreviewUnresolvedPageLinkSourcesCursor_.reset();
+    if (preview) {
+        appendPagePreviewUnresolvedPageLinkSourcesBatch(preview.value());
+    }
     error_.clear();
     static_cast<void>(pageHierarchy_.refresh(currentPageName_));
     emit destinationChanged();
     emit stateChanged();
 }
 
+void NotebookController::appendPagePreviewUnresolvedPageLinkSourcesBatch(
+    const hieda::notebook::UnresolvedPageLinkSourcesBatch& batch) {
+    IncomingSourcesViewState view;
+    appendIncomingSourcesBatch(batch, view, pagePreviewSources_);
+    pagePreviewUnresolvedPageLinkSourceTotal_ = view.total;
+    pagePreviewUnresolvedPageLinkSourcesCursor_ = view.cursor;
+    const auto utf8 = currentPageName_.toUtf8();
+    const std::string name{utf8.constData(), static_cast<std::size_t>(utf8.size())};
+    for (const auto& source : batch.sources) {
+        if (source.occurrenceCount <= source.occurrences.size()) {
+            continue;
+        }
+        const auto first = session_.unresolvedPageLinkOccurrences(name, source.source.metadata.id);
+        if (first && first.value().continuationCursor) {
+            pagePreviewUnresolvedPageLinkOccurrenceCursors_.insert(
+                displayId(source.source.metadata.id), *first.value().continuationCursor);
+        }
+    }
+}
+
+auto NotebookController::loadMorePagePreviewUnresolvedPageLinkSources() -> bool {
+    if (!currentPagePreview_ || !pagePreviewUnresolvedPageLinkSourcesCursor_) {
+        return false;
+    }
+    const auto utf8 = currentPageName_.toUtf8();
+    auto batch = session_.unresolvedPageLinkSources(
+        {utf8.constData(), static_cast<std::size_t>(utf8.size())},
+        pagePreviewUnresolvedPageLinkSourcesCursor_);
+    if (!batch &&
+        batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+        loadPagePreview(currentPageName_);
+        return true;
+    }
+    if (!batch) {
+        reject(batch.error());
+        return false;
+    }
+    appendPagePreviewUnresolvedPageLinkSourcesBatch(batch.value());
+    emit stateChanged();
+    return true;
+}
+
+auto NotebookController::loadMorePagePreviewUnresolvedPageLinkOccurrences(
+    const QString& sourceEntryId) -> bool {
+    const auto sourceId = blockId(sourceEntryId);
+    const auto foundCursor = pagePreviewUnresolvedPageLinkOccurrenceCursors_.find(sourceEntryId);
+    if (!currentPagePreview_ || !sourceId ||
+        foundCursor == pagePreviewUnresolvedPageLinkOccurrenceCursors_.end()) {
+        return false;
+    }
+    const auto utf8 = currentPageName_.toUtf8();
+    const auto batch = session_.unresolvedPageLinkOccurrences(
+        {utf8.constData(), static_cast<std::size_t>(utf8.size())}, *sourceId, foundCursor.value());
+    if (!batch) {
+        if (batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+            loadPagePreview(currentPageName_);
+            return true;
+        }
+        reject(batch.error());
+        return false;
+    }
+    const auto row = pagePreviewSources_.rowForId(*sourceId);
+    const auto authored = pagePreviewSources_.entryText(row).toUtf8();
+    QStringList snippets;
+    for (const auto& occurrence : batch.value().occurrences) {
+        snippets.push_back(linkedReferenceSnippet(
+            {authored.constData(), static_cast<std::size_t>(authored.size())}, occurrence));
+    }
+    if (batch.value().continuationCursor) {
+        foundCursor.value() = *batch.value().continuationCursor;
+    } else {
+        pagePreviewUnresolvedPageLinkOccurrenceCursors_.erase(foundCursor);
+    }
+    pagePreviewSources_.appendLinkedReferencePresentation(
+        *sourceId, snippets.join(QStringLiteral("<br>")),
+        batch.value().continuationCursor.has_value());
+    emit stateChanged();
+    return true;
+}
+
 auto NotebookController::currentPageAddress() const -> hieda::notebook::PageAddress {
     return currentPageId_ ? hieda::notebook::PageAddress{*currentPageId_}
                           : hieda::notebook::PageAddress{domainJournalDate(journalDate_)};
+}
+
+void NotebookController::refreshLinkedReferences() {
+    linkedReferenceSources_.setEntries({});
+    pageLinkedReferences_.total = 0;
+    pageLinkedReferences_.cursor.reset();
+    pageLinkedReferences_.contexts.clear();
+    pageLinkedReferences_.occurrenceCursors.clear();
+    if (!session_.isOpen() || !pageLinkedReferences_.targetId) {
+        return;
+    }
+    const auto batch = session_.linkedReferences(*pageLinkedReferences_.targetId);
+    if (!batch) {
+        pageLinkedReferences_.targetId.reset();
+        return;
+    }
+    appendIncomingSourcesBatch(batch.value(), pageLinkedReferences_, linkedReferenceSources_);
+}
+
+template <typename Batch>
+void NotebookController::appendIncomingSourcesBatch(const Batch& batch,
+                                                    IncomingSourcesViewState& view,
+                                                    OutlineEntryModel& model) {
+    view.total = static_cast<qsizetype>(batch.totalSourceCount);
+    view.cursor = batch.continuationCursor;
+    std::vector<OutlineEntry> entries;
+    entries.reserve(batch.sources.size());
+    for (const auto& source : batch.sources) {
+        QStringList pathParts;
+        if (source.structuralPage.kind == hieda::notebook::PageKind::journal) {
+            const auto date =
+                source.structuralPage.journalDate.value_or(hieda::notebook::JournalDate{});
+            pathParts.push_back(QDate(date.year, date.month, date.day).toString(Qt::ISODate));
+        } else {
+            pathParts.push_back(
+                QStringLiteral("%1 — %2").arg(QString::fromUtf8(source.structuralPage.displayTitle),
+                                              QString::fromUtf8(source.structuralPage.name)));
+        }
+        for (const auto& ancestorId : source.containmentPath) {
+            if (ancestorId == source.source.metadata.id) {
+                break;
+            }
+            const auto ancestor =
+                std::ranges::find_if(source.structuralPage.entries, [&](const auto& entry) -> bool {
+                    return entry.metadata.id == ancestorId;
+                });
+            if (ancestor != source.structuralPage.entries.end()) {
+                auto label = QString::fromUtf8(ancestor->authoredText).section('\n', 0, 0);
+                if (label.size() > 40) {
+                    label = label.first(37) + QStringLiteral("…");
+                }
+                pathParts.push_back(label);
+            }
+        }
+        const auto group = pathParts.takeFirst();
+        const auto context =
+            pathParts.isEmpty() ? tr("Top level") : pathParts.join(QStringLiteral(" › "));
+        QStringList snippets;
+        for (const auto& occurrence : source.occurrences) {
+            snippets.push_back(linkedReferenceSnippet(source.source.authoredText, occurrence));
+        }
+        const auto presentation = snippets.join(QStringLiteral("<br>"));
+        const auto sourceId = displayId(source.source.metadata.id);
+        view.contexts.insert(sourceId, context);
+        if (view.targetId && source.occurrenceCount > source.occurrences.size()) {
+            const auto first =
+                session_.linkedReferenceOccurrences(*view.targetId, source.source.metadata.id);
+            if (first && first.value().continuationCursor) {
+                view.occurrenceCursors.insert(sourceId, *first.value().continuationCursor);
+            }
+        }
+        entries.push_back({source.source.metadata, source.source.authoredText,
+                           source.source.parentEntry, context, group, presentation,
+                           static_cast<qsizetype>(source.occurrenceCount),
+                           source.occurrenceCount > source.occurrences.size()});
+    }
+    model.appendEntries(std::move(entries));
+}
+
+auto NotebookController::loadMoreLinkedReferences() -> bool {
+    if (!pageLinkedReferences_.targetId || !pageLinkedReferences_.cursor) {
+        return false;
+    }
+    auto batch =
+        session_.linkedReferences(*pageLinkedReferences_.targetId, pageLinkedReferences_.cursor);
+    if (!batch &&
+        batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+        refreshLinkedReferences();
+        emit stateChanged();
+        return true;
+    }
+    if (!batch) {
+        reject(batch.error());
+        return false;
+    }
+    appendIncomingSourcesBatch(batch.value(), pageLinkedReferences_, linkedReferenceSources_);
+    emit stateChanged();
+    return true;
+}
+
+void NotebookController::refreshBlockLinkedReferences() {
+    blockLinkedReferenceSources_.setEntries({});
+    blockLinkedReferences_.total = 0;
+    blockLinkedReferences_.cursor.reset();
+    blockLinkedReferences_.contexts.clear();
+    blockLinkedReferences_.occurrenceCursors.clear();
+    if (!session_.isOpen() || !blockLinkedReferences_.targetId) {
+        return;
+    }
+    const auto batch = session_.linkedReferences(*blockLinkedReferences_.targetId);
+    if (!batch) {
+        blockLinkedReferences_.targetId.reset();
+        return;
+    }
+    appendIncomingSourcesBatch(batch.value(), blockLinkedReferences_, blockLinkedReferenceSources_);
+}
+
+auto NotebookController::loadMoreBlockLinkedReferences() -> bool {
+    if (!blockLinkedReferences_.targetId || !blockLinkedReferences_.cursor) {
+        return false;
+    }
+    auto batch =
+        session_.linkedReferences(*blockLinkedReferences_.targetId, blockLinkedReferences_.cursor);
+    if (!batch &&
+        batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+        refreshBlockLinkedReferences();
+        emit stateChanged();
+        return true;
+    }
+    if (!batch) {
+        reject(batch.error());
+        return false;
+    }
+    appendIncomingSourcesBatch(batch.value(), blockLinkedReferences_, blockLinkedReferenceSources_);
+    emit stateChanged();
+    return true;
+}
+
+auto NotebookController::loadMoreLinkedReferenceOccurrencesFor(
+    const hieda::notebook::BlockId& targetId, const QString& sourceEntryId,
+    OutlineEntryModel& model, QHash<QString, std::string>& occurrenceCursors) -> bool {
+    const auto sourceId = blockId(sourceEntryId);
+    const auto foundCursor = occurrenceCursors.find(sourceEntryId);
+    if (!sourceId || foundCursor == occurrenceCursors.end()) {
+        return false;
+    }
+    const auto batch =
+        session_.linkedReferenceOccurrences(targetId, *sourceId, foundCursor.value());
+    if (!batch) {
+        if (batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+            refreshLinkedReferences();
+            refreshBlockLinkedReferences();
+            emit stateChanged();
+            return true;
+        }
+        reject(batch.error());
+        return false;
+    }
+    const auto row = model.rowForId(*sourceId);
+    if (row < 0) {
+        return false;
+    }
+    const auto authored = model.entryText(row).toUtf8();
+    QStringList snippets;
+    for (const auto& occurrence : batch.value().occurrences) {
+        snippets.push_back(linkedReferenceSnippet(
+            {authored.constData(), static_cast<std::size_t>(authored.size())}, occurrence));
+    }
+    if (batch.value().continuationCursor) {
+        foundCursor.value() = *batch.value().continuationCursor;
+    } else {
+        occurrenceCursors.erase(foundCursor);
+    }
+    model.appendLinkedReferencePresentation(*sourceId, snippets.join(QStringLiteral("<br>")),
+                                            batch.value().continuationCursor.has_value());
+    emit stateChanged();
+    return true;
+}
+
+auto NotebookController::loadMoreLinkedReferenceOccurrences(const QString& sourceEntryId) -> bool {
+    return pageLinkedReferences_.targetId &&
+           loadMoreLinkedReferenceOccurrencesFor(*pageLinkedReferences_.targetId, sourceEntryId,
+                                                 linkedReferenceSources_,
+                                                 pageLinkedReferences_.occurrenceCursors);
+}
+
+auto NotebookController::loadMoreBlockLinkedReferenceOccurrences(const QString& sourceEntryId)
+    -> bool {
+    return blockLinkedReferences_.targetId &&
+           loadMoreLinkedReferenceOccurrencesFor(*blockLinkedReferences_.targetId, sourceEntryId,
+                                                 blockLinkedReferenceSources_,
+                                                 blockLinkedReferences_.occurrenceCursors);
 }
 
 void NotebookController::refreshPages() {
