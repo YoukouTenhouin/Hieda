@@ -19,3 +19,8 @@ New Page, Go to Page, and Rename Page dialogs provide keyboard-accessible comman
 The schema-v1 `pages_by_title` physical database was reserved before title semantics were settled.
 It now stores the unique name-to-identity index. Display titles are stored in the Page Block and are
 not indexed by that database. This avoids rewriting valid Notebooks created by earlier tickets.
+
+Changing only a display title rewrites no Authored Text and changes no Semantic Reference or source
+Block Update Time. Resolved Page Links and Block References obtain the current title when rendered.
+Selection lists and Linked Reference group labels disambiguate duplicate display titles as
+`Display Title — page_name`; exact Page-name lookup remains unaffected by title collisions.

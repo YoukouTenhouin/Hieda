@@ -44,6 +44,11 @@ successful commit reparses the complete Entry and atomically replaces its text, 
 forward and reverse relationship indexes, timestamp, revision, and undo state. Pending drafts keep
 the last committed derived state; a failed commit changes no durable state.
 
+While an Entry is actively edited, its Draft is presented as plain text: notation is not rendered
+as interactive meaning and all apparent links are inert. Link rendering and activation resume only
+after the Draft commits successfully. The previously committed derived state may continue serving
+other views and indexes while the Draft is open, but it is not projected onto the Draft editor.
+
 Parser results retain source-ordered typed occurrences with UTF-8 byte ranges. Equal link
 occurrences collapse to one Semantic Reference for each source Block, target Block, and reference
 kind, while Properties retain their ordered duplicate values. Syntax recognition does not consult

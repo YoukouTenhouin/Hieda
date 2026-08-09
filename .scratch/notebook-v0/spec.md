@@ -32,8 +32,8 @@ A deep, toolkit-neutral C++ Notebook module owns content behavior, transactions,
 12. As a note-taker, I want each calendar date to have a distinct Journal Page, so that entries retain their daily context.
 13. As a note-taker, I want to navigate to earlier or later Journal Pages, so that I can review notes chronologically.
 14. As a note-taker, I want to create titled Pages in addition to Journal Pages, so that I can organize enduring topics.
-15. As a note-taker, I want to enter a Page Link using lightweight notation such as `[[Project Alpha]]`, so that linking while typing remains fast.
-16. As a note-taker, I want a Page Link to target stable Page identity rather than mutable title text, so that renaming a Page does not break existing links.
+15. As a note-taker, I want to enter a Page Link using lightweight notation such as `[[project_alpha]]`, so that linking while typing remains fast.
+16. As a note-taker, I want Page renames to rewrite Page Links without changing their resolved target, so that names remain literal and renaming does not break existing links.
 17. As a note-taker, I want to create a Block Reference by explicitly selecting a Block, so that I can link directly to a particular idea.
 18. As a note-taker, I want to follow Page Links and Block References, so that I can move through connected material.
 19. As a note-taker, I want to see incoming Linked References for a Page or Block, so that I can discover where an idea is discussed elsewhere.
@@ -87,7 +87,7 @@ A deep, toolkit-neutral C++ Notebook module owns content behavior, transactions,
 - A Journal Entry is a short plain-text Block included under a Journal Page. Entries may recursively contain ordered child Blocks.
 - Containment is ordered and single-parent: a Block has at most one containment parent. Reuse in other contexts occurs through Semantic References, not multiple Containment.
 - Semantic Reference types have their own invariants and do not imply ordering, ownership, or deletion behavior.
-- A Page Link is authored by title but persists stable Page identity. A Block Reference directly targets stable Block identity. Linked References are derived incoming Semantic References.
+- A Page Link literally names the current Page with an exact unique Page name; it is queryable while unresolved and is rewritten on Page rename. A Block Reference literally targets only its UUID, remaining missing when no current Block has that identity. Linked References are derived incoming Semantic References.
 - V0 supports Page Links and explicit Block References. Embedding/transclusion, aliases, and unlinked textual mentions are excluded.
 - Journal Entry content is authored Unicode text with lightweight notation for Page Links, Block References, and properties. The original authored text remains canonical while its structured meaning is parsed and indexed transactionally.
 - Queries are saved live views over Block type, Journal date, text, properties, Containment, and Semantic References. They support filtering, ordering, and limits.
@@ -152,7 +152,7 @@ A deep, toolkit-neutral C++ Notebook module owns content behavior, transactions,
 
 - The canonical domain vocabulary is maintained in the project glossary and should be used consistently in implementation tickets, interfaces, UI copy, and tests.
 - The Wayfinder map remains the index of open design decisions. This specification records the agreed product and architecture envelope; tickets should not invent behavior where the map still calls for a grilling or prototype decision.
-- Before implementation tickets are considered executable, the remaining decisions must settle the exact Notebook interface, Block lifecycle and deletion rules, authored-text grammar, journal editing behavior, persistence schema and migration protocol, data-safety contract, search semantics, Query language, link collision and missing-target behavior, Qt Quick interaction model, build/toolchain baseline, and acceptance gates.
+- Before implementation tickets are considered executable, the remaining decisions must settle the exact Notebook interface, Block lifecycle and deletion rules, authored-text grammar, journal editing behavior, persistence schema and migration protocol, data-safety contract, search semantics, Query language, Qt Quick interaction model, build/toolchain baseline, and acceptance gates.
 - The LMDB and full-text-search research reports provide primary-source constraints and should be consulted when resolving persistence and search tickets.
 - The eventual application license has not been selected. Dependency licensing must be checked as part of the build-and-dependency decision.
 - Data-at-rest encryption and E2EE synchronization are possible future efforts, not guaranteed roadmap commitments. If pursued, users should still be able to opt out.
