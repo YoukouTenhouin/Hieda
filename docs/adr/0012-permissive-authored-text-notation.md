@@ -18,8 +18,9 @@ controls before submission.
 
 ## Grammar
 
-- `[[page_name]]` is a Page Link candidate. Its body uses the existing exact Page-name grammar
-  `[a-z][a-z0-9_-]{0,63}` rather than a duplicate-capable display title.
+- `[[page_name]]` is a Page Link candidate. Its body uses the exact Page Name grammar: one or more
+  slash-separated `[a-z][a-z0-9_-]{0,63}` segments, at most 255 bytes overall, rather than a
+  duplicate-capable display title.
 - `[[block:550e8400-e29b-41d4-a716-446655440000]]` is a Block Reference candidate. Only the
   canonical lowercase, hyphenated UUIDv4 spelling is recognized.
 - `key::value` is a Property only at the beginning of a logical line. The key uses the Page-name
@@ -52,7 +53,7 @@ other views and indexes while the Draft is open, but it is not projected onto th
 Parser results retain source-ordered typed occurrences with UTF-8 byte ranges. Equal link
 occurrences collapse to one Semantic Reference for each source Block, target Block, and reference
 kind, while Properties retain their ordered duplicate values. Syntax recognition does not consult
-the Notebook: missing targets, Page renames, dangling relationships, and presentation labels remain
+the Notebook: missing targets, Page renames, missing relationships, and presentation labels remain
 link-resolution decisions. Search and Query consumers may interpret exact Property strings without
 changing their canonical values.
 

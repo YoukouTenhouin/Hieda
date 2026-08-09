@@ -7,8 +7,9 @@ The canonical Notebook uses LMDB with `MDB_NOSUBDIR`, default synchronous durabi
 Containment provisionally uses gapped 64-bit ranks. The physical `pages_by_title` database reserved
 by schema v1 is used as the unique Page-name index from ticket 06 onward; display titles remain on
 Page Block records and may duplicate. Retaining the original database name keeps existing schema-v1
-Notebooks compatible without a migration. Block records reserve lifecycle state without deciding
-later deletion behavior. Schema v1 has no older supported application schema. When a later release
+Notebooks compatible without a migration. ADR 0019 settles hard deletion as the complete v0 Block
+lifecycle; the early prototype removes its always-active record field rather than preserving a
+meaningless compatibility placeholder. Schema v1 has no older supported application schema. When a later release
 declares an older schema supported, it will migrate through a verified temporary sibling copy that
 is atomically published while the original is retained as a pre-migration backup; newer schemas are
 rejected without modification.

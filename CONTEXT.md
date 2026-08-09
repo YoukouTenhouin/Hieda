@@ -9,24 +9,44 @@ A portable collection of blocks, relationships, and notebook settings whose comp
 _Avoid_: Database, workspace, graph
 
 **Block**:
-The universal addressable content entity. A block has a stable identity and a type, and can participate in typed relationships with other blocks.
+The universal addressable content entity. A Block has a stable identity that ordinary creation never reuses and an immutable type, and can participate in typed relationships with other Blocks.
 _Avoid_: Node, item, record
 
+**Block Creation Time**:
+The UTC instant at which a Block identity first became durable. It remains unchanged for that identity, including across movement and restoration.
+_Avoid_: Import time, current location time
+
 **Block Update Time**:
-The time at which a Block was last meaningfully modified as the subject of a user action. Mechanical maintenance such as rewriting its Page Link names after a target rename does not advance it.
+The UTC instant at which a Block was last meaningfully edited, moved, or had its immediate ordered children changed. Mechanical maintenance such as link resolution or Page Link rewriting does not advance it.
 _Avoid_: Last-written time, storage timestamp
 
+**Hard Deletion**:
+Removal of a Block and its owned Containment descendants from canonical Notebook state. Only session-local Editing History may retain a restorable copy.
+_Avoid_: Soft deletion, trash, inactive state
+
+**Editing History**:
+The bounded, session-local chronological sequence of semantic Notebook actions available to undo and redo. It is an editing convenience, not persisted Notebook version history.
+_Avoid_: Version history, operation log, per-Page history
+
 **Journal Page**:
-A block associated with one calendar date that contains that date's journal entries in an explicit order.
+A Page of Journal kind associated with one calendar date. It is a Containment root and remains non-materialized until it has durable content.
 _Avoid_: Daily note, journal
 
+**Journal Date**:
+An immutable, timezone-free proleptic Gregorian date from year 1 through 9999 that identifies at most one materialized Journal Page.
+_Avoid_: Timestamp, UTC date
+
+**Entry**:
+An authored-text Block with one structural home beneath a Page, possibly through other Entries. Its Block type is independent of the kind of Page that contains it.
+_Avoid_: Note, item
+
 **Journal Entry**:
-A short, plain-text block for quickly capturing an idea, included in a journal page through an ordered containment relationship.
-_Avoid_: Journal block, note
+An Entry whose containing root is a Journal Page.
+_Avoid_: Journal Block, distinct Block type
 
 **Page Entry**:
-A short authored-text block contained in an ordinary Page. It has the same outline editing behavior as a Journal Entry but remains a distinct Block type.
-_Avoid_: Journal Entry, document
+An Entry whose containing root is a Named Page.
+_Avoid_: Distinct Block type, document
 
 **Authored Text**:
 The exact canonical Unicode source of a Journal Entry or Page Entry, including literal text and any Authored Text Notation.
@@ -45,11 +65,23 @@ An ordered named string value derived from Authored Text. A Block may carry mult
 _Avoid_: Metadata, field
 
 **Page**:
-A titled block that provides a stable destination for organizing and linking content. A journal page is a date-associated specialization of a page.
+A Block with an immutable Named or Journal kind that acts as a Containment root for Entries.
 _Avoid_: Document, article
 
+**Named Page**:
+A Page with an exact Page Name and display title that participates in Page Hierarchy.
+_Avoid_: Ordinary Page, document
+
+**Page Name**:
+An exact, Notebook-unique hierarchical name of one or more slash-separated ASCII segments, each matching `[a-z][a-z0-9_-]{0,63}`, with at most 255 bytes overall.
+_Avoid_: Display title, file path
+
+**Page Hierarchy**:
+A name-derived organization of Named Pages and Page Previews that is independent of Block identity and Containment. A hierarchical Page name's prefix identifies its hierarchy parent.
+_Avoid_: Containment, folder tree
+
 **Containment**:
-An ordered relationship expressing that one block includes another as part of its presented content. A block has at most one containment parent, while contained blocks may themselves contain children.
+A single-parent ordered relationship giving every Entry one structural home beneath exactly one materialized Page. Pages are roots; Entry parent chains are acyclic and may contain further Entries.
 _Avoid_: Membership, child reference
 
 **Semantic Reference**:
@@ -65,7 +97,7 @@ A derived occurrence of Page Link notation whose exact Page name does not identi
 _Avoid_: Broken link, Semantic Reference, Linked Reference
 
 **Page Preview**:
-A non-materialized view for an exact Page name that has no current Page, showing its Unresolved Page Links without creating a Block or stable identity.
+A non-materialized view for an exact Page name that has no current Page, arising from Unresolved Page Links or a missing Page Hierarchy prefix without creating a Block or stable identity.
 _Avoid_: Virtual Page, empty Page
 
 **Block Reference**:

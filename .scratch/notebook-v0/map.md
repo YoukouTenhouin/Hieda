@@ -15,7 +15,7 @@ Produce an implementation-ready specification and delivery route for a single-us
 - LMDB is the initial storage engine, hidden behind an internal persistence seam. The UI must see neither LMDB nor storage primitives.
 - One canonical database file is the portability unit. Runtime locks, caches, and separate backup snapshots may exist outside it.
 - The database is the sole canonical source of truth. Markdown round-trip storage is not required.
-- Blocks have globally unique stable identities. Ordered containment and semantic references are different relationship types; a block has at most one containment parent.
+- Blocks have globally unique stable identities and immutable types. Ordered Containment gives every Entry one Page-rooted structural home; name-derived Page Hierarchy and Semantic References remain different relationship types.
 - Journal entries are simple authored Unicode text with lightweight notation whose structured meaning is parsed and indexed transactionally.
 - Queries are saved declarative views; interactive full-text search is a separate capability.
 - Target a reference Notebook of approximately 250,000 blocks and 1 GiB of text, with typical editing, navigation, search, and linked-reference interactions completing within about 200 ms on a current desktop.
@@ -29,7 +29,9 @@ Produce an implementation-ready specification and delivery route for a single-us
 - [Establish LMDB operational constraints](issues/01-establish-lmdb-operational-constraints.md) — LMDB fits the portable Notebook model when wrapped behind owned transactions, synchronous durability, safe snapshot, map-growth, and portable-encoding rules.
 - [Evaluate full-text index options](issues/02-evaluate-full-text-index-options.md) — SQLite FTS5 with ICU tokenization is the preferred rebuildable search sidecar; LMDB remains the sole canonical store.
 - [Design the Notebook module interface](issues/03-design-the-notebook-module-interface.md) — one thread-safe synchronous `NotebookSession` is the toolkit-neutral seam.
+- [Specify Block lifecycle and structural invariants](issues/04-specify-block-lifecycle-and-structural-invariants.md) — unified immutable Page and Entry types use Page-rooted Containment, hard deletion, logical timestamps, immutable Journal Dates, and Notebook-wide session history.
 - [Design persistence schema and migrations](issues/07-design-persistence-schema-and-migrations.md) — bounded LMDB databases use portable TLV records and shadow-copy migrations.
+- [Define link resolution and Linked References](issues/11-define-link-resolution-and-linked-references.md) — Page Links are literal Page Names, Block References are literal UUIDs, and incoming results are bounded source-Block views.
 - [Choose the build and dependency strategy](issues/13-choose-the-build-and-dependency-strategy.md) — C++20, Qt 6.8+, system dependencies, CMake/Ninja, CTest, and CPack TGZ.
 
 ## Not yet specified
@@ -38,6 +40,7 @@ Produce an implementation-ready specification and delivery route for a single-us
 - Concrete corruption and partial-recovery cases; these become specifiable after the LMDB constraints and persistence layout are known.
 - Index rebuild, migration interruption, and compatibility cases; their exact questions depend on the selected index and schema designs.
 - Packaging and distribution edge cases across Linux environments; these depend on the initial toolchain and dependency strategy.
+- [Page Hierarchy](issues/16-define-page-hierarchy-behavior.md) collision, deletion, ordering, navigation, and performance semantics beyond the accepted name-derived foundation.
 
 ## Out of scope
 

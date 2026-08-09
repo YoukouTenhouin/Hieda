@@ -1,6 +1,6 @@
 # Keep Journal history semantic and session-local
 
-Status: accepted
+Status: superseded by ADR-0022
 
 Ticket 04 adds undo and redo at the `NotebookSession` interface. History records complete
 before-and-after Journal Page domain state rather than LMDB operations, so text, stable Block

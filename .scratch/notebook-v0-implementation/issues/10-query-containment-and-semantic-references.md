@@ -4,7 +4,7 @@
 
 **What to build:** Extend saved Queries to select Blocks through ordered Containment and Semantic Reference relationships. Results remain live as the outline and link graph change and retain deterministic behavior across reopen.
 
-**Blocked by:** 08 — Reference Blocks and browse Linked References; 09 — Save and run basic Queries; [Design the Query language](../../notebook-v0/issues/10-design-the-query-language.md)
+**Blocked by:** 08 — Reference Blocks and browse Linked References; 09 — Save and run basic Queries; 19 — Unify Page and Entry Block types; [Design the Query language](../../notebook-v0/issues/10-design-the-query-language.md)
 
 **Status:** ready-for-agent
 
@@ -14,4 +14,3 @@
 - [ ] Results update after moves, reordering where relevant, link edits, deletion, and restoration.
 - [ ] Query execution returns stable Block identities and owned values without exposing persistence internals.
 - [ ] Tests cover relationship combinations, cycles or invalid inputs where applicable, deterministic results, live updates, and reopen.
-

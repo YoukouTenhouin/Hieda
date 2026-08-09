@@ -10,7 +10,7 @@ The first release must establish a dependable foundation without prematurely sol
 
 ## Solution
 
-Build a keyboard-first native Linux desktop application for a single user and one open Notebook at a time. The application opens on today's Journal Page and provides a fast outliner for short, plain-text Journal Entries. Every persisted content entity is a typed Block with globally unique stable identity. Ordered Containment gives each Block one structural home, while Page Links, Block References, and other Semantic References connect Blocks without changing ownership.
+Build a keyboard-first native Linux desktop application for a single user and one open Notebook at a time. The application opens on today's Journal Page and provides a fast outliner for short, plain-text Entries. Every persisted content entity is a typed Block with globally unique stable identity. Ordered Containment gives each Entry one Page-rooted structural home, while Page Links, Block References, and other Semantic References connect Blocks without changing ownership.
 
 Pages, Linked References, saved declarative Queries, and interactive full-text search make captured ideas discoverable. One canonical Notebook file stores all durable user content and notebook settings. LMDB is the initial storage engine; operational lock files, rebuildable indexes, caches, and versioned backup snapshots may exist separately. Copying a closed Notebook file or an application-created snapshot is sufficient to transfer all canonical content.
 
@@ -24,14 +24,14 @@ A deep, toolkit-neutral C++ Notebook module owns content behavior, transactions,
 4. As a mouse user, I want essential journal and navigation interactions to remain usable with a pointer, so that keyboard optimization does not make the application inaccessible to me.
 5. As a note-taker, I want Journal Entries to contain simple Unicode text, so that notes remain quick to write and understandable without a rich-text editor.
 6. As a multilingual note-taker, I want text, links, queries, and search to handle Unicode consistently, so that the application works with the languages and symbols I use.
-7. As a note-taker, I want entries to contain ordered child Blocks, so that I can expand an idea into a nested outline.
-8. As a note-taker, I want every Block to have one unambiguous structural home, so that moving, ordering, restoring, and deleting content behave predictably.
-9. As a note-taker, I want to reorder sibling Blocks, so that the visible outline reflects the sequence I intend.
-10. As a note-taker, I want to move a Block within or between allowed containers without changing its identity, so that links to it remain valid.
+7. As a note-taker, I want Entries to contain ordered child Entries, so that I can expand an idea into a nested outline.
+8. As a note-taker, I want every Entry to have one unambiguous Page-rooted structural home, so that moving, ordering, restoring, and deleting content behave predictably.
+9. As a note-taker, I want to reorder sibling Entry subtrees, so that the visible outline reflects the sequence I intend.
+10. As a note-taker, I want to move an Entry subtree within or between Pages without changing its identities, so that links to it remain valid.
 11. As a note-taker, I want ordinary editing undo and redo, so that I can recover quickly from mistakes.
 12. As a note-taker, I want each calendar date to have a distinct Journal Page, so that entries retain their daily context.
 13. As a note-taker, I want to navigate to earlier or later Journal Pages, so that I can review notes chronologically.
-14. As a note-taker, I want to create titled Pages in addition to Journal Pages, so that I can organize enduring topics.
+14. As a note-taker, I want to create titled hierarchical Named Pages in addition to Journal Pages, so that I can organize enduring topics.
 15. As a note-taker, I want to enter a Page Link using lightweight notation such as `[[project_alpha]]`, so that linking while typing remains fast.
 16. As a note-taker, I want Page renames to rewrite Page Links without changing their resolved target, so that names remain literal and renaming does not break existing links.
 17. As a note-taker, I want to create a Block Reference by explicitly selecting a Block, so that I can link directly to a particular idea.
@@ -82,14 +82,16 @@ A deep, toolkit-neutral C++ Notebook module owns content behavior, transactions,
 - UI adapters operate on owned C++ domain values and observable committed outcomes. They never receive LMDB handles, cursors, mapped memory, storage transactions, SQLite statements, or storage-engine errors.
 - A Notebook is the portable unit and its database file is the sole canonical source of truth. Runtime lock files, caches, rebuildable search indexes, and backup snapshots may live separately, but none may contain unique user content required to reconstruct the Notebook.
 - Markdown files are not canonical storage and lossless Markdown round-tripping is not a requirement.
-- A Block is the universal persisted content entity. Every Block has globally unique stable identity, type, payload appropriate to that type, and creation/update metadata.
-- A Page is a titled Block with stable identity. A Journal Page specializes Page semantics by associating a calendar date.
-- A Journal Entry is a short plain-text Block included under a Journal Page. Entries may recursively contain ordered child Blocks.
-- Containment is ordered and single-parent: a Block has at most one containment parent. Reuse in other contexts occurs through Semantic References, not multiple Containment.
+- A Block is the universal persisted content entity. Every Block has a fresh globally unique stable identity, immutable type, type-appropriate payload, immutable Block Creation Time, and logical Block Update Time. Ordinary creation never reuses a deleted identity.
+- One Page Block type has immutable Named and Journal kinds. Named Pages have unique slash-separated names, titles, and a separate name-derived Page Hierarchy; Journal Pages have immutable timezone-free Gregorian Journal Dates and remain virtual until durable content materializes them.
+- One Entry Block type carries Authored Text. Page Entry and Journal Entry are contextual roles derived from the containing Page kind rather than distinct Block types.
+- Containment is Page-rooted, ordered, single-parent, and acyclic: every materialized Page is a root and every Entry has exactly one parent chain ending at one Page. Complete Entry subtrees may move atomically between any Pages without changing identity or type.
+- Named Pages and their contained Entry forests may be hard-deleted; Journal Pages have no explicit deletion command. V0 has no inactive Blocks, tombstones, persisted trash, or standalone restore command.
+- Editing History is bounded, Notebook-wide, chronological, and session-local. Undo and redo commit restored logical state durably but do not provide persisted Notebook version history.
 - Semantic Reference types have their own invariants and do not imply ordering, ownership, or deletion behavior.
 - A Page Link literally names the current Page with an exact unique Page name; it is queryable while unresolved and is rewritten on Page rename. A Block Reference literally targets only its UUID, remaining missing when no current Block has that identity. Linked References are derived incoming Semantic References.
 - V0 supports Page Links and explicit Block References. Embedding/transclusion, aliases, and unlinked textual mentions are excluded.
-- Journal Entry content is authored Unicode text with lightweight notation for Page Links, Block References, and properties. The original authored text remains canonical while its structured meaning is parsed and indexed transactionally.
+- Entry content is authored Unicode text with lightweight notation for Page Links, Block References, and properties. The original Authored Text remains canonical while its structured meaning is parsed and indexed transactionally.
 - Queries are saved live views over Block type, Journal date, text, properties, Containment, and Semantic References. They support filtering, ordering, and limits.
 - The Query language is application-defined and declarative. Arbitrary scripting, exposed database joins, aggregation, and user-defined functions are excluded from v0.
 - Interactive full-text search is separate from Queries and exposes an application-defined search contract rather than a storage library's native syntax.
@@ -122,7 +124,7 @@ A deep, toolkit-neutral C++ Notebook module owns content behavior, transactions,
 - Crash tests terminate the application at controlled points around commit and snapshot publication, then reopen or restore and assert that only complete acknowledged states are visible.
 - Search adapter tests cover revision tracking, failure between the LMDB and sidecar commits, stale-index reporting, missing/corrupt sidecars, interrupted rebuilds, temporary-file cleanup, atomic sidecar publication, and complete reconstruction from canonical content.
 - Shared Unicode golden cases define normalization, case folding, diacritics, punctuation, emoji, prefix behavior, and scripts requiring dictionary segmentation. Indexing and query tokenization must agree on these cases.
-- Domain property tests cover stable identity, single-parent Containment, acyclic structural movement where required by the final invariant decision, ordering, Page rename stability, incoming Linked References, deletion/restoration, and command-level atomicity.
+- Domain property tests cover fresh stable identity, immutable type and Page kind, Page-rooted single-parent Containment, acyclic cross-Page subtree movement, ordering, timestamp semantics, Journal Date identity, Page rename stability, incoming Linked References, Hard Deletion/restoration, and command-level atomicity.
 - Authored-text parser tests cover valid notation, escaping, nested delimiters, Unicode, incomplete input, malformed input, incremental edits, and lossless retention of the user's original text.
 - Query tests cover every supported predicate and composition rule, ordering, limits, live updates after committed changes, invalid syntax, deterministic results, and separation from arbitrary execution or backend query syntax.
 - Qt Quick UI tests are reserved for behavior that only the UI adapter owns: focus, keyboard routing, text composition, selection, visual navigation, accessibility exposure, model-to-view updates, and presentation of save, backup, stale-search, and recovery states.
@@ -152,7 +154,7 @@ A deep, toolkit-neutral C++ Notebook module owns content behavior, transactions,
 
 - The canonical domain vocabulary is maintained in the project glossary and should be used consistently in implementation tickets, interfaces, UI copy, and tests.
 - The Wayfinder map remains the index of open design decisions. This specification records the agreed product and architecture envelope; tickets should not invent behavior where the map still calls for a grilling or prototype decision.
-- Before implementation tickets are considered executable, the remaining decisions must settle the exact Notebook interface, Block lifecycle and deletion rules, authored-text grammar, journal editing behavior, persistence schema and migration protocol, data-safety contract, search semantics, Query language, Qt Quick interaction model, build/toolchain baseline, and acceptance gates.
+- Before implementation tickets are considered executable, the remaining decisions must settle the exact Notebook interface, authored-text grammar, journal editing behavior, persistence schema and migration protocol, data-safety contract, search semantics, Query language, Page Hierarchy, Qt Quick interaction model, build/toolchain baseline, and acceptance gates.
 - The LMDB and full-text-search research reports provide primary-source constraints and should be consulted when resolving persistence and search tickets.
 - The eventual application license has not been selected. Dependency licensing must be checked as part of the build-and-dependency decision.
 - Data-at-rest encryption and E2EE synchronization are possible future efforts, not guaranteed roadmap commitments. If pursued, users should still be able to opt out.
