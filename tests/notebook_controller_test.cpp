@@ -217,6 +217,74 @@ TEST_CASE("the Qt adapter creates renames and navigates ordinary Pages") {
     CHECK(controller.errorMessage().contains(QStringLiteral("Page")));
 }
 
+TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy previews") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "hierarchy-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"), QStringLiteral("Alpha")));
+
+    auto* hierarchy = controller.pageHierarchy();
+    REQUIRE(hierarchy->rowCount() == 1);
+    auto root = hierarchy->index(0, 0);
+    CHECK(hierarchy->data(root, PageHierarchyModel::PageNameRole).toString() ==
+          QStringLiteral("work"));
+    CHECK_FALSE(hierarchy->data(root, PageHierarchyModel::MaterializedRole).toBool());
+    CHECK(hierarchy->data(root, PageHierarchyModel::HasChildrenRole).toBool());
+    auto client = hierarchy->index(0, 0, root);
+    CHECK(hierarchy->data(client, PageHierarchyModel::LocalSegmentRole).toString() ==
+          QStringLiteral("client"));
+    CHECK(hierarchy->data(client, PageHierarchyModel::PageNameRole).toString() ==
+          QStringLiteral("work/client"));
+    CHECK_FALSE(hierarchy->data(client, PageHierarchyModel::MaterializedRole).toBool());
+    CHECK(hierarchy->data(client, PageHierarchyModel::AccessibleDescriptionRole)
+              .toString()
+              .contains(QStringLiteral("Page Preview")));
+
+    controller.navigateToPageName(QStringLiteral("work/client"));
+    CHECK(controller.currentPagePreview());
+    CHECK_FALSE(controller.isJournalPage());
+    CHECK(controller.currentPageName() == QStringLiteral("work/client"));
+    CHECK(controller.currentPageId().isEmpty());
+    CHECK(hierarchy->data(client, PageHierarchyModel::SelectedRole).toBool());
+
+    REQUIRE(controller.createCurrentPage(QStringLiteral("Client")));
+    CHECK_FALSE(controller.currentPagePreview());
+    const auto createdId = controller.currentPageId();
+    CHECK_FALSE(createdId.isEmpty());
+    client = hierarchy->index(0, 0, hierarchy->index(0, 0));
+    CHECK(hierarchy->data(client, PageHierarchyModel::MaterializedRole).toBool());
+    REQUIRE(controller.deleteCurrentPage());
+    CHECK(controller.currentPagePreview());
+    CHECK(controller.currentPageName() == QStringLiteral("work/client"));
+
+    REQUIRE(controller.undoOutlineEdit().value(QStringLiteral("succeeded")).toBool());
+    CHECK_FALSE(controller.currentPagePreview());
+    CHECK(controller.currentPageId() == createdId);
+    REQUIRE(controller.redoOutlineEdit().value(QStringLiteral("succeeded")).toBool());
+    CHECK(controller.currentPagePreview());
+}
+
+TEST_CASE("the Qt hierarchy model fetches every revision-bound child batch") {
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "hierarchy-pages.hieda"));
+    for (int index = 0; index < 101; ++index) {
+        REQUIRE(controller.createPage(QStringLiteral("many/p%1").arg(1000 + index),
+                                      QStringLiteral("Many")));
+    }
+    controller.navigateToToday();
+    auto* hierarchy = controller.pageHierarchy();
+    const auto many = hierarchy->index(0, 0);
+    REQUIRE(many.isValid());
+    REQUIRE(hierarchy->canFetchMore(many));
+    hierarchy->fetchMore(many);
+    CHECK(hierarchy->rowCount(many) == 100);
+    REQUIRE(hierarchy->canFetchMore(many));
+    hierarchy->fetchMore(many);
+    CHECK(hierarchy->rowCount(many) == 101);
+    CHECK_FALSE(hierarchy->canFetchMore(many));
+}
+
 TEST_CASE("the Qt adapter exposes and edits nested Journal structure") {
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;

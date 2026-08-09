@@ -107,6 +107,22 @@ struct Page {
     auto operator==(const Page&) const -> bool = default;
 };
 
+struct PageHierarchyNode {
+    std::string name;
+    std::string localSegment;
+    std::optional<PageSummary> page;
+    bool hasChildren{false};
+
+    auto operator==(const PageHierarchyNode&) const -> bool = default;
+};
+
+struct PageHierarchyBatch {
+    std::vector<PageHierarchyNode> nodes;
+    std::optional<std::string> continuationCursor;
+
+    auto operator==(const PageHierarchyBatch&) const -> bool = default;
+};
+
 enum class PageKind : std::uint8_t { named, journal };
 
 struct OutlinePage {
@@ -155,6 +171,7 @@ enum class NotebookErrorCode : std::uint8_t {
     invalidPageTitle,
     pageNameConflict,
     pageNotFound,
+    staleHierarchyCursor,
 };
 
 struct NotebookError {
@@ -213,7 +230,14 @@ class NotebookSession {
     [[nodiscard]] auto isOpen() const noexcept -> bool;
     [[nodiscard]] auto current() const -> std::optional<NotebookInfo>;
     [[nodiscard]] auto pages() const -> Result<std::vector<PageSummary>>;
+    [[nodiscard]] auto pageHierarchyNode(std::string name) const
+        -> Result<std::optional<PageHierarchyNode>>;
+    [[nodiscard]] auto
+    pageHierarchyChildren(std::optional<std::string> parentName = std::nullopt,
+                          std::optional<std::string> continuationCursor = std::nullopt) const
+        -> Result<PageHierarchyBatch>;
     [[nodiscard]] auto createPage(std::string name, std::string displayTitle) -> Result<Page>;
+    [[nodiscard]] auto deletePage(BlockId pageId) -> Result<Page>;
     [[nodiscard]] auto renamePage(BlockId pageId, std::string name, std::string displayTitle)
         -> Result<Page>;
     [[nodiscard]] auto outline(PageAddress address) const -> Result<OutlinePage>;

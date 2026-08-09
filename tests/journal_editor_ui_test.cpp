@@ -75,7 +75,7 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     REQUIRE(sidebar != nullptr);
     REQUIRE(pageList != nullptr);
     CHECK(sidebar->isVisible());
-    CHECK(pageList->property("count").toInt() == 2);
+    CHECK(pageList->property("rows").toInt() == 2);
     REQUIRE(root->findChild<QObject*>(QStringLiteral("newPageAction")) != nullptr);
     REQUIRE(root->findChild<QObject*>(QStringLiteral("goToPageAction")) != nullptr);
     REQUIRE(root->findChild<QObject*>(QStringLiteral("renamePageAction")) != nullptr);
@@ -246,6 +246,66 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     CHECK(controller.outlineEntries()
               ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("committed before rename"));
+}
+
+TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(
+        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("hierarchy-ui.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"), QStringLiteral("Alpha")));
+    controller.navigateToPageName(QStringLiteral("work/client"));
+    REQUIRE(controller.currentPagePreview());
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    REQUIRE(window != nullptr);
+    window->show();
+    auto* pageList = root->findChild<QQuickItem*>(QStringLiteral("pageList"));
+    auto* heading = root->findChild<QQuickItem*>(QStringLiteral("pageHeading"));
+    auto* materializeButton = root->findChild<QQuickItem*>(QStringLiteral("materializePageButton"));
+    auto* materializeDialog = root->findChild<QObject*>(QStringLiteral("materializePageDialog"));
+    auto* materializeTitle = root->findChild<QQuickItem*>(QStringLiteral("materializePageTitle"));
+    REQUIRE(pageList != nullptr);
+    REQUIRE(heading != nullptr);
+    REQUIRE(materializeButton != nullptr);
+    REQUIRE(materializeDialog != nullptr);
+    REQUIRE(materializeTitle != nullptr);
+    REQUIRE(waitUntil([pageList]() -> bool {
+        QVariant item;
+        return QMetaObject::invokeMethod(pageList, "pageItemAt", Q_RETURN_ARG(QVariant, item),
+                                         Q_ARG(QVariant, 1)) &&
+               item.value<QObject*>() != nullptr;
+    }));
+    CHECK(heading->property("text").toString() == QStringLiteral("work/client — Page Preview"));
+    CHECK(materializeButton->isVisible());
+
+    REQUIRE(QMetaObject::invokeMethod(materializeButton, "clicked"));
+    REQUIRE(waitUntil(
+        [materializeDialog]() -> bool { return materializeDialog->property("visible").toBool(); }));
+    materializeTitle->setProperty("text", QStringLiteral("Client"));
+    REQUIRE(QMetaObject::invokeMethod(materializeDialog, "accept"));
+    REQUIRE(waitUntil([&controller]() -> bool { return !controller.currentPagePreview(); }));
+    CHECK(controller.currentPageName() == QStringLiteral("work/client"));
+    CHECK(heading->property("text").toString() == QStringLiteral("Client — work/client"));
+
+    auto* deleteButton = root->findChild<QQuickItem*>(QStringLiteral("deletePageButton"));
+    REQUIRE(deleteButton != nullptr);
+    CHECK(deleteButton->isVisible());
+    REQUIRE(QMetaObject::invokeMethod(deleteButton, "clicked"));
+    REQUIRE(waitUntil([&controller]() -> bool { return controller.currentPagePreview(); }));
+    CHECK(heading->property("text").toString() == QStringLiteral("work/client — Page Preview"));
+    controller.closeNotebook();
+    REQUIRE(waitUntil([root = root.get()]() -> bool {
+        return root->property("hierarchyExpandedNames").toList().isEmpty();
+    }));
 }
 
 TEST_CASE("the Page editor preserves consecutive outline key presses") {

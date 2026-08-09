@@ -239,8 +239,265 @@ auto OutlineEntryModel::rowForId(const hieda::notebook::BlockId& identifier) con
     return found == entries_.end() ? -1 : static_cast<int>(std::distance(entries_.begin(), found));
 }
 
+PageHierarchyModel::PageHierarchyModel(QObject* parent) : QAbstractItemModel(parent) {}
+
+auto PageHierarchyModel::node(const QModelIndex& index) const -> Node* {
+    return index.isValid() ? static_cast<Node*>(index.internalPointer()) : nullptr;
+}
+
+auto PageHierarchyModel::children(Node* parent) -> std::vector<std::unique_ptr<Node>>& {
+    return parent == nullptr ? roots_ : parent->children;
+}
+
+auto PageHierarchyModel::children(const Node* parent) const
+    -> const std::vector<std::unique_ptr<Node>>& {
+    return parent == nullptr ? roots_ : parent->children;
+}
+
+auto PageHierarchyModel::index(int row, int column, const QModelIndex& parentIndex) const
+    -> QModelIndex {
+    if (row < 0 || column != 0) {
+        return {};
+    }
+    const auto& siblings = children(node(parentIndex));
+    return static_cast<std::size_t>(row) < siblings.size()
+               ? createIndex(row, column, siblings[static_cast<std::size_t>(row)].get())
+               : QModelIndex{};
+}
+
+auto PageHierarchyModel::parent(const QModelIndex& child) const -> QModelIndex {
+    const auto* childNode = node(child);
+    if (childNode == nullptr || childNode->parent == nullptr) {
+        return {};
+    }
+    const auto* parentNode = childNode->parent;
+    const auto& siblings = children(parentNode->parent);
+    const auto found = std::ranges::find_if(
+        siblings, [&](const auto& candidate) -> bool { return candidate.get() == parentNode; });
+    return found == siblings.end()
+               ? QModelIndex{}
+               : createIndex(static_cast<int>(std::distance(siblings.begin(), found)), 0,
+                             const_cast<Node*>(parentNode));
+}
+
+auto PageHierarchyModel::rowCount(const QModelIndex& parentIndex) const -> int {
+    return parentIndex.column() > 0 ? 0 : static_cast<int>(children(node(parentIndex)).size());
+}
+
+auto PageHierarchyModel::columnCount(const QModelIndex& /*parent*/) const -> int {
+    return 1;
+}
+
+auto PageHierarchyModel::data(const QModelIndex& index, int role) const -> QVariant {
+    const auto* item = node(index);
+    if (item == nullptr) {
+        return {};
+    }
+    const auto& hierarchyNode = item->node;
+    const auto name = QString::fromUtf8(hierarchyNode.name);
+    const auto segment = QString::fromUtf8(hierarchyNode.localSegment);
+    switch (role) {
+    case PageNameRole:
+        return name;
+    case LocalSegmentRole:
+        return segment;
+    case DisplayTitleRole:
+        return hierarchyNode.page ? QString::fromUtf8(hierarchyNode.page->displayTitle) : QString{};
+    case MaterializedRole:
+        return hierarchyNode.page.has_value();
+    case HasChildrenRole:
+        return hierarchyNode.hasChildren;
+    case ExpandedRole:
+        return currentName_.starts_with(hierarchyNode.name + '/');
+    case SelectedRole:
+        return currentName_ == hierarchyNode.name;
+    case AccessibleDescriptionRole:
+        return hierarchyNode.page
+                   ? tr("Page %1, local segment %2, full Page Name %3")
+                         .arg(QString::fromUtf8(hierarchyNode.page->displayTitle), segment, name)
+                   : tr("Page Preview %1, full Page Name %2, not materialized").arg(segment, name);
+    default:
+        return {};
+    }
+}
+
+auto PageHierarchyModel::roleNames() const -> QHash<int, QByteArray> {
+    return {
+        {PageNameRole, "pageName"},           {LocalSegmentRole, "localSegment"},
+        {DisplayTitleRole, "displayTitle"},   {MaterializedRole, "materialized"},
+        {HasChildrenRole, "hasChildren"},     {ExpandedRole, "revealExpanded"},
+        {SelectedRole, "currentDestination"}, {AccessibleDescriptionRole, "accessibleDescription"}};
+}
+
+void PageHierarchyModel::attach(hieda::notebook::NotebookSession* session) {
+    session_ = session;
+}
+
+void PageHierarchyModel::clear() {
+    beginResetModel();
+    roots_.clear();
+    rootContinuationCursor_.reset();
+    rootsLoaded_ = false;
+    currentName_.clear();
+    endResetModel();
+}
+
+auto PageHierarchyModel::loadNextBatch(Node* parentNode) -> bool {
+    auto& loaded = parentNode == nullptr ? rootsLoaded_ : parentNode->loaded;
+    auto& cursor = parentNode == nullptr ? rootContinuationCursor_ : parentNode->continuationCursor;
+    const auto result = session_->pageHierarchyChildren(
+        parentNode == nullptr ? std::optional<std::string>{}
+                              : std::optional<std::string>{parentNode->node.name},
+        cursor);
+    if (!result) {
+        return false;
+    }
+    auto& destination = children(parentNode);
+    for (const auto& hierarchyNode : result.value().nodes) {
+        auto child = std::make_unique<Node>();
+        child->node = hierarchyNode;
+        child->parent = parentNode;
+        child->loaded = !hierarchyNode.hasChildren;
+        destination.push_back(std::move(child));
+    }
+    loaded = true;
+    cursor = result.value().continuationCursor;
+    return true;
+}
+
+auto PageHierarchyModel::canFetchMore(const QModelIndex& parentIndex) const -> bool {
+    const auto* parentNode = node(parentIndex);
+    return session_ != nullptr && session_->isOpen() &&
+           (parentNode == nullptr
+                ? !rootsLoaded_ || rootContinuationCursor_.has_value()
+                : !parentNode->loaded || parentNode->continuationCursor.has_value());
+}
+
+void PageHierarchyModel::fetchMore(const QModelIndex& parentIndex) {
+    if (session_ == nullptr || !session_->isOpen()) {
+        return;
+    }
+    auto* parentNode = node(parentIndex);
+    const auto parentName = parentNode == nullptr
+                                ? std::optional<std::string>{}
+                                : std::optional<std::string>{parentNode->node.name};
+    auto& cursor = parentNode == nullptr ? rootContinuationCursor_ : parentNode->continuationCursor;
+    const auto batch = session_->pageHierarchyChildren(parentName, cursor);
+    if (!batch) {
+        if (batch.error().code == hieda::notebook::NotebookErrorCode::staleHierarchyCursor) {
+            QMetaObject::invokeMethod(
+                this,
+                [this]() -> void { static_cast<void>(refresh(QString::fromUtf8(currentName_))); },
+                Qt::QueuedConnection);
+        }
+        return;
+    }
+    if (batch.value().nodes.empty()) {
+        if (parentNode == nullptr) {
+            rootsLoaded_ = true;
+        } else {
+            parentNode->loaded = true;
+        }
+        cursor.reset();
+        return;
+    }
+    auto& destination = children(parentNode);
+    const auto first = static_cast<int>(destination.size());
+    const auto last = first + static_cast<int>(batch.value().nodes.size()) - 1;
+    beginInsertRows(parentIndex, first, last);
+    for (const auto& hierarchyNode : batch.value().nodes) {
+        auto child = std::make_unique<Node>();
+        child->node = hierarchyNode;
+        child->parent = parentNode;
+        child->loaded = !hierarchyNode.hasChildren;
+        destination.push_back(std::move(child));
+    }
+    if (parentNode == nullptr) {
+        rootsLoaded_ = true;
+    } else {
+        parentNode->loaded = true;
+    }
+    cursor = batch.value().continuationCursor;
+    endInsertRows();
+}
+
+auto PageHierarchyModel::findNode(std::string_view pageName) const -> Node* {
+    const auto findIn = [&](const auto& self, const auto& candidates) -> Node* {
+        for (const auto& candidate : candidates) {
+            if (candidate->node.name == pageName) {
+                return candidate.get();
+            }
+            if (auto* found = self(self, candidate->children); found != nullptr) {
+                return found;
+            }
+        }
+        return nullptr;
+    };
+    return findIn(findIn, roots_);
+}
+
+auto PageHierarchyModel::loadCurrentPath() -> bool {
+    Node* parentNode = nullptr;
+    std::size_t segmentEnd = currentName_.find('/');
+    while (!currentName_.empty()) {
+        const auto targetName = currentName_.substr(0, segmentEnd);
+        const auto hasMore = [&]() -> bool {
+            return parentNode == nullptr
+                       ? !rootsLoaded_ || rootContinuationCursor_.has_value()
+                       : !parentNode->loaded || parentNode->continuationCursor.has_value();
+        };
+        while (findNode(targetName) == nullptr && hasMore()) {
+            if (!loadNextBatch(parentNode)) {
+                return false;
+            }
+        }
+        parentNode = findNode(targetName);
+        if (parentNode == nullptr || segmentEnd == std::string::npos) {
+            return parentNode != nullptr;
+        }
+        segmentEnd = currentName_.find('/', segmentEnd + 1);
+    }
+    return true;
+}
+
+auto PageHierarchyModel::refresh(const QString& currentName) -> bool {
+    const auto utf8 = currentName.toUtf8();
+    currentName_.assign(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+    beginResetModel();
+    roots_.clear();
+    rootContinuationCursor_.reset();
+    rootsLoaded_ = false;
+    auto succeeded = session_ == nullptr || !session_->isOpen() || loadNextBatch(nullptr);
+    if (succeeded && !currentName_.empty()) {
+        const auto exact = session_->pageHierarchyNode(currentName_);
+        succeeded = exact && (!exact.value() || loadCurrentPath());
+    }
+    endResetModel();
+    return succeeded;
+}
+
+auto PageHierarchyModel::indexForPageName(const QString& pageName) const -> QModelIndex {
+    const auto utf8 = pageName.toUtf8();
+    auto* item = findNode({utf8.constData(), static_cast<std::size_t>(utf8.size())});
+    if (item == nullptr) {
+        return {};
+    }
+    const auto& siblings = children(item->parent);
+    const auto found = std::ranges::find_if(
+        siblings, [&](const auto& candidate) -> bool { return candidate.get() == item; });
+    return found == siblings.end()
+               ? QModelIndex{}
+               : createIndex(static_cast<int>(std::distance(siblings.begin(), found)), 0, item);
+}
+
+auto PageHierarchyModel::pageName(const QModelIndex& index) const -> QString {
+    const auto* item = node(index);
+    return item == nullptr ? QString{} : QString::fromUtf8(item->node.name);
+}
+
 NotebookController::NotebookController(QObject* parent)
-    : QObject(parent), outlineEntries_(this), midnightTimer_(this) {
+    : QObject(parent), outlineEntries_(this), pageHierarchy_(this), midnightTimer_(this) {
+    pageHierarchy_.attach(&session_);
     midnightTimer_.setSingleShot(true);
     connect(&midnightTimer_, &QTimer::timeout, this, [this]() -> void {
         if (hasOpenNotebook() && isJournalPage()) {
@@ -272,22 +529,25 @@ auto NotebookController::journalDate() const -> QDate {
 auto NotebookController::outlineEntries() -> QAbstractItemModel* {
     return &outlineEntries_;
 }
+auto NotebookController::pageHierarchy() -> QAbstractItemModel* {
+    return &pageHierarchy_;
+}
 auto NotebookController::canUndo() const -> bool {
-    if (!session_.isOpen() || !journalDate_.isValid()) {
+    if (!session_.isOpen()) {
         return false;
     }
     const auto capabilities = session_.editCapabilities();
     return capabilities && capabilities.value().canUndo;
 }
 auto NotebookController::canRedo() const -> bool {
-    if (!session_.isOpen() || !journalDate_.isValid()) {
+    if (!session_.isOpen()) {
         return false;
     }
     const auto capabilities = session_.editCapabilities();
     return capabilities && capabilities.value().canRedo;
 }
 auto NotebookController::isJournalPage() const -> bool {
-    return !currentPageId_.has_value();
+    return !currentPageId_.has_value() && !currentPagePreview_;
 }
 auto NotebookController::currentPageId() const -> QString {
     return currentPageId_ ? displayId(*currentPageId_) : QString{};
@@ -297,6 +557,9 @@ auto NotebookController::currentPageName() const -> QString {
 }
 auto NotebookController::currentPageTitle() const -> QString {
     return currentPageTitle_;
+}
+auto NotebookController::currentPagePreview() const -> bool {
+    return currentPagePreview_;
 }
 auto NotebookController::pageChoices() const -> QStringList {
     return pageChoices_;
@@ -346,11 +609,13 @@ void NotebookController::closeNotebook() {
     name_.clear();
     error_.clear();
     currentPageId_.reset();
+    currentPagePreview_ = false;
     currentPageName_.clear();
     currentPageTitle_.clear();
     pageChoices_.clear();
     pageIds_.clear();
     outlineEntries_.setEntries({});
+    pageHierarchy_.clear();
     emit stateChanged();
     emit destinationChanged();
 }
@@ -358,6 +623,11 @@ void NotebookController::closeNotebook() {
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 auto NotebookController::insertOutlineEntry(const QString& authoredText,
                                             const QString& afterEntryId) -> int {
+    if (currentPagePreview_) {
+        error_ = tr("Create this Page before adding Entries.");
+        emit stateChanged();
+        return -1;
+    }
     std::optional<hieda::notebook::BlockId> after;
     if (!afterEntryId.isEmpty()) {
         after = blockId(afterEntryId);
@@ -778,7 +1048,38 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
             rejectSave(result.error());
             return outlineOutcome(false);
         }
-        const auto current = session_.outline(currentPageAddress());
+        if (currentPagePreview_) {
+            const auto restored = std::ranges::find_if(result.value(), [&](const auto& page) {
+                return page.kind == hieda::notebook::PageKind::named &&
+                       QString::fromUtf8(page.name) == currentPageName_ && page.metadata;
+            });
+            if (restored != result.value().end()) {
+                currentPageId_ = restored->metadata->id;
+                currentPagePreview_ = false;
+                currentPageTitle_ = QString::fromUtf8(restored->displayTitle);
+            }
+            if (currentPagePreview_) {
+                outlineEntries_.setEntries({});
+                refreshPages();
+                error_.clear();
+                emit stateChanged();
+                emit destinationChanged();
+                return outlineOutcome(true);
+            }
+        }
+        auto current = session_.outline(currentPageAddress());
+        if (!current && currentPageId_ &&
+            current.error().code == hieda::notebook::NotebookErrorCode::pageNotFound) {
+            currentPageId_.reset();
+            currentPagePreview_ = true;
+            currentPageTitle_.clear();
+            outlineEntries_.setEntries({});
+            refreshPages();
+            error_.clear();
+            emit stateChanged();
+            emit destinationChanged();
+            return outlineOutcome(true);
+        }
         if (!current) {
             rejectSave(current.error());
             return outlineOutcome(false);
@@ -821,6 +1122,7 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
                                 std::max(0, static_cast<int>(oldEntries.size()) - 1));
         }
         outlineEntries_.setEntries(entries);
+        refreshPages();
         auto cursor = 0;
         if (focusRow >= 0) {
             const auto desiredCursor = preferredSurvived
@@ -890,6 +1192,32 @@ auto NotebookController::createPage(const QString& name, const QString& displayT
     return true;
 }
 
+auto NotebookController::createCurrentPage(const QString& displayTitle) -> bool {
+    if (!currentPagePreview_) {
+        error_ = tr("Open a Page Preview before creating it.");
+        emit stateChanged();
+        return false;
+    }
+    return createPage(currentPageName_, displayTitle);
+}
+
+auto NotebookController::deleteCurrentPage() -> bool {
+    if (!currentPageId_) {
+        error_ = tr("Select a materialized Page before deleting it.");
+        emit stateChanged();
+        return false;
+    }
+    const auto name = currentPageName_;
+    const auto result = session_.deletePage(*currentPageId_);
+    if (!result) {
+        rejectSave(result.error());
+        return false;
+    }
+    loadPagePreview(name);
+    refreshPages();
+    return true;
+}
+
 auto NotebookController::renameCurrentPage(const QString& name, const QString& displayTitle)
     -> bool {
     if (!currentPageId_) {
@@ -909,6 +1237,7 @@ auto NotebookController::renameCurrentPage(const QString& name, const QString& d
     refreshPages();
     currentPageName_ = QString::fromUtf8(result.value().name);
     currentPageTitle_ = QString::fromUtf8(result.value().displayTitle);
+    static_cast<void>(pageHierarchy_.refresh(currentPageName_));
     error_.clear();
     emit destinationChanged();
     emit stateChanged();
@@ -923,6 +1252,21 @@ void NotebookController::navigateToPage(const QString& pageId) {
         return;
     }
     loadPage(*id);
+}
+
+void NotebookController::navigateToPageName(const QString& pageName) {
+    const auto utf8 = pageName.toUtf8();
+    const auto node =
+        session_.pageHierarchyNode({utf8.constData(), static_cast<std::size_t>(utf8.size())});
+    if (!node) {
+        reject(node.error());
+        return;
+    }
+    if (node.value() && node.value()->page) {
+        loadPage(node.value()->page->metadata.id);
+        return;
+    }
+    loadPagePreview(pageName);
 }
 
 void NotebookController::navigateToJournalDate(const QDate& date) {
@@ -1016,7 +1360,8 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         error_ = tr("There is no outline edit to redo.");
         break;
     case NotebookErrorCode::invalidPageName:
-        error_ = tr("A Page name must use 1–64 lowercase letters, digits, '-' or '_'.");
+        error_ = tr("A Page name must use slash-separated 1–64 character lowercase ASCII segments "
+                    "and be at most 255 bytes.");
         break;
     case NotebookErrorCode::invalidPageTitle:
         error_ = tr("A Page title must be non-empty single-line Unicode text.");
@@ -1026,6 +1371,9 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         break;
     case NotebookErrorCode::pageNotFound:
         error_ = tr("That Page is no longer available.");
+        break;
+    case NotebookErrorCode::staleHierarchyCursor:
+        error_ = tr("The Page Hierarchy changed; reload it from the beginning.");
         break;
     }
     emit stateChanged();
@@ -1049,9 +1397,11 @@ void NotebookController::loadJournalDate(const QDate& date) {
         }
         journalDate_ = date;
         currentPageId_.reset();
+        currentPagePreview_ = false;
         currentPageName_.clear();
         currentPageTitle_.clear();
         outlineEntries_.setEntries(asOutlineEntries(result.value().entries));
+        static_cast<void>(pageHierarchy_.refresh({}));
         emit destinationChanged();
         emit stateChanged();
     } catch (const hieda::notebook::NotebookException&) {
@@ -1068,9 +1418,12 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
             return;
         }
         currentPageId_ = pageId;
+        currentPagePreview_ = false;
+        journalDate_ = {};
         currentPageName_ = QString::fromUtf8(result.value().name);
         currentPageTitle_ = QString::fromUtf8(result.value().displayTitle);
         outlineEntries_.setEntries(asOutlineEntries(result.value().entries));
+        static_cast<void>(pageHierarchy_.refresh(currentPageName_));
         error_.clear();
         emit destinationChanged();
         emit stateChanged();
@@ -1078,6 +1431,19 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
         error_ = tr("Hieda encountered an unexpected Notebook error.");
         emit stateChanged();
     }
+}
+
+void NotebookController::loadPagePreview(const QString& pageName) {
+    currentPageId_.reset();
+    currentPagePreview_ = true;
+    journalDate_ = {};
+    currentPageName_ = pageName;
+    currentPageTitle_.clear();
+    outlineEntries_.setEntries({});
+    error_.clear();
+    static_cast<void>(pageHierarchy_.refresh(currentPageName_));
+    emit destinationChanged();
+    emit stateChanged();
 }
 
 auto NotebookController::currentPageAddress() const -> hieda::notebook::PageAddress {
@@ -1098,6 +1464,7 @@ void NotebookController::refreshPages() {
         pageChoices_.push_back(QStringLiteral("%1 — %2").arg(QString::fromUtf8(page.displayTitle),
                                                              QString::fromUtf8(page.name)));
     }
+    static_cast<void>(pageHierarchy_.refresh(isJournalPage() ? QString{} : currentPageName_));
     emit stateChanged();
 }
 

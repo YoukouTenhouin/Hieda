@@ -474,6 +474,148 @@ TEST_CASE("titled Pages preserve unique names identity and contents across renam
     CHECK(session.pages().value().front().name == "renamed_project");
 }
 
+TEST_CASE("Page Hierarchy derives previews and pages from hierarchical names") {
+    TemporaryDirectory temporaryDirectory;
+    const auto path = temporaryDirectory.path() / "page-hierarchy.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(path));
+    auto notifications = 0;
+    const auto subscription =
+        session.subscribeToChanges([&notifications]() -> void { ++notifications; });
+
+    const auto descendant = session.createPage("work/client/alpha", "Alpha");
+    REQUIRE(descendant);
+    CHECK(notifications == 1);
+    CHECK(session.current().value_or({}).revision == 1);
+    REQUIRE(session.createPage("work/zeta", "Zeta"));
+    const auto archive = session.createPage("archive", "Archive");
+    REQUIRE(archive);
+    CHECK_FALSE(session.createPage("work//broken", "Broken"));
+    CHECK_FALSE(session.createPage("work/Uppercase", "Broken"));
+    CHECK_FALSE(session.createPage(std::string(256, 'a'), "Broken"));
+    CHECK(notifications == 3);
+    CHECK(session.current().value_or({}).revision == 3);
+    hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
+    const auto failedCreate = session.createPage("failed/hierarchy", "Failed");
+    REQUIRE_FALSE(failedCreate);
+    CHECK(session.current().value_or({}).revision == 3);
+    CHECK(notifications == 3);
+    CHECK_FALSE(session.pageHierarchyNode("failed").value());
+
+    const auto page = session.pageHierarchyNode("work/client/alpha");
+    REQUIRE(page);
+    REQUIRE(page.value());
+    REQUIRE(page.value()->page);
+    CHECK(page.value()->page->metadata.id == descendant.value().metadata.id);
+    CHECK(page.value()->localSegment == "alpha");
+    CHECK_FALSE(page.value()->hasChildren);
+
+    const auto preview = session.pageHierarchyNode("work/client");
+    REQUIRE(preview);
+    REQUIRE(preview.value());
+    CHECK_FALSE(preview.value()->page);
+    CHECK(preview.value()->localSegment == "client");
+    CHECK(preview.value()->hasChildren);
+    REQUIRE(session.pageHierarchyNode("work"));
+    REQUIRE(session.pageHierarchyNode("work").value());
+    CHECK_FALSE(session.pageHierarchyNode("missing").value());
+
+    const auto roots = session.pageHierarchyChildren();
+    REQUIRE(roots);
+    REQUIRE(roots.value().nodes.size() == 2);
+    CHECK(roots.value().nodes[0].name == "archive");
+    CHECK(roots.value().nodes[1].name == "work");
+    CHECK_FALSE(roots.value().continuationCursor);
+    const auto workChildren = session.pageHierarchyChildren("work");
+    REQUIRE(workChildren);
+    REQUIRE(workChildren.value().nodes.size() == 2);
+    CHECK(workChildren.value().nodes[0].name == "work/client");
+    CHECK(workChildren.value().nodes[1].name == "work/zeta");
+
+    REQUIRE(session.deletePage(archive.value().metadata.id));
+    CHECK_FALSE(session.pageHierarchyNode("archive").value());
+    REQUIRE(session.undoEdit());
+    REQUIRE(session.pageHierarchyNode("archive").value()->page);
+    REQUIRE(session.redoEdit());
+    CHECK_FALSE(session.pageHierarchyNode("archive").value());
+
+    for (int index = 0; index < 101; ++index) {
+        REQUIRE(session.createPage("many/p" + std::to_string(1000 + index), "Many"));
+    }
+    const auto firstBatch = session.pageHierarchyChildren("many");
+    REQUIRE(firstBatch);
+    CHECK(firstBatch.value().nodes.size() == 100);
+    REQUIRE(firstBatch.value().continuationCursor);
+    const auto secondBatch =
+        session.pageHierarchyChildren("many", firstBatch.value().continuationCursor);
+    REQUIRE(secondBatch);
+    CHECK(secondBatch.value().nodes.size() == 1);
+    REQUIRE(session.createPage("many/p9999", "Later"));
+    const auto stale = session.pageHierarchyChildren("many", firstBatch.value().continuationCursor);
+    REQUIRE_FALSE(stale);
+    CHECK(stale.error().code == hieda::notebook::NotebookErrorCode::staleHierarchyCursor);
+
+    const auto materialized = session.createPage("work/client", "Client");
+    REQUIRE(materialized);
+    REQUIRE(session.pageHierarchyNode("work/client").value()->page);
+    const auto materializedRevision = session.current().value_or({}).revision;
+    hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
+    const auto failedUndo = session.undoEdit();
+    REQUIRE_FALSE(failedUndo);
+    CHECK(session.current().value_or({}).revision == materializedRevision);
+    REQUIRE(session.pageHierarchyNode("work/client").value()->page);
+    CHECK(session.editCapabilities().value().canUndo);
+    REQUIRE(session.undoEdit());
+    CHECK(session.current().value_or({}).revision == materializedRevision + 1);
+    REQUIRE(session.pageHierarchyNode("work/client").value());
+    CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
+    const auto undoneRevision = session.current().value_or({}).revision;
+    hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
+    const auto failedRedo = session.redoEdit();
+    REQUIRE_FALSE(failedRedo);
+    CHECK(session.current().value_or({}).revision == undoneRevision);
+    CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
+    CHECK(session.editCapabilities().value().canRedo);
+    REQUIRE(session.redoEdit());
+    REQUIRE(session.pageHierarchyNode("work/client").value()->page);
+    CHECK(session.pageHierarchyNode("work/client").value()->page->metadata ==
+          materialized.value().metadata);
+
+    const auto withEntry =
+        session.insertEntry(materialized.value().metadata.id, std::nullopt, "durable");
+    REQUIRE(withEntry);
+
+    const auto deleted = session.deletePage(materialized.value().metadata.id);
+    REQUIRE(deleted);
+    REQUIRE(deleted.value().entries.size() == 1);
+    CHECK(deleted.value().entries.front().authoredText == "durable");
+    REQUIRE(session.pageHierarchyNode("work/client").value());
+    CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
+    REQUIRE(session.undoEdit());
+    REQUIRE(session.pageHierarchyNode("work/client").value()->page);
+    CHECK(session.pageHierarchyNode("work/client").value()->page->metadata ==
+          deleted.value().metadata);
+    CHECK(session.outline(materialized.value().metadata.id).value().entries ==
+          deleted.value().entries);
+    REQUIRE(session.redoEdit());
+    CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
+
+    const auto revision = session.current().value_or({}).revision;
+    const auto notificationCount = notifications;
+    hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
+    const auto failedDelete = session.deletePage(descendant.value().metadata.id);
+    REQUIRE_FALSE(failedDelete);
+    CHECK(session.current().value_or({}).revision == revision);
+    CHECK(notifications == notificationCount);
+    REQUIRE(session.pageHierarchyNode("work/client/alpha").value()->page);
+
+    session.close();
+    REQUIRE(session.open(path));
+    REQUIRE(session.pageHierarchyNode("work/client/alpha").value()->page);
+    REQUIRE(session.pageHierarchyNode("work/client").value());
+    CHECK_FALSE(session.pageHierarchyNode("work/client").value()->page);
+}
+
 TEST_CASE("Page Entries provide complete shared outline commands and notifications") {
     TemporaryDirectory temporaryDirectory;
     hieda::notebook::NotebookSession session;

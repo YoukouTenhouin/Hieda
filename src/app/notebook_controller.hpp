@@ -53,6 +53,61 @@ class OutlineEntryModel final : public QAbstractListModel {
     std::vector<OutlineEntry> entries_;
 };
 
+class PageHierarchyModel final : public QAbstractItemModel {
+    Q_OBJECT
+
+  public:
+    enum Role : std::uint16_t {
+        PageNameRole = Qt::UserRole + 1,
+        LocalSegmentRole,
+        DisplayTitleRole,
+        MaterializedRole,
+        HasChildrenRole,
+        ExpandedRole,
+        SelectedRole,
+        AccessibleDescriptionRole,
+    };
+
+    explicit PageHierarchyModel(QObject* parent = nullptr);
+    [[nodiscard]] auto index(int row, int column, const QModelIndex& parent = {}) const
+        -> QModelIndex override;
+    [[nodiscard]] auto parent(const QModelIndex& child) const -> QModelIndex override;
+    [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const -> int override;
+    [[nodiscard]] auto columnCount(const QModelIndex& parent = {}) const -> int override;
+    [[nodiscard]] auto data(const QModelIndex& index, int role) const -> QVariant override;
+    [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;
+    [[nodiscard]] auto canFetchMore(const QModelIndex& parent) const -> bool override;
+    void fetchMore(const QModelIndex& parent) override;
+    void attach(hieda::notebook::NotebookSession* session);
+    void clear();
+    [[nodiscard]] auto refresh(const QString& currentName) -> bool;
+    [[nodiscard]] Q_INVOKABLE auto indexForPageName(const QString& pageName) const -> QModelIndex;
+    [[nodiscard]] Q_INVOKABLE auto pageName(const QModelIndex& index) const -> QString;
+
+  private:
+    struct Node {
+        hieda::notebook::PageHierarchyNode node;
+        Node* parent{nullptr};
+        std::vector<std::unique_ptr<Node>> children;
+        std::optional<std::string> continuationCursor;
+        bool loaded{false};
+    };
+
+    [[nodiscard]] auto node(const QModelIndex& index) const -> Node*;
+    [[nodiscard]] auto children(Node* parent) -> std::vector<std::unique_ptr<Node>>&;
+    [[nodiscard]] auto children(const Node* parent) const
+        -> const std::vector<std::unique_ptr<Node>>&;
+    [[nodiscard]] auto loadNextBatch(Node* parent) -> bool;
+    [[nodiscard]] auto loadCurrentPath() -> bool;
+    [[nodiscard]] auto findNode(std::string_view pageName) const -> Node*;
+
+    hieda::notebook::NotebookSession* session_{nullptr};
+    std::vector<std::unique_ptr<Node>> roots_;
+    std::optional<std::string> rootContinuationCursor_;
+    bool rootsLoaded_{false};
+    std::string currentName_;
+};
+
 class NotebookController final : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool hasOpenNotebook READ hasOpenNotebook NOTIFY stateChanged)
@@ -61,12 +116,14 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
     Q_PROPERTY(QDate journalDate READ journalDate NOTIFY destinationChanged)
     Q_PROPERTY(QAbstractItemModel* outlineEntries READ outlineEntries CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* pageHierarchy READ pageHierarchy CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
     Q_PROPERTY(bool isJournalPage READ isJournalPage NOTIFY destinationChanged)
     Q_PROPERTY(QString currentPageId READ currentPageId NOTIFY destinationChanged)
     Q_PROPERTY(QString currentPageName READ currentPageName NOTIFY destinationChanged)
     Q_PROPERTY(QString currentPageTitle READ currentPageTitle NOTIFY destinationChanged)
+    Q_PROPERTY(bool currentPagePreview READ currentPagePreview NOTIFY destinationChanged)
     Q_PROPERTY(QStringList pageChoices READ pageChoices NOTIFY stateChanged)
 
   public:
@@ -78,12 +135,14 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto errorMessage() const -> QString;
     [[nodiscard]] auto journalDate() const -> QDate;
     [[nodiscard]] auto outlineEntries() -> QAbstractItemModel*;
+    [[nodiscard]] auto pageHierarchy() -> QAbstractItemModel*;
     [[nodiscard]] auto canUndo() const -> bool;
     [[nodiscard]] auto canRedo() const -> bool;
     [[nodiscard]] auto isJournalPage() const -> bool;
     [[nodiscard]] auto currentPageId() const -> QString;
     [[nodiscard]] auto currentPageName() const -> QString;
     [[nodiscard]] auto currentPageTitle() const -> QString;
+    [[nodiscard]] auto currentPagePreview() const -> bool;
     [[nodiscard]] auto pageChoices() const -> QStringList;
     [[nodiscard]] Q_INVOKABLE auto pageIdAt(qsizetype index) const -> QString;
     [[nodiscard]] Q_INVOKABLE auto pageIdForChoice(const QString& choice) const -> QString;
@@ -93,8 +152,11 @@ class NotebookController final : public QObject {
     Q_INVOKABLE void closeNotebook();
     Q_INVOKABLE void clearError();
     Q_INVOKABLE auto createPage(const QString& name, const QString& displayTitle) -> bool;
+    Q_INVOKABLE auto createCurrentPage(const QString& displayTitle) -> bool;
+    Q_INVOKABLE auto deleteCurrentPage() -> bool;
     Q_INVOKABLE auto renameCurrentPage(const QString& name, const QString& displayTitle) -> bool;
     Q_INVOKABLE void navigateToPage(const QString& pageId);
+    Q_INVOKABLE void navigateToPageName(const QString& pageName);
     Q_INVOKABLE void navigateToJournalDate(const QDate& date);
     Q_INVOKABLE void navigateToJournalDateText(const QString& isoDate);
     Q_INVOKABLE void navigateToToday();
@@ -150,6 +212,7 @@ class NotebookController final : public QObject {
     void rejectSave(const hieda::notebook::NotebookError& error);
     void loadJournalDate(const QDate& date);
     void loadPage(const hieda::notebook::BlockId& pageId);
+    void loadPagePreview(const QString& pageName);
     [[nodiscard]] auto currentPageAddress() const -> hieda::notebook::PageAddress;
     void refreshPages();
     auto moveOutlineEntry(const QString& entryId, const QString& authoredText,
@@ -165,10 +228,12 @@ class NotebookController final : public QObject {
     QDate journalDate_;
     QDate pendingJournalDate_;
     std::optional<hieda::notebook::BlockId> currentPageId_;
+    bool currentPagePreview_{false};
     QString currentPageName_;
     QString currentPageTitle_;
     QStringList pageChoices_;
     std::vector<hieda::notebook::BlockId> pageIds_;
     OutlineEntryModel outlineEntries_;
+    PageHierarchyModel pageHierarchy_;
     QTimer midnightTimer_;
 };

@@ -20,10 +20,36 @@ ApplicationWindow {
     property int outlineSelectionAnchorRow: -1
     property int outlineSelectionExtentRow: -1
     property var pageRenameReturnEditor: null
+    property var hierarchyExpandedNames: []
     readonly property bool hasPendingOutlineEdit: activeOutlineEditor && activeOutlineEditor.hasPendingEdit
     readonly property int outlineSelectionCount: outlineSelectionIds.length
 
     signal draftFocusRequested(string afterId)
+
+    Connections {
+        target: notebookController
+        function onStateChanged() {
+            if (!notebookController.hasOpenNotebook)
+                window.hierarchyExpandedNames = [];
+        }
+        function onDestinationChanged() {
+            Qt.callLater(window.restoreHierarchyExpansion);
+        }
+    }
+
+    function restoreHierarchyExpansion() {
+        if (!pageList || !notebookController.hasOpenNotebook)
+            return ;
+
+        hierarchyExpandedNames.forEach(function(name) {
+            const modelIndex = notebookController.pageHierarchy.indexForPageName(name);
+            if (modelIndex.valid)
+                pageList.expandToIndex(modelIndex);
+        });
+        const currentIndex = notebookController.pageHierarchy.indexForPageName(notebookController.currentPageName);
+        if (currentIndex.valid)
+            pageList.expandToIndex(currentIndex);
+    }
 
     function beginDraft(afterId) {
         draftText = "";
@@ -478,6 +504,32 @@ ApplicationWindow {
     }
 
     Dialog {
+        id: materializePageDialog
+        objectName: "materializePageDialog"
+        title: qsTr("Create Page")
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: {
+            if (!notebookController.createCurrentPage(materializePageTitle.text))
+                Qt.callLater(function() { materializePageDialog.open(); });
+        }
+        ColumnLayout {
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("Create %1").arg(notebookController.currentPageName)
+                wrapMode: Text.Wrap
+            }
+            Label { text: qsTr("Display title") }
+            TextField {
+                id: materializePageTitle
+                objectName: "materializePageTitle"
+                Layout.fillWidth: true
+            }
+        }
+    }
+
+    Dialog {
         id: goToPageDialog
         objectName: "goToPageDialog"
         title: qsTr("Go to Page")
@@ -665,27 +717,51 @@ ApplicationWindow {
                             }
                         }
                         Label { text: qsTr("Pages"); font.bold: true }
-                        ListView {
+                        TreeView {
                             id: pageList
 
                             function pageItemAt(row) {
-                                return itemAtIndex(row);
+                                return itemAtCell(Qt.point(0, row));
                             }
+
 
                             objectName: "pageList"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            model: notebookController.pageChoices
+                            model: notebookController.pageHierarchy
                             clip: true
-                            delegate: Button {
-                                required property string modelData
-                                required property int index
-                                width: ListView.view.width
-                                text: modelData
-                                highlighted: notebookController.currentPageId === notebookController.pageIdAt(index)
+                            Accessible.name: qsTr("Page Hierarchy")
+                            onExpanded: function(row, depth) {
+                                const name = notebookController.pageHierarchy.pageName(modelIndex(row));
+                                if (hierarchyExpandedNames.indexOf(name) < 0)
+                                    hierarchyExpandedNames = hierarchyExpandedNames.concat([name]);
+                            }
+                            onCollapsed: function(row, recursively) {
+                                const name = notebookController.pageHierarchy.pageName(modelIndex(row));
+                                hierarchyExpandedNames = hierarchyExpandedNames.filter(function(candidate) { return candidate !== name; });
+                            }
+                            onRowsChanged: Qt.callLater(window.restoreHierarchyExpansion)
+                            Component.onCompleted: Qt.callLater(window.restoreHierarchyExpansion)
+                            delegate: TreeViewDelegate {
+                                required property string pageName
+                                required property string localSegment
+                                required property string displayTitle
+                                required property bool materialized
+                                required property bool revealExpanded
+                                required property bool currentDestination
+                                required property string accessibleDescription
+                                width: TreeView.view.width
+                                text: materialized ? qsTr("%1 — %2").arg(displayTitle).arg(localSegment) : qsTr("%1 (Page Preview)").arg(localSegment)
+                                highlighted: currentDestination
+                                Accessible.name: text
+                                Accessible.description: accessibleDescription
+                                Component.onCompleted: {
+                                    if (revealExpanded)
+                                        Qt.callLater(function() { pageList.expand(row); });
+                                }
                                 onClicked: {
                                     if (window.commitActiveOutlineEditor())
-                                        notebookController.navigateToPage(notebookController.pageIdAt(index));
+                                        notebookController.navigateToPageName(pageName);
                                 }
                             }
                         }
@@ -723,7 +799,7 @@ ApplicationWindow {
 
                     header: Item {
                         width: outlineList.width
-                        height: dateHeading.implicitHeight + (window.uiSpacing * 6)
+                        height: dateHeading.implicitHeight + destinationActions.implicitHeight + (window.uiSpacing * 7)
 
                         Label {
                             id: dateHeading
@@ -733,10 +809,32 @@ ApplicationWindow {
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.top: parent.top
                             anchors.topMargin: window.uiSpacing * 4
-                            text: notebookController.isJournalPage ? Qt.formatDate(notebookController.journalDate, Locale.LongFormat) : qsTr("%1 — %2").arg(notebookController.currentPageTitle).arg(notebookController.currentPageName)
+                            text: notebookController.isJournalPage ? Qt.formatDate(notebookController.journalDate, Locale.LongFormat) : notebookController.currentPagePreview ? qsTr("%1 — Page Preview").arg(notebookController.currentPageName) : qsTr("%1 — %2").arg(notebookController.currentPageTitle).arg(notebookController.currentPageName)
                             font.pixelSize: Math.round(window.font.pixelSize * 1.7)
                             font.weight: Font.DemiBold
-                            Accessible.name: notebookController.isJournalPage ? qsTr("Journal Page for %1").arg(text) : qsTr("Page title %1, name %2").arg(notebookController.currentPageTitle).arg(notebookController.currentPageName)
+                            Accessible.name: notebookController.isJournalPage ? qsTr("Journal Page for %1").arg(text) : notebookController.currentPagePreview ? qsTr("Page Preview for full Page Name %1, not materialized").arg(notebookController.currentPageName) : qsTr("Page title %1, name %2").arg(notebookController.currentPageTitle).arg(notebookController.currentPageName)
+                        }
+
+                        RowLayout {
+                            id: destinationActions
+                            anchors.top: dateHeading.bottom
+                            anchors.topMargin: window.uiSpacing
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            Button {
+                                objectName: "materializePageButton"
+                                visible: notebookController.currentPagePreview
+                                text: qsTr("Create this Page")
+                                onClicked: {
+                                    materializePageTitle.text = notebookController.currentPageName.split("/").pop();
+                                    materializePageDialog.open();
+                                }
+                            }
+                            Button {
+                                objectName: "deletePageButton"
+                                visible: !notebookController.isJournalPage && !notebookController.currentPagePreview
+                                text: qsTr("Delete Page")
+                                onClicked: notebookController.deleteCurrentPage()
+                            }
                         }
 
                     }
