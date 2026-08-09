@@ -411,15 +411,15 @@ TEST_CASE("a Journal Page stays virtual until its first Entry is committed") {
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
 
-    const auto empty = session.journalPage(date);
+    const auto empty = session.outline(date);
     REQUIRE(empty);
-    CHECK(empty.value().date == date);
+    CHECK(empty.value().journalDate == date);
     CHECK_FALSE(empty.value().metadata.has_value());
     CHECK(empty.value().entries.empty());
 
     session.close();
     REQUIRE(session.open(notebookPath));
-    const auto reopened = session.journalPage(date);
+    const auto reopened = session.outline(date);
     REQUIRE(reopened);
     CHECK_FALSE(reopened.value().metadata.has_value());
 }
@@ -441,19 +441,19 @@ TEST_CASE("titled Pages preserve unique names identity and contents across renam
     CHECK_FALSE(session.createPage("Project", "Invalid name"));
     CHECK_FALSE(session.createPage("empty-title", ""));
 
-    auto page = session.insertPageEntry(pageId, std::nullopt, "parent").value();
-    page = session.insertPageEntry(pageId, page.entries.front().metadata.id, "child").value();
+    auto page = session.insertEntry(pageId, std::nullopt, "parent").value();
+    page = session.insertEntry(pageId, page.entries.front().metadata.id, "child").value();
     const auto parentId = page.entries.front().metadata.id;
     const auto childId = page.entries.back().metadata.id;
-    page = session.movePageEntry(childId, hieda::notebook::PageEntryMove::indent, "child").value();
+    page = session.moveEntry(childId, hieda::notebook::EntryMove::indent, "child").value();
     CHECK(page.entries.back().parentEntry == parentId);
-    CHECK(session.pageEditCapabilities(pageId).value().canUndo);
-    const auto undone = session.undoPageEdit(pageId);
+    CHECK(session.editCapabilities().value().canUndo);
+    const auto undone = session.undoEdit();
     REQUIRE(undone);
-    CHECK_FALSE(undone.value().entries.back().parentEntry);
-    const auto redone = session.redoPageEdit(pageId);
+    CHECK_FALSE(undone.value().front().entries.back().parentEntry);
+    const auto redone = session.redoEdit();
     REQUIRE(redone);
-    CHECK(redone.value().entries.back().parentEntry == parentId);
+    CHECK(redone.value().front().entries.back().parentEntry == parentId);
 
     const auto renamed = session.renamePage(pageId, "renamed_project", "Renamed Project");
     REQUIRE(renamed);
@@ -463,15 +463,18 @@ TEST_CASE("titled Pages preserve unique names identity and contents across renam
 
     session.close();
     REQUIRE(session.open(path));
-    const auto reopened = session.page(pageId);
+    const auto reopened = session.outline(pageId);
     REQUIRE(reopened);
-    CHECK(reopened.value() == renamed.value());
+    CHECK(reopened.value().metadata == renamed.value().metadata);
+    CHECK(reopened.value().name == renamed.value().name);
+    CHECK(reopened.value().displayTitle == renamed.value().displayTitle);
+    CHECK(reopened.value().entries == renamed.value().entries);
     REQUIRE(session.pages());
     CHECK(session.pages().value().size() == 2);
     CHECK(session.pages().value().front().name == "renamed_project");
 }
 
-TEST_CASE("Page Entries provide complete outline commands isolated history and notifications") {
+TEST_CASE("Page Entries provide complete shared outline commands and notifications") {
     TemporaryDirectory temporaryDirectory;
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(temporaryDirectory.path() / "page-outline.hieda"));
@@ -481,70 +484,66 @@ TEST_CASE("Page Entries provide complete outline commands isolated history and n
     const auto subscription =
         session.subscribeToChanges([&notifications]() -> void { ++notifications; });
 
-    auto outline = session.insertPageEntry(firstPage.metadata.id, std::nullopt, "parent").value();
+    auto outline = session.insertEntry(firstPage.metadata.id, std::nullopt, "parent").value();
     const auto parentId = outline.entries.front().metadata.id;
-    outline = session.insertPageEntry(firstPage.metadata.id, parentId, "child").value();
+    outline = session.insertEntry(firstPage.metadata.id, parentId, "child").value();
     const auto childId = outline.entries.back().metadata.id;
-    outline = session.insertPageEntry(firstPage.metadata.id, childId, "tail").value();
+    outline = session.insertEntry(firstPage.metadata.id, childId, "tail").value();
     const auto tailId = outline.entries.back().metadata.id;
-    REQUIRE(session.updatePageEntry(childId, "child updated"));
-    outline = session.splitPageEntry(childId, "child updated", 5).value();
+    REQUIRE(session.updateEntry(childId, "child updated"));
+    outline = session.splitEntry(childId, "child updated", 5).value();
     const auto splitId = outline.entries[2].metadata.id;
-    outline = session.joinPageEntry(splitId, " updated").value();
+    outline = session.joinEntry(splitId, " updated").value();
     CHECK(outline.entries[1].authoredText == "child updated");
     outline =
-        session.movePageEntry(childId, hieda::notebook::PageEntryMove::indent, "child updated")
-            .value();
+        session.moveEntry(childId, hieda::notebook::EntryMove::indent, "child updated").value();
     CHECK(outline.entries[1].parentEntry == parentId);
     outline =
-        session.movePageEntry(childId, hieda::notebook::PageEntryMove::outdent, "child updated")
-            .value();
+        session.moveEntry(childId, hieda::notebook::EntryMove::outdent, "child updated").value();
     CHECK_FALSE(outline.entries[1].parentEntry);
-    outline = session.movePageEntry(childId, hieda::notebook::PageEntryMove::down, "child updated")
-                  .value();
+    outline = session.moveEntry(childId, hieda::notebook::EntryMove::down, "child updated").value();
     CHECK(outline.entries.back().metadata.id == childId);
-    outline =
-        session.movePageEntry(childId, hieda::notebook::PageEntryMove::up, "child updated").value();
+    outline = session.moveEntry(childId, hieda::notebook::EntryMove::up, "child updated").value();
     CHECK(outline.entries[1].metadata.id == childId);
-    outline = session.deletePageEntry(tailId).value();
+    outline = session.deleteEntry(tailId).value();
     REQUIRE(outline.entries.size() == 2);
-    outline = session.deletePageSubtrees({parentId}).value();
+    outline = session.deleteSubtrees({parentId}).value();
     REQUIRE(outline.entries.size() == 1);
     CHECK(outline.entries.front().metadata.id == childId);
     CHECK(notifications == 12);
 
     const auto invalid =
-        session.movePageEntry(childId, hieda::notebook::PageEntryMove::up, "invalid\rtext");
+        session.moveEntry(childId, hieda::notebook::EntryMove::up, "invalid\rtext");
     REQUIRE_FALSE(invalid);
     CHECK(invalid.error().code == hieda::notebook::NotebookErrorCode::invalidAuthoredText);
     CHECK(notifications == 12);
-    REQUIRE(session.undoPageEdit(firstPage.metadata.id));
-    REQUIRE(session.redoPageEdit(firstPage.metadata.id));
+    REQUIRE(session.undoEdit());
+    REQUIRE(session.redoEdit());
     CHECK(notifications == 14);
 
-    REQUIRE(session.insertPageEntry(secondPage.metadata.id, std::nullopt, "independent"));
-    CHECK(session.pageEditCapabilities(firstPage.metadata.id).value().canUndo);
-    CHECK(session.pageEditCapabilities(secondPage.metadata.id).value().canUndo);
-    REQUIRE(session.undoPageEdit(secondPage.metadata.id));
-    CHECK(session.page(firstPage.metadata.id).value().entries.size() == 1);
+    REQUIRE(session.insertEntry(secondPage.metadata.id, std::nullopt, "independent"));
+    CHECK(session.editCapabilities().value().canUndo);
+    CHECK(session.editCapabilities().value().canUndo);
+    REQUIRE(session.undoEdit());
+    CHECK(session.outline(firstPage.metadata.id).value().entries.size() == 1);
 
     hieda::notebook::BlockId missingPage;
     missingPage.bytes.front() = std::byte{1};
-    const auto missing = session.page(missingPage);
+    const auto missing = session.outline(missingPage);
     REQUIRE_FALSE(missing);
     CHECK(missing.error().code == hieda::notebook::NotebookErrorCode::pageNotFound);
     CHECK_FALSE(session.createPage("bad_title", "line\nbreak"));
     CHECK_FALSE(session.createPage("bad_utf8", std::string("\xC3", 1)));
 
-    const auto firstBeforeCrossPage = session.page(firstPage.metadata.id).value();
-    const auto secondEntry = session.insertPageEntry(secondPage.metadata.id, std::nullopt, "other")
+    const auto firstBeforeCrossPage = session.outline(firstPage.metadata.id).value();
+    const auto secondEntry = session.insertEntry(secondPage.metadata.id, std::nullopt, "other")
                                  .value()
                                  .entries.front()
                                  .metadata.id;
-    const auto crossPage = session.deletePageSubtrees({childId, secondEntry});
+    const auto crossPage = session.deleteSubtrees({childId, secondEntry});
     REQUIRE_FALSE(crossPage);
     CHECK(crossPage.error().code == hieda::notebook::NotebookErrorCode::blockNotFound);
-    CHECK(session.page(firstPage.metadata.id).value() == firstBeforeCrossPage);
+    CHECK(session.outline(firstPage.metadata.id).value() == firstBeforeCrossPage);
 }
 
 TEST_CASE("Page validation and failed commits preserve identity indexes revision and history") {
@@ -560,11 +559,11 @@ TEST_CASE("Page validation and failed commits preserve identity indexes revision
     CHECK_FALSE(session.createPage("has.dot", "Forbidden"));
     const auto first = session.createPage("first", "First").value();
     const auto second = session.createPage("second", "Second").value();
-    const auto beforeRename = session.page(second.metadata.id).value();
+    const auto beforeRename = session.outline(second.metadata.id).value();
     const auto conflictingRename = session.renamePage(second.metadata.id, "first", "Conflict");
     REQUIRE_FALSE(conflictingRename);
     CHECK(conflictingRename.error().code == hieda::notebook::NotebookErrorCode::pageNameConflict);
-    CHECK(session.page(second.metadata.id).value() == beforeRename);
+    CHECK(session.outline(second.metadata.id).value() == beforeRename);
 
     const auto revisionBeforeCreate =
         session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
@@ -576,41 +575,39 @@ TEST_CASE("Page validation and failed commits preserve identity indexes revision
           revisionBeforeCreate);
     CHECK(session.pages().value().size() == 3);
 
-    const auto beforeFailedRename = session.page(first.metadata.id).value();
+    const auto beforeFailedRename = session.outline(first.metadata.id).value();
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
     const auto failedRename = session.renamePage(first.metadata.id, "renamed", "Renamed");
     REQUIRE_FALSE(failedRename);
-    CHECK(session.page(first.metadata.id).value() == beforeFailedRename);
+    CHECK(session.outline(first.metadata.id).value() == beforeFailedRename);
     CHECK(session.createPage("renamed", "Available after rollback"));
 
-    auto page = session.insertPageEntry(first.metadata.id, std::nullopt, "one").value();
-    page =
-        session.insertPageEntry(first.metadata.id, page.entries.front().metadata.id, "two").value();
+    auto page = session.insertEntry(first.metadata.id, std::nullopt, "one").value();
+    page = session.insertEntry(first.metadata.id, page.entries.front().metadata.id, "two").value();
     const auto acknowledged = page;
     const auto secondId = page.entries.back().metadata.id;
     const auto revisionBeforeMove =
         session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
-    const auto failedMove =
-        session.movePageEntry(secondId, hieda::notebook::PageEntryMove::indent, "two");
+    const auto failedMove = session.moveEntry(secondId, hieda::notebook::EntryMove::indent, "two");
     REQUIRE_FALSE(failedMove);
-    CHECK(session.page(first.metadata.id).value() == acknowledged);
+    CHECK(session.outline(first.metadata.id).value() == acknowledged);
     CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision ==
           revisionBeforeMove);
-    CHECK(session.pageEditCapabilities(first.metadata.id).value().canUndo);
+    CHECK(session.editCapabilities().value().canUndo);
 
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
-    const auto failedUndo = session.undoPageEdit(first.metadata.id);
+    const auto failedUndo = session.undoEdit();
     REQUIRE_FALSE(failedUndo);
-    CHECK(session.page(first.metadata.id).value() == acknowledged);
-    CHECK(session.pageEditCapabilities(first.metadata.id).value().canUndo);
-    CHECK_FALSE(session.pageEditCapabilities(first.metadata.id).value().canRedo);
+    CHECK(session.outline(first.metadata.id).value() == acknowledged);
+    CHECK(session.editCapabilities().value().canUndo);
+    CHECK_FALSE(session.editCapabilities().value().canRedo);
 
     hieda::notebook::BlockId missingPage;
     missingPage.bytes.front() = std::byte{1};
     CHECK_FALSE(session.renamePage(missingPage, "missing", "Missing"));
-    CHECK_FALSE(session.insertPageEntry(missingPage, std::nullopt, "missing"));
-    CHECK_FALSE(session.undoPageEdit(missingPage));
+    CHECK_FALSE(session.insertEntry(missingPage, std::nullopt, "missing"));
+    CHECK(session.editCapabilities().value().canUndo);
 }
 
 TEST_CASE("flat Journal Entries preserve identity Unicode text and insertion order") {
@@ -620,7 +617,7 @@ TEST_CASE("flat Journal Entries preserve identity Unicode text and insertion ord
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
 
-    const auto first = session.insertJournalEntry(date, std::nullopt, "first");
+    const auto first = session.insertEntry(date, std::nullopt, "first");
     REQUIRE(first);
     REQUIRE(first.value().metadata);
     REQUIRE(first.value().entries.size() == 1);
@@ -628,13 +625,13 @@ TEST_CASE("flat Journal Entries preserve identity Unicode text and insertion ord
     CHECK(first.value().entries.front().metadata.createdAt ==
           first.value().entries.front().metadata.updatedAt);
 
-    const auto third = session.insertJournalEntry(date, std::nullopt, "third");
+    const auto third = session.insertEntry(date, std::nullopt, "third");
     REQUIRE(third);
     REQUIRE(third.value().entries.size() == 2);
     const auto thirdId = third.value().entries.back().metadata.id;
 
     const std::string unicodeText = "\xE7\xAC\xAC\xE4\xBA\x8C \xF0\x9F\x8E\xB4";
-    const auto second = session.insertJournalEntry(date, firstId, unicodeText);
+    const auto second = session.insertEntry(date, firstId, unicodeText);
     REQUIRE(second);
     REQUIRE(second.value().entries.size() == 3);
     CHECK(second.value().entries[0].authoredText == "first");
@@ -644,7 +641,7 @@ TEST_CASE("flat Journal Entries preserve identity Unicode text and insertion ord
     const auto& expected = second.value();
     session.close();
     REQUIRE(session.open(notebookPath));
-    const auto reopened = session.journalPage(date);
+    const auto reopened = session.outline(date);
     REQUIRE(reopened);
     CHECK(reopened.value() == expected);
 }
@@ -655,41 +652,41 @@ TEST_CASE("editing a Journal Entry acknowledges exact multiline Unicode text") {
     const hieda::notebook::JournalDate date{2026, 8, 7};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
-    const auto inserted = session.insertJournalEntry(date, std::nullopt, "before");
+    const auto inserted = session.insertEntry(date, std::nullopt, "before");
     REQUIRE(inserted);
     const auto entry = inserted.value().entries.front();
     REQUIRE(inserted.value().metadata);
     const auto pageMetadata = inserted.value().metadata.value_or(hieda::notebook::BlockMetadata{});
 
-    const auto updated = session.updateJournalEntry(entry.metadata.id, "  after  ");
+    const auto updated = session.updateEntry(entry.metadata.id, "  after  ");
     REQUIRE(updated);
     CHECK(updated.value().authoredText == "  after  ");
     CHECK(updated.value().metadata.id == entry.metadata.id);
     CHECK(updated.value().metadata.createdAt == entry.metadata.createdAt);
 
     const std::string multiline = "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E\nsecond line";
-    const auto multilineUpdate = session.updateJournalEntry(entry.metadata.id, multiline);
+    const auto multilineUpdate = session.updateEntry(entry.metadata.id, multiline);
     REQUIRE(multilineUpdate);
     CHECK(multilineUpdate.value().authoredText == multiline);
 
-    const auto rejected = session.updateJournalEntry(entry.metadata.id, "carriage\rreturn");
+    const auto rejected = session.updateEntry(entry.metadata.id, "carriage\rreturn");
     REQUIRE_FALSE(rejected);
     CHECK(rejected.error().code == hieda::notebook::NotebookErrorCode::invalidAuthoredText);
-    const auto page = session.journalPage(date);
+    const auto page = session.outline(date);
     REQUIRE(page);
     CHECK(page.value().entries.front().authoredText == multiline);
     CHECK(page.value().metadata == pageMetadata);
 
     session.close();
     REQUIRE(session.open(notebookPath));
-    CHECK(session.journalPage(date).value().entries.front().authoredText == multiline);
+    CHECK(session.outline(date).value().entries.front().authoredText == multiline);
 }
 
 TEST_CASE("Journal commands report closed sessions and invalid insertion points") {
     const hieda::notebook::JournalDate date{2026, 8, 7};
     hieda::notebook::NotebookSession session;
 
-    const auto closed = session.journalPage(date);
+    const auto closed = session.outline(date);
     REQUIRE_FALSE(closed);
     CHECK(closed.error().code == hieda::notebook::NotebookErrorCode::notebookNotOpen);
 
@@ -697,10 +694,10 @@ TEST_CASE("Journal commands report closed sessions and invalid insertion points"
     REQUIRE(session.create(temporaryDirectory.path() / "positions.hieda"));
     hieda::notebook::BlockId missing;
     missing.bytes.front() = std::byte{1};
-    const auto invalid = session.insertJournalEntry(date, missing, "entry");
+    const auto invalid = session.insertEntry(date, missing, "entry");
     REQUIRE_FALSE(invalid);
     CHECK(invalid.error().code == hieda::notebook::NotebookErrorCode::invalidInsertionPoint);
-    const auto page = session.journalPage(date);
+    const auto page = session.outline(date);
     REQUIRE(page);
     CHECK_FALSE(page.value().metadata.has_value());
 }
@@ -711,23 +708,23 @@ TEST_CASE("a rejected Journal commit leaves the acknowledged state intact") {
     const hieda::notebook::JournalDate date{2026, 8, 7};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
-    const auto inserted = session.insertJournalEntry(date, std::nullopt, "durable");
+    const auto inserted = session.insertEntry(date, std::nullopt, "durable");
     REQUIRE(inserted);
     const auto entryId = inserted.value().entries.front().metadata.id;
     const auto revisionBeforeFailure = session.current().value_or({}).revision;
 
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
-    const auto rejected = session.updateJournalEntry(entryId, "not committed");
+    const auto rejected = session.updateEntry(entryId, "not committed");
 
     REQUIRE_FALSE(rejected);
     CHECK(rejected.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
     CHECK(session.current().value_or({}).revision == revisionBeforeFailure);
-    const auto current = session.journalPage(date);
+    const auto current = session.outline(date);
     REQUIRE(current);
     CHECK(current.value().entries.front().authoredText == "durable");
     session.close();
     REQUIRE(session.open(notebookPath));
-    const auto reopened = session.journalPage(date);
+    const auto reopened = session.outline(date);
     REQUIRE(reopened);
     CHECK(reopened.value().entries.front().authoredText == "durable");
 }
@@ -737,15 +734,15 @@ TEST_CASE("Journal ordering rebalances after repeated insertion at one position"
     const hieda::notebook::JournalDate date{2026, 8, 7};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(temporaryDirectory.path() / "rebalance.hieda"));
-    const auto first = session.insertJournalEntry(date, std::nullopt, "anchor");
+    const auto first = session.insertEntry(date, std::nullopt, "anchor");
     REQUIRE(first);
     const auto anchor = first.value().entries.front().metadata.id;
 
     for (int index = 0; index < 40; ++index) {
-        REQUIRE(session.insertJournalEntry(date, anchor, std::to_string(index)));
+        REQUIRE(session.insertEntry(date, anchor, std::to_string(index)));
     }
 
-    const auto page = session.journalPage(date);
+    const auto page = session.outline(date);
     REQUIRE(page);
     REQUIRE(page.value().entries.size() == 41);
     CHECK(page.value().entries.front().authoredText == "anchor");
@@ -762,19 +759,19 @@ TEST_CASE("subscribers observe committed Journal changes after the session lock 
     {
         auto subscription = session.subscribeToChanges([&]() -> void {
             ++notifications;
-            REQUIRE(session.journalPage(date));
+            REQUIRE(session.outline(date));
         });
-        REQUIRE(session.insertJournalEntry(date, std::nullopt, "committed"));
+        REQUIRE(session.insertEntry(date, std::nullopt, "committed"));
         CHECK(notifications == 1);
-        const auto currentPage = session.journalPage(date);
+        const auto currentPage = session.outline(date);
         REQUIRE(currentPage);
         const auto entry = currentPage.value().entries.front();
-        REQUIRE(session.updateJournalEntry(entry.metadata.id, "changed"));
+        REQUIRE(session.updateEntry(entry.metadata.id, "changed"));
         CHECK(notifications == 2);
-        REQUIRE(session.updateJournalEntry(entry.metadata.id, "changed"));
+        REQUIRE(session.updateEntry(entry.metadata.id, "changed"));
         CHECK(notifications == 2);
     }
-    REQUIRE(session.insertJournalEntry(date, std::nullopt, "after unsubscribe"));
+    REQUIRE(session.insertEntry(date, std::nullopt, "after unsubscribe"));
     CHECK(notifications == 2);
 }
 
@@ -786,13 +783,13 @@ TEST_CASE("a failing subscriber cannot make a committed Journal command appear r
     auto subscription =
         session.subscribeToChanges([]() -> void { throw std::runtime_error("observer failed"); });
 
-    const auto inserted = session.insertJournalEntry(date, std::nullopt, "committed");
+    const auto inserted = session.insertEntry(date, std::nullopt, "committed");
 
     REQUIRE(inserted);
     CHECK(session.current().value_or({}).revision == 1);
     session.close();
     REQUIRE(session.open(temporaryDirectory.path() / "subscriber-failure.hieda"));
-    REQUIRE(session.journalPage(date));
+    REQUIRE(session.outline(date));
 }
 
 TEST_CASE("Journal Entry text rejects malformed UTF-8") {
@@ -801,7 +798,8 @@ TEST_CASE("Journal Entry text rejects malformed UTF-8") {
     REQUIRE(session.create(temporaryDirectory.path() / "utf8.hieda"));
     const std::string malformed{"\xC0\xAF", 2};
 
-    const auto result = session.insertJournalEntry({2026, 8, 7}, std::nullopt, malformed);
+    const auto result =
+        session.insertEntry(hieda::notebook::JournalDate{2026, 8, 7}, std::nullopt, malformed);
 
     REQUIRE_FALSE(result);
     CHECK(result.error().code == hieda::notebook::NotebookErrorCode::invalidAuthoredText);
@@ -814,22 +812,22 @@ TEST_CASE("nested Journal Entries preserve ancestry identity and order across re
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
 
-    const auto insertedParent = session.insertJournalEntry(date, std::nullopt, "parent");
+    const auto insertedParent = session.insertEntry(date, std::nullopt, "parent");
     REQUIRE(insertedParent);
     const auto parentId = insertedParent.value().entries.front().metadata.id;
-    const auto insertedChild = session.insertJournalEntry(date, parentId, "child text");
+    const auto insertedChild = session.insertEntry(date, parentId, "child text");
     REQUIRE(insertedChild);
     const auto childId = insertedChild.value().entries.back().metadata.id;
 
     const auto indented =
-        session.moveJournalEntry(childId, hieda::notebook::JournalEntryMove::indent, "child text");
+        session.moveEntry(childId, hieda::notebook::EntryMove::indent, "child text");
     REQUIRE(indented);
     REQUIRE(indented.value().entries.size() == 2);
     CHECK(indented.value().entries[0].metadata.id == parentId);
     CHECK(indented.value().entries[1].metadata.id == childId);
     CHECK(indented.value().entries[1].parentEntry == parentId);
 
-    const auto split = session.splitJournalEntry(parentId, "parent", 3);
+    const auto split = session.splitEntry(parentId, "parent", 3);
     REQUIRE(split);
     REQUIRE(split.value().entries.size() == 3);
     CHECK(split.value().entries[0].metadata.id == parentId);
@@ -842,7 +840,7 @@ TEST_CASE("nested Journal Entries preserve ancestry identity and order across re
     const auto& expected = split.value();
     session.close();
     REQUIRE(session.open(notebookPath));
-    const auto reopened = session.journalPage(date);
+    const auto reopened = session.outline(date);
     REQUIRE(reopened);
     CHECK(reopened.value() == expected);
 }
@@ -852,32 +850,32 @@ TEST_CASE("joining and deleting Entries enforce leaf-only structural changes") {
     const hieda::notebook::JournalDate date{2026, 8, 8};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(temporaryDirectory.path() / "join-delete.hieda"));
-    const auto first = session.insertJournalEntry(date, std::nullopt, "one");
+    const auto first = session.insertEntry(date, std::nullopt, "one");
     REQUIRE(first);
     const auto firstId = first.value().entries[0].metadata.id;
-    const auto second = session.insertJournalEntry(date, firstId, "two");
+    const auto second = session.insertEntry(date, firstId, "two");
     REQUIRE(second);
     const auto secondId = second.value().entries[1].metadata.id;
-    const auto third = session.insertJournalEntry(date, secondId, "three");
+    const auto third = session.insertEntry(date, secondId, "three");
     REQUIRE(third);
     const auto thirdId = third.value().entries[2].metadata.id;
-    REQUIRE(session.moveJournalEntry(thirdId, hieda::notebook::JournalEntryMove::indent, "three"));
+    REQUIRE(session.moveEntry(thirdId, hieda::notebook::EntryMove::indent, "three"));
 
-    const auto rejectedJoin = session.joinJournalEntry(secondId, "two");
+    const auto rejectedJoin = session.joinEntry(secondId, "two");
     REQUIRE_FALSE(rejectedJoin);
     CHECK(rejectedJoin.error().code == hieda::notebook::NotebookErrorCode::blockHasChildren);
-    const auto rejectedDelete = session.deleteJournalEntry(secondId);
+    const auto rejectedDelete = session.deleteEntry(secondId);
     REQUIRE_FALSE(rejectedDelete);
     CHECK(rejectedDelete.error().code == hieda::notebook::NotebookErrorCode::blockHasChildren);
 
-    const auto joined = session.joinJournalEntry(thirdId, "three");
+    const auto joined = session.joinEntry(thirdId, "three");
     REQUIRE(joined);
     REQUIRE(joined.value().entries.size() == 2);
     CHECK(joined.value().entries[0].metadata.id == firstId);
     CHECK(joined.value().entries[1].metadata.id == secondId);
     CHECK(joined.value().entries[1].authoredText == "twothree");
 
-    const auto deleted = session.deleteJournalEntry(secondId);
+    const auto deleted = session.deleteEntry(secondId);
     REQUIRE(deleted);
     REQUIRE(deleted.value().entries.size() == 1);
     CHECK(deleted.value().entries.front().metadata.id == firstId);
@@ -888,24 +886,23 @@ TEST_CASE("local moves reorder complete Journal subtrees") {
     const hieda::notebook::JournalDate date{2026, 8, 8};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(temporaryDirectory.path() / "moves.hieda"));
-    REQUIRE(session.insertJournalEntry(date, std::nullopt, "A"));
-    auto page = session.insertJournalEntry(date, std::nullopt, "B");
+    REQUIRE(session.insertEntry(date, std::nullopt, "A"));
+    auto page = session.insertEntry(date, std::nullopt, "B");
     REQUIRE(page);
-    page = session.insertJournalEntry(date, std::nullopt, "C");
+    page = session.insertEntry(date, std::nullopt, "C");
     REQUIRE(page);
     const auto firstId = page.value().entries[0].metadata.id;
     const auto secondId = page.value().entries[1].metadata.id;
     const auto thirdId = page.value().entries[2].metadata.id;
 
-    REQUIRE(session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::indent, "B"));
-    REQUIRE(session.moveJournalEntry(thirdId, hieda::notebook::JournalEntryMove::indent, "C"));
-    page = session.insertJournalEntry(date, secondId, "B child");
+    REQUIRE(session.moveEntry(secondId, hieda::notebook::EntryMove::indent, "B"));
+    REQUIRE(session.moveEntry(thirdId, hieda::notebook::EntryMove::indent, "C"));
+    page = session.insertEntry(date, secondId, "B child");
     REQUIRE(page);
     const auto bChild = page.value().entries[2].metadata.id;
-    REQUIRE(session.moveJournalEntry(bChild, hieda::notebook::JournalEntryMove::indent, "B child"));
+    REQUIRE(session.moveEntry(bChild, hieda::notebook::EntryMove::indent, "B child"));
 
-    const auto movedDown =
-        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::down, "B");
+    const auto movedDown = session.moveEntry(secondId, hieda::notebook::EntryMove::down, "B");
     REQUIRE(movedDown);
     REQUIRE(movedDown.value().entries.size() == 4);
     CHECK(movedDown.value().entries[0].metadata.id == firstId);
@@ -914,15 +911,13 @@ TEST_CASE("local moves reorder complete Journal subtrees") {
     CHECK(movedDown.value().entries[3].metadata.id == bChild);
     CHECK(movedDown.value().entries[3].parentEntry == secondId);
 
-    const auto movedUp =
-        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::up, "B");
+    const auto movedUp = session.moveEntry(secondId, hieda::notebook::EntryMove::up, "B");
     REQUIRE(movedUp);
     CHECK(movedUp.value().entries[1].metadata.id == secondId);
     CHECK(movedUp.value().entries[2].metadata.id == bChild);
     CHECK(movedUp.value().entries[3].metadata.id == thirdId);
 
-    const auto outdented =
-        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::outdent, "B");
+    const auto outdented = session.moveEntry(secondId, hieda::notebook::EntryMove::outdent, "B");
     REQUIRE(outdented);
     CHECK(outdented.value().entries[0].metadata.id == firstId);
     CHECK(outdented.value().entries[1].metadata.id == thirdId);
@@ -939,31 +934,30 @@ TEST_CASE("invalid and failed structural edits leave the acknowledged outline in
     const std::string emojiText = "A \xF0\x9F\x8E\xB4 B";
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
-    const auto inserted = session.insertJournalEntry(date, std::nullopt, emojiText);
+    const auto inserted = session.insertEntry(date, std::nullopt, emojiText);
     REQUIRE(inserted);
     const auto entryId = inserted.value().entries.front().metadata.id;
     const auto& acknowledged = inserted.value();
     const auto revision = session.current().value_or({}).revision;
 
-    const auto invalidCursor = session.splitJournalEntry(entryId, emojiText, 3);
+    const auto invalidCursor = session.splitEntry(entryId, emojiText, 3);
     REQUIRE_FALSE(invalidCursor);
     CHECK(invalidCursor.error().code == hieda::notebook::NotebookErrorCode::invalidCursorPosition);
-    const auto invalidMove =
-        session.moveJournalEntry(entryId, hieda::notebook::JournalEntryMove::up, "changed");
+    const auto invalidMove = session.moveEntry(entryId, hieda::notebook::EntryMove::up, "changed");
     REQUIRE_FALSE(invalidMove);
     CHECK(invalidMove.error().code == hieda::notebook::NotebookErrorCode::invalidStructuralMove);
     CHECK(session.current().value_or({}).revision == revision);
-    REQUIRE(session.journalPage(date).value() == acknowledged);
+    REQUIRE(session.outline(date).value() == acknowledged);
 
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
-    const auto failedSplit = session.splitJournalEntry(entryId, emojiText, 2);
+    const auto failedSplit = session.splitEntry(entryId, emojiText, 2);
     REQUIRE_FALSE(failedSplit);
     CHECK(failedSplit.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
     CHECK(session.current().value_or({}).revision == revision);
-    CHECK(session.journalPage(date).value() == acknowledged);
+    CHECK(session.outline(date).value() == acknowledged);
     session.close();
     REQUIRE(session.open(notebookPath));
-    CHECK(session.journalPage(date).value() == acknowledged);
+    CHECK(session.outline(date).value() == acknowledged);
 }
 
 TEST_CASE("multiline Journal Entries split exactly at Unicode cursor boundaries") {
@@ -972,12 +966,12 @@ TEST_CASE("multiline Journal Entries split exactly at Unicode cursor boundaries"
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(temporaryDirectory.path() / "multiline-split.hieda"));
     const std::string text = "first line\nA \xF0\x9F\x8E\xB4 second line";
-    const auto inserted = session.insertJournalEntry(date, std::nullopt, text);
+    const auto inserted = session.insertEntry(date, std::nullopt, text);
     REQUIRE(inserted);
     const auto entryId = inserted.value().entries.front().metadata.id;
     const auto splitOffset = text.find(" second");
 
-    const auto split = session.splitJournalEntry(entryId, text, splitOffset);
+    const auto split = session.splitEntry(entryId, text, splitOffset);
 
     REQUIRE(split);
     REQUIRE(split.value().entries.size() == 2);
@@ -991,27 +985,27 @@ TEST_CASE("selected Journal subtrees are cut as one durable undoable action") {
     const hieda::notebook::JournalDate date{2026, 8, 8};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
-    REQUIRE(session.insertJournalEntry(date, std::nullopt, "parent"));
-    auto page = session.insertJournalEntry(date, std::nullopt, "child");
+    REQUIRE(session.insertEntry(date, std::nullopt, "parent"));
+    auto page = session.insertEntry(date, std::nullopt, "child");
     REQUIRE(page);
-    page = session.insertJournalEntry(date, std::nullopt, "tail");
+    page = session.insertEntry(date, std::nullopt, "tail");
     REQUIRE(page);
     const auto parentId = page.value().entries[0].metadata.id;
     const auto childId = page.value().entries[1].metadata.id;
     const auto tailId = page.value().entries[2].metadata.id;
-    REQUIRE(session.moveJournalEntry(childId, hieda::notebook::JournalEntryMove::indent, "child"));
-    const auto before = session.journalPage(date).value();
+    REQUIRE(session.moveEntry(childId, hieda::notebook::EntryMove::indent, "child"));
+    const auto before = session.outline(date).value();
 
-    const auto cut = session.deleteJournalSubtrees({parentId, childId});
+    const auto cut = session.deleteSubtrees({parentId, childId});
 
     REQUIRE(cut);
     REQUIRE(cut.value().entries.size() == 1);
     CHECK(cut.value().entries.front().metadata.id == tailId);
-    CHECK(session.undoJournalEdit(date).value() == before);
-    CHECK(session.redoJournalEdit(date).value() == cut.value());
+    CHECK(session.undoEdit().value().front() == before);
+    CHECK(session.redoEdit().value().front() == cut.value());
     session.close();
     REQUIRE(session.open(notebookPath));
-    CHECK(session.journalPage(date).value() == cut.value());
+    CHECK(session.outline(date).value() == cut.value());
 }
 
 TEST_CASE("failed Journal subtree deletion preserves content revision and history") {
@@ -1019,19 +1013,19 @@ TEST_CASE("failed Journal subtree deletion preserves content revision and histor
     const hieda::notebook::JournalDate date{2026, 8, 8};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(temporaryDirectory.path() / "failed-cut-subtrees.hieda"));
-    const auto page = session.insertJournalEntry(date, std::nullopt, "kept").value();
+    const auto page = session.insertEntry(date, std::nullopt, "kept").value();
     const auto entryId = page.entries.front().metadata.id;
     const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
 
-    const auto failed = session.deleteJournalSubtrees({entryId});
+    const auto failed = session.deleteSubtrees({entryId});
 
     REQUIRE_FALSE(failed);
     CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
     CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
-    CHECK(session.journalPage(date).value() == page);
-    CHECK(session.journalEditCapabilities(date).value().canUndo);
-    CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
+    CHECK(session.outline(date).value() == page);
+    CHECK(session.editCapabilities().value().canUndo);
+    CHECK_FALSE(session.editCapabilities().value().canRedo);
 }
 
 TEST_CASE("Journal subtree deletion normalizes duplicates and rejects invalid selections") {
@@ -1040,44 +1034,43 @@ TEST_CASE("Journal subtree deletion normalizes duplicates and rejects invalid se
     const hieda::notebook::JournalDate secondDate{2026, 8, 9};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(temporaryDirectory.path() / "subtree-selection-validation.hieda"));
-    REQUIRE(session.insertJournalEntry(firstDate, std::nullopt, "parent"));
-    auto firstPage = session.insertJournalEntry(firstDate, std::nullopt, "child").value();
+    REQUIRE(session.insertEntry(firstDate, std::nullopt, "parent"));
+    auto firstPage = session.insertEntry(firstDate, std::nullopt, "child").value();
     const auto parentId = firstPage.entries[0].metadata.id;
     const auto childId = firstPage.entries[1].metadata.id;
-    REQUIRE(session.moveJournalEntry(childId, hieda::notebook::JournalEntryMove::indent, "child"));
-    const auto foreignPage =
-        session.insertJournalEntry(secondDate, std::nullopt, "foreign").value();
+    REQUIRE(session.moveEntry(childId, hieda::notebook::EntryMove::indent, "child"));
+    const auto foreignPage = session.insertEntry(secondDate, std::nullopt, "foreign").value();
     const auto foreignId = foreignPage.entries.front().metadata.id;
-    firstPage = session.journalPage(firstDate).value();
+    firstPage = session.outline(firstDate).value();
 
-    const auto duplicateCut = session.deleteJournalSubtrees({childId, childId});
+    const auto duplicateCut = session.deleteSubtrees({childId, childId});
     REQUIRE(duplicateCut);
     REQUIRE(duplicateCut.value().entries.size() == 1);
     CHECK(duplicateCut.value().entries.front().metadata.id == parentId);
-    REQUIRE(session.undoJournalEdit(firstDate));
-    CHECK(session.journalPage(firstDate).value() == firstPage);
+    REQUIRE(session.undoEdit());
+    CHECK(session.outline(firstDate).value() == firstPage);
 
     const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
-    const auto empty = session.deleteJournalSubtrees({});
+    const auto empty = session.deleteSubtrees({});
     REQUIRE_FALSE(empty);
     CHECK(empty.error().code == hieda::notebook::NotebookErrorCode::invalidStructuralMove);
     hieda::notebook::BlockId missingId;
     missingId.bytes.front() = std::byte{1};
-    const auto missing = session.deleteJournalSubtrees({parentId, missingId});
+    const auto missing = session.deleteSubtrees({parentId, missingId});
     REQUIRE_FALSE(missing);
     CHECK(missing.error().code == hieda::notebook::NotebookErrorCode::blockNotFound);
-    const auto crossPage = session.deleteJournalSubtrees({parentId, foreignId});
+    const auto crossPage = session.deleteSubtrees({parentId, foreignId});
     REQUIRE_FALSE(crossPage);
     CHECK(crossPage.error().code == hieda::notebook::NotebookErrorCode::blockNotFound);
     CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
-    CHECK(session.journalPage(firstDate).value() == firstPage);
-    CHECK(session.journalPage(secondDate).value() == foreignPage);
+    CHECK(session.outline(firstDate).value() == firstPage);
+    CHECK(session.outline(secondDate).value() == foreignPage);
 
-    const auto emptied = session.deleteJournalSubtrees({parentId});
+    const auto emptied = session.deleteSubtrees({parentId});
     REQUIRE(emptied);
     CHECK(emptied.value().metadata.has_value());
     CHECK(emptied.value().entries.empty());
-    CHECK(session.undoJournalEdit(firstDate).value() == firstPage);
+    CHECK(session.undoEdit().value().front() == firstPage);
 }
 
 TEST_CASE("Journal structural commands match a reference outline model") {
@@ -1091,10 +1084,10 @@ TEST_CASE("Journal structural commands match a reference outline model") {
     const hieda::notebook::JournalDate date{2026, 8, 8};
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(temporaryDirectory.path() / "reference-model.hieda"));
-    REQUIRE(session.insertJournalEntry(date, std::nullopt, "A"));
-    REQUIRE(session.insertJournalEntry(date, std::nullopt, "Bee"));
-    REQUIRE(session.insertJournalEntry(date, std::nullopt, "C"));
-    auto actual = session.insertJournalEntry(date, std::nullopt, "D");
+    REQUIRE(session.insertEntry(date, std::nullopt, "A"));
+    REQUIRE(session.insertEntry(date, std::nullopt, "Bee"));
+    REQUIRE(session.insertEntry(date, std::nullopt, "C"));
+    auto actual = session.insertEntry(date, std::nullopt, "D");
     REQUIRE(actual);
     const auto firstId = actual.value().entries[0].metadata.id;
     const auto secondId = actual.value().entries[1].metadata.id;
@@ -1104,7 +1097,7 @@ TEST_CASE("Journal structural commands match a reference outline model") {
                                          {secondId, "Bee", std::nullopt},
                                          {thirdId, "C", std::nullopt},
                                          {fourthId, "D", std::nullopt}};
-    const auto checkModel = [&](const hieda::notebook::JournalPage& page) -> void {
+    const auto checkModel = [&](const hieda::notebook::OutlinePage& page) -> void {
         REQUIRE(page.entries.size() == expected.size());
         for (std::size_t index = 0; index < expected.size(); ++index) {
             CHECK(page.entries[index].metadata.id == expected[index].id);
@@ -1114,71 +1107,70 @@ TEST_CASE("Journal structural commands match a reference outline model") {
     };
     checkModel(actual.value());
 
-    actual = session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::indent, "Bee");
+    actual = session.moveEntry(secondId, hieda::notebook::EntryMove::indent, "Bee");
     REQUIRE(actual);
     expected[1].parent = firstId;
     checkModel(actual.value());
 
-    actual = session.moveJournalEntry(thirdId, hieda::notebook::JournalEntryMove::indent, "C");
+    actual = session.moveEntry(thirdId, hieda::notebook::EntryMove::indent, "C");
     REQUIRE(actual);
     expected[2].parent = firstId;
     checkModel(actual.value());
-    actual = session.moveJournalEntry(thirdId, hieda::notebook::JournalEntryMove::indent, "C");
+    actual = session.moveEntry(thirdId, hieda::notebook::EntryMove::indent, "C");
     REQUIRE(actual);
     expected[2].parent = secondId;
     checkModel(actual.value());
 
-    actual = session.splitJournalEntry(secondId, "Bee", 1);
+    actual = session.splitEntry(secondId, "Bee", 1);
     REQUIRE(actual);
     const auto splitId = actual.value().entries[3].metadata.id;
     expected[1].text = "B";
     expected.insert(expected.begin() + 3, {splitId, "ee", firstId});
     checkModel(actual.value());
 
-    actual = session.joinJournalEntry(splitId, "ee");
+    actual = session.joinEntry(splitId, "ee");
     REQUIRE(actual);
     expected[2].text = "Cee";
     expected.erase(expected.begin() + 3);
     checkModel(actual.value());
 
-    actual = session.moveJournalEntry(thirdId, hieda::notebook::JournalEntryMove::outdent, "Cee");
+    actual = session.moveEntry(thirdId, hieda::notebook::EntryMove::outdent, "Cee");
     REQUIRE(actual);
     expected[2].parent = firstId;
     checkModel(actual.value());
-    actual = session.moveJournalEntry(thirdId, hieda::notebook::JournalEntryMove::up, "Cee");
+    actual = session.moveEntry(thirdId, hieda::notebook::EntryMove::up, "Cee");
     REQUIRE(actual);
     std::swap(expected[1], expected[2]);
     checkModel(actual.value());
-    actual = session.moveJournalEntry(thirdId, hieda::notebook::JournalEntryMove::down, "Cee");
+    actual = session.moveEntry(thirdId, hieda::notebook::EntryMove::down, "Cee");
     REQUIRE(actual);
     std::swap(expected[1], expected[2]);
     checkModel(actual.value());
 
-    actual = session.deleteJournalEntry(thirdId);
+    actual = session.deleteEntry(thirdId);
     REQUIRE(actual);
     expected.erase(expected.begin() + 2);
     checkModel(actual.value());
 
     const auto revision = session.current().value_or({}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
-    const auto failedMove =
-        session.moveJournalEntry(fourthId, hieda::notebook::JournalEntryMove::up, "dirty D");
+    const auto failedMove = session.moveEntry(fourthId, hieda::notebook::EntryMove::up, "dirty D");
     REQUIRE_FALSE(failedMove);
     CHECK(failedMove.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
     CHECK(session.current().value_or({}).revision == revision);
-    checkModel(session.journalPage(date).value());
+    checkModel(session.outline(date).value());
 
-    const auto rejectedParentDelete = session.deleteJournalEntry(firstId);
+    const auto rejectedParentDelete = session.deleteEntry(firstId);
     REQUIRE_FALSE(rejectedParentDelete);
     CHECK(rejectedParentDelete.error().code ==
           hieda::notebook::NotebookErrorCode::blockHasChildren);
     const auto rejectedOutdent =
-        session.moveJournalEntry(fourthId, hieda::notebook::JournalEntryMove::outdent, "dirty D");
+        session.moveEntry(fourthId, hieda::notebook::EntryMove::outdent, "dirty D");
     REQUIRE_FALSE(rejectedOutdent);
     CHECK(rejectedOutdent.error().code ==
           hieda::notebook::NotebookErrorCode::invalidStructuralMove);
     CHECK(session.current().value_or({}).revision == revision);
-    checkModel(session.journalPage(date).value());
+    checkModel(session.outline(date).value());
 }
 
 TEST_CASE("generated Journal moves preserve preorder and single-parent properties") {
@@ -1188,22 +1180,22 @@ TEST_CASE("generated Journal moves preserve preorder and single-parent propertie
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
     for (int index = 0; index < 12; ++index) {
-        REQUIRE(session.insertJournalEntry(date, std::nullopt, std::to_string(index)));
+        REQUIRE(session.insertEntry(date, std::nullopt, std::to_string(index)));
     }
-    auto page = session.journalPage(date).value();
+    auto page = session.outline(date).value();
     for (std::size_t index = 1; index < page.entries.size(); index += 2) {
-        const auto result = session.moveJournalEntry(page.entries[index].metadata.id,
-                                                     hieda::notebook::JournalEntryMove::indent,
-                                                     page.entries[index].authoredText);
+        const auto result =
+            session.moveEntry(page.entries[index].metadata.id, hieda::notebook::EntryMove::indent,
+                              page.entries[index].authoredText);
         REQUIRE(result);
         page = result.value();
     }
     for (std::size_t operation = 0; operation < 20; ++operation) {
         const auto row = operation % page.entries.size();
-        const auto movement = operation % 2 == 0 ? hieda::notebook::JournalEntryMove::down
-                                                 : hieda::notebook::JournalEntryMove::up;
-        const auto result = session.moveJournalEntry(page.entries[row].metadata.id, movement,
-                                                     page.entries[row].authoredText);
+        const auto movement =
+            operation % 2 == 0 ? hieda::notebook::EntryMove::down : hieda::notebook::EntryMove::up;
+        const auto result = session.moveEntry(page.entries[row].metadata.id, movement,
+                                              page.entries[row].authoredText);
         if (result) {
             page = result.value();
         }
@@ -1225,7 +1217,7 @@ TEST_CASE("generated Journal moves preserve preorder and single-parent propertie
     }
     session.close();
     REQUIRE(session.open(notebookPath));
-    CHECK(session.journalPage(date).value() == page);
+    CHECK(session.outline(date).value() == page);
 }
 
 TEST_CASE("Journal edits undo and redo as coherent user actions") {
@@ -1234,24 +1226,22 @@ TEST_CASE("Journal edits undo and redo as coherent user actions") {
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "undo-redo.hieda"));
 
-    CHECK(session.journalEditCapabilities(date).value() == hieda::notebook::EditCapabilities{});
-    auto page = session.insertJournalEntry(date, std::nullopt, "parent").value();
+    CHECK(session.editCapabilities().value() == hieda::notebook::EditCapabilities{});
+    auto page = session.insertEntry(date, std::nullopt, "parent").value();
     const auto parentId = page.entries.front().metadata.id;
-    page = session.insertJournalEntry(date, parentId, "child").value();
+    page = session.insertEntry(date, parentId, "child").value();
     const auto childId = page.entries.back().metadata.id;
-    page =
-        session.moveJournalEntry(childId, hieda::notebook::JournalEntryMove::indent, "edited child")
-            .value();
+    page = session.moveEntry(childId, hieda::notebook::EntryMove::indent, "edited child").value();
     const auto acknowledged = page;
 
-    REQUIRE(session.undoJournalEdit(date));
-    page = session.journalPage(date).value();
+    REQUIRE(session.undoEdit());
+    page = session.outline(date).value();
     REQUIRE(page.entries.size() == 2);
     CHECK(page.entries[1].authoredText == "child");
     CHECK_FALSE(page.entries[1].parentEntry);
 
-    REQUIRE(session.redoJournalEdit(date));
-    CHECK(session.journalPage(date).value() == acknowledged);
+    REQUIRE(session.redoEdit());
+    CHECK(session.outline(date).value() == acknowledged);
 }
 
 TEST_CASE("every supported Journal command round-trips through history") {
@@ -1259,45 +1249,40 @@ TEST_CASE("every supported Journal command round-trips through history") {
     hieda::notebook::NotebookSession session;
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "all-history-actions.hieda"));
-    std::vector<hieda::notebook::JournalPage> states;
-    states.push_back(session.journalPage(date).value());
-    const auto remember = [&](hieda::notebook::JournalPage page) -> hieda::notebook::JournalPage {
+    std::vector<hieda::notebook::OutlinePage> states;
+    states.push_back(session.outline(date).value());
+    const auto remember = [&](hieda::notebook::OutlinePage page) -> hieda::notebook::OutlinePage {
         states.push_back(page);
         return page;
     };
 
-    auto page = remember(session.insertJournalEntry(date, std::nullopt, "A").value());
+    auto page = remember(session.insertEntry(date, std::nullopt, "A").value());
     const auto firstId = page.entries[0].metadata.id;
-    page = remember(session.insertJournalEntry(date, std::nullopt, "BC").value());
+    page = remember(session.insertEntry(date, std::nullopt, "BC").value());
     const auto secondId = page.entries[1].metadata.id;
-    page = remember(session.insertJournalEntry(date, std::nullopt, "D").value());
+    page = remember(session.insertEntry(date, std::nullopt, "D").value());
     const auto thirdId = page.entries[2].metadata.id;
-    REQUIRE(session.updateJournalEntry(secondId, "B2C"));
-    page = remember(session.journalPage(date).value());
-    page = remember(session.splitJournalEntry(secondId, "B2C", 2).value());
+    REQUIRE(session.updateEntry(secondId, "B2C"));
+    page = remember(session.outline(date).value());
+    page = remember(session.splitEntry(secondId, "B2C", 2).value());
     const auto splitId = page.entries[2].metadata.id;
-    page = remember(session.joinJournalEntry(splitId, "2C").value());
-    page = remember(
-        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::indent, "B2C")
-            .value());
-    page = remember(
-        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::outdent, "B2C")
-            .value());
-    page = remember(
-        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::down, "B2C").value());
-    page = remember(
-        session.moveJournalEntry(secondId, hieda::notebook::JournalEntryMove::up, "B2C").value());
-    page = remember(session.deleteJournalEntry(thirdId).value());
+    page = remember(session.joinEntry(splitId, "2C").value());
+    page = remember(session.moveEntry(secondId, hieda::notebook::EntryMove::indent, "B2C").value());
+    page =
+        remember(session.moveEntry(secondId, hieda::notebook::EntryMove::outdent, "B2C").value());
+    page = remember(session.moveEntry(secondId, hieda::notebook::EntryMove::down, "B2C").value());
+    page = remember(session.moveEntry(secondId, hieda::notebook::EntryMove::up, "B2C").value());
+    page = remember(session.deleteEntry(thirdId).value());
     CHECK(page.entries.front().metadata.id == firstId);
 
     for (std::size_t index = states.size() - 1; index > 0; --index) {
-        CHECK(session.undoJournalEdit(date).value() == states[index - 1]);
+        CHECK(session.undoEdit().value().front() == states[index - 1]);
     }
-    CHECK_FALSE(session.journalEditCapabilities(date).value().canUndo);
+    CHECK_FALSE(session.editCapabilities().value().canUndo);
     for (std::size_t index = 1; index < states.size(); ++index) {
-        CHECK(session.redoJournalEdit(date).value() == states[index]);
+        CHECK(session.redoEdit().value().front() == states[index]);
     }
-    CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
+    CHECK_FALSE(session.editCapabilities().value().canRedo);
 }
 
 TEST_CASE("undo restores deleted identity and redo branches clear only after committed edits") {
@@ -1305,22 +1290,22 @@ TEST_CASE("undo restores deleted identity and redo branches clear only after com
     hieda::notebook::NotebookSession session;
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "undo-delete.hieda"));
-    auto page = session.insertJournalEntry(date, std::nullopt, "kept").value();
+    auto page = session.insertEntry(date, std::nullopt, "kept").value();
     const auto entry = page.entries.front();
-    REQUIRE(session.deleteJournalEntry(entry.metadata.id));
+    REQUIRE(session.deleteEntry(entry.metadata.id));
 
-    page = session.undoJournalEdit(date).value();
+    page = session.undoEdit().value().front();
     REQUIRE(page.entries.size() == 1);
     CHECK(page.entries.front() == entry);
-    CHECK(session.journalEditCapabilities(date).value().canRedo);
+    CHECK(session.editCapabilities().value().canRedo);
 
-    const auto rejected = session.updateJournalEntry(entry.metadata.id, "carriage\rreturn");
+    const auto rejected = session.updateEntry(entry.metadata.id, "carriage\rreturn");
     REQUIRE_FALSE(rejected);
-    CHECK(session.journalEditCapabilities(date).value().canRedo);
-    REQUIRE(session.updateJournalEntry(entry.metadata.id, entry.authoredText));
-    CHECK(session.journalEditCapabilities(date).value().canRedo);
-    REQUIRE(session.updateJournalEntry(entry.metadata.id, "changed"));
-    CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
+    CHECK(session.editCapabilities().value().canRedo);
+    REQUIRE(session.updateEntry(entry.metadata.id, entry.authoredText));
+    CHECK(session.editCapabilities().value().canRedo);
+    REQUIRE(session.updateEntry(entry.metadata.id, "changed"));
+    CHECK_FALSE(session.editCapabilities().value().canRedo);
 }
 
 TEST_CASE("failed undo leaves acknowledged content revision and history intact") {
@@ -1328,44 +1313,45 @@ TEST_CASE("failed undo leaves acknowledged content revision and history intact")
     hieda::notebook::NotebookSession session;
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "failed-undo.hieda"));
-    const auto page = session.insertJournalEntry(date, std::nullopt, "durable").value();
+    const auto page = session.insertEntry(date, std::nullopt, "durable").value();
     const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
 
-    const auto failed = session.undoJournalEdit(date);
+    const auto failed = session.undoEdit();
 
     REQUIRE_FALSE(failed);
     CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
-    CHECK(session.journalPage(date).value() == page);
+    CHECK(session.outline(date).value() == page);
     CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
-    CHECK(session.journalEditCapabilities(date).value().canUndo);
-    CHECK_FALSE(session.journalEditCapabilities(date).value().canRedo);
+    CHECK(session.editCapabilities().value().canUndo);
+    CHECK_FALSE(session.editCapabilities().value().canRedo);
 }
 
-TEST_CASE("Journal history is Page-local and clears when the Notebook closes") {
+TEST_CASE("Notebook history is chronological and clears when the Notebook closes") {
     TemporaryDirectory temporaryDirectory;
     const auto path = temporaryDirectory.path() / "page-history.hieda";
     hieda::notebook::NotebookSession session;
     const hieda::notebook::JournalDate firstDate{2026, 8, 8};
     const hieda::notebook::JournalDate secondDate{2026, 8, 9};
     REQUIRE(session.create(path));
-    const auto first = session.insertJournalEntry(firstDate, std::nullopt, "first").value();
-    const auto second = session.insertJournalEntry(secondDate, std::nullopt, "second").value();
+    const auto first = session.insertEntry(firstDate, std::nullopt, "first").value();
+    const auto second = session.insertEntry(secondDate, std::nullopt, "second").value();
 
-    const auto virtualPage = session.undoJournalEdit(firstDate).value();
+    const auto virtualPage = session.undoEdit().value().front();
     CHECK_FALSE(virtualPage.metadata);
     CHECK(virtualPage.entries.empty());
-    CHECK(session.journalPage(secondDate).value() == second);
-    CHECK(session.journalEditCapabilities(firstDate).value().canRedo);
-    CHECK(session.journalEditCapabilities(secondDate).value().canUndo);
-    const auto restored = session.redoJournalEdit(firstDate).value();
-    CHECK(restored == first);
+    CHECK(virtualPage.journalDate == secondDate);
+    CHECK(session.outline(firstDate).value() == first);
+    CHECK(session.outline(secondDate).value().entries.empty());
+    CHECK(session.editCapabilities().value().canRedo);
+    CHECK(session.editCapabilities().value().canUndo);
+    const auto restored = session.redoEdit().value().front();
+    CHECK(restored == second);
 
     session.close();
     REQUIRE(session.open(path));
-    CHECK(session.journalEditCapabilities(firstDate).value() ==
-          hieda::notebook::EditCapabilities{});
-    const auto unavailable = session.undoJournalEdit(firstDate);
+    CHECK(session.editCapabilities().value() == hieda::notebook::EditCapabilities{});
+    const auto unavailable = session.undoEdit();
     REQUIRE_FALSE(unavailable);
     CHECK(unavailable.error().code == hieda::notebook::NotebookErrorCode::undoUnavailable);
 }
@@ -1375,19 +1361,19 @@ TEST_CASE("failed redo preserves the undone state and redo capability") {
     hieda::notebook::NotebookSession session;
     const hieda::notebook::JournalDate date{2026, 8, 8};
     REQUIRE(session.create(temporaryDirectory.path() / "failed-redo.hieda"));
-    const auto committed = session.insertJournalEntry(date, std::nullopt, "durable").value();
-    const auto undone = session.undoJournalEdit(date).value();
+    const auto committed = session.insertEntry(date, std::nullopt, "durable").value();
+    const auto undone = session.undoEdit().value().front();
     const auto revision = session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
     hieda::notebook::NotebookSessionTestAccess::rejectNextCommit(session);
 
-    const auto failed = session.redoJournalEdit(date);
+    const auto failed = session.redoEdit();
 
     REQUIRE_FALSE(failed);
     CHECK(failed.error().code == hieda::notebook::NotebookErrorCode::ioFailure);
-    CHECK(session.journalPage(date).value() == undone);
+    CHECK(session.outline(date).value() == undone);
     CHECK(session.current().value_or(hieda::notebook::NotebookInfo{}).revision == revision);
-    CHECK(session.journalEditCapabilities(date).value().canRedo);
-    CHECK(session.redoJournalEdit(date).value() == committed);
+    CHECK(session.editCapabilities().value().canRedo);
+    CHECK(session.redoEdit().value().front() == committed);
 }
 
 TEST_CASE("Journal history evicts old actions under its memory budget") {
@@ -1397,15 +1383,15 @@ TEST_CASE("Journal history evicts old actions under its memory budget") {
     REQUIRE(session.create(temporaryDirectory.path() / "bounded-history.hieda"));
     const std::string firstText(17ULL * 1024ULL * 1024ULL, 'a');
     const std::string secondText(17ULL * 1024ULL * 1024ULL, 'b');
-    const auto inserted = session.insertJournalEntry(date, std::nullopt, firstText).value();
+    const auto inserted = session.insertEntry(date, std::nullopt, firstText).value();
     const auto id = inserted.entries.front().metadata.id;
-    REQUIRE(session.updateJournalEntry(id, secondText));
+    REQUIRE(session.updateEntry(id, secondText));
 
-    const auto restored = session.undoJournalEdit(date).value();
+    const auto restored = session.undoEdit().value().front();
     REQUIRE(restored.entries.size() == 1);
     CHECK(restored.entries.front().authoredText == firstText);
-    CHECK_FALSE(session.journalEditCapabilities(date).value().canUndo);
-    CHECK(session.journalEditCapabilities(date).value().canRedo);
+    CHECK_FALSE(session.editCapabilities().value().canUndo);
+    CHECK(session.editCapabilities().value().canRedo);
 }
 
 TEST_CASE("ordinary Page history shares the Journal memory budget") {
@@ -1416,20 +1402,18 @@ TEST_CASE("ordinary Page history shares the Journal memory budget") {
     const hieda::notebook::JournalDate date{2026, 8, 8};
     const std::string firstText(17ULL * 1024ULL * 1024ULL, 'a');
     const std::string secondText(17ULL * 1024ULL * 1024ULL, 'b');
-    REQUIRE(session.insertJournalEntry(date, std::nullopt, firstText));
-    CHECK(session.journalEditCapabilities(date).value().canUndo);
-    const auto inserted =
-        session.insertPageEntry(page.metadata.id, std::nullopt, firstText).value();
+    REQUIRE(session.insertEntry(date, std::nullopt, firstText));
+    CHECK(session.editCapabilities().value().canUndo);
+    const auto inserted = session.insertEntry(page.metadata.id, std::nullopt, firstText).value();
     const auto id = inserted.entries.front().metadata.id;
-    CHECK_FALSE(session.journalEditCapabilities(date).value().canUndo);
-    CHECK(session.pageEditCapabilities(page.metadata.id).value().canUndo);
-    REQUIRE(session.updatePageEntry(id, secondText));
+    CHECK(session.editCapabilities().value().canUndo);
+    REQUIRE(session.updateEntry(id, secondText));
 
-    const auto restored = session.undoPageEdit(page.metadata.id).value();
+    const auto restored = session.undoEdit().value().front();
     REQUIRE(restored.entries.size() == 1);
     CHECK(restored.entries.front().authoredText == firstText);
-    CHECK_FALSE(session.pageEditCapabilities(page.metadata.id).value().canUndo);
-    CHECK(session.pageEditCapabilities(page.metadata.id).value().canRedo);
+    CHECK_FALSE(session.editCapabilities().value().canUndo);
+    CHECK(session.editCapabilities().value().canRedo);
 }
 
 TEST_CASE("schema v2 persists Page kind separately from one Entry type") {
@@ -1438,6 +1422,7 @@ TEST_CASE("schema v2 persists Page kind separately from one Entry type") {
     hieda::notebook::NotebookSession session;
     REQUIRE(session.create(notebookPath));
     const auto named = session.createPage("schema", "Schema").value();
+    const auto payloadPage = session.createPage("payload", "Payload").value();
     const hieda::notebook::JournalDate date{2026, 8, 9};
     const auto journal = session.insertEntry(date, std::nullopt, "entry").value();
     REQUIRE(journal.metadata);
@@ -1446,6 +1431,7 @@ TEST_CASE("schema v2 persists Page kind separately from one Entry type") {
     session.close();
 
     const auto namedRecord = readBlockRecord(notebookPath, named.metadata.id);
+    const auto payloadPageRecord = readBlockRecord(notebookPath, payloadPage.metadata.id);
     const auto journalRecord = readBlockRecord(notebookPath, journalMetadata.id);
     const auto entryRecord = readBlockRecord(notebookPath, entryId);
     REQUIRE(namedRecord.size() >= 2);
@@ -1473,11 +1459,25 @@ TEST_CASE("schema v2 persists Page kind separately from one Entry type") {
     appendU32(packedDate, 20260809);
     appendField(invalidNamedRecord, 5, packedDate);
     writeBlockRecord(notebookPath, named.metadata.id, std::move(invalidNamedRecord));
+    auto invalidPayloadRecord = payloadPageRecord;
+    appendField(invalidPayloadRecord, 6, std::vector<std::uint8_t>{'x'});
+    writeBlockRecord(notebookPath, payloadPage.metadata.id, std::move(invalidPayloadRecord));
+    auto invalidJournalRecord = journalRecord;
+    std::vector<std::uint8_t> invalidPackedDate;
+    appendU32(invalidPackedDate, 20261340);
+    appendField(invalidJournalRecord, 5, invalidPackedDate);
+    writeBlockRecord(notebookPath, journalMetadata.id, std::move(invalidJournalRecord));
 
     REQUIRE(session.open(notebookPath));
-    const auto invalid = session.page(named.metadata.id);
+    const auto invalid = session.outline(named.metadata.id);
     REQUIRE_FALSE(invalid);
     CHECK(invalid.error().code == hieda::notebook::NotebookErrorCode::invalidNotebook);
+    const auto invalidPayload = session.outline(payloadPage.metadata.id);
+    REQUIRE_FALSE(invalidPayload);
+    CHECK(invalidPayload.error().code == hieda::notebook::NotebookErrorCode::invalidNotebook);
+    const auto invalidJournal = session.outline(date);
+    REQUIRE_FALSE(invalidJournal);
+    CHECK(invalidJournal.error().code == hieda::notebook::NotebookErrorCode::invalidNotebook);
 }
 
 TEST_CASE("Notebook history is chronological across Page kinds") {

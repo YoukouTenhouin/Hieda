@@ -82,13 +82,10 @@ struct Entry {
     auto operator==(const Entry&) const -> bool = default;
 };
 
-using JournalEntry = Entry;
-using PageEntry = Entry;
-
 struct JournalPage {
     JournalDate date;
     std::optional<BlockMetadata> metadata;
-    std::vector<JournalEntry> entries;
+    std::vector<Entry> entries;
 
     auto operator==(const JournalPage&) const -> bool = default;
 };
@@ -105,7 +102,7 @@ struct Page {
     BlockMetadata metadata;
     std::string name;
     std::string displayTitle;
-    std::vector<PageEntry> entries;
+    std::vector<Entry> entries;
 
     auto operator==(const Page&) const -> bool = default;
 };
@@ -131,8 +128,6 @@ struct EditCapabilities {
 };
 
 enum class EntryMove : std::uint8_t { indent, outdent, up, down };
-using JournalEntryMove = EntryMove;
-using PageEntryMove = EntryMove;
 
 using PageAddress = std::variant<BlockId, JournalDate>;
 
@@ -217,41 +212,10 @@ class NotebookSession {
     void close() noexcept;
     [[nodiscard]] auto isOpen() const noexcept -> bool;
     [[nodiscard]] auto current() const -> std::optional<NotebookInfo>;
-    [[nodiscard]] auto journalPage(JournalDate date) const -> Result<JournalPage>;
     [[nodiscard]] auto pages() const -> Result<std::vector<PageSummary>>;
-    [[nodiscard]] auto page(BlockId pageId) const -> Result<Page>;
     [[nodiscard]] auto createPage(std::string name, std::string displayTitle) -> Result<Page>;
     [[nodiscard]] auto renamePage(BlockId pageId, std::string name, std::string displayTitle)
         -> Result<Page>;
-    [[nodiscard]] auto insertPageEntry(BlockId pageId, std::optional<BlockId> afterEntry,
-                                       std::string authoredText) -> Result<Page>;
-    [[nodiscard]] auto updatePageEntry(BlockId entryId, std::string authoredText)
-        -> Result<PageEntry>;
-    [[nodiscard]] auto splitPageEntry(BlockId entryId, std::string authoredText,
-                                      std::size_t cursorByteOffset) -> Result<Page>;
-    [[nodiscard]] auto joinPageEntry(BlockId entryId, std::string authoredText) -> Result<Page>;
-    [[nodiscard]] auto movePageEntry(BlockId entryId, PageEntryMove movement,
-                                     std::string authoredText) -> Result<Page>;
-    [[nodiscard]] auto deletePageEntry(BlockId entryId) -> Result<Page>;
-    [[nodiscard]] auto deletePageSubtrees(std::vector<BlockId> entryIds) -> Result<Page>;
-    [[nodiscard]] auto pageEditCapabilities(BlockId pageId) const -> Result<EditCapabilities>;
-    [[nodiscard]] auto undoPageEdit(BlockId pageId) -> Result<Page>;
-    [[nodiscard]] auto redoPageEdit(BlockId pageId) -> Result<Page>;
-    [[nodiscard]] auto insertJournalEntry(JournalDate date, std::optional<BlockId> afterEntry,
-                                          std::string authoredText) -> Result<JournalPage>;
-    [[nodiscard]] auto updateJournalEntry(BlockId entryId, std::string authoredText)
-        -> Result<JournalEntry>;
-    [[nodiscard]] auto splitJournalEntry(BlockId entryId, std::string authoredText,
-                                         std::size_t cursorByteOffset) -> Result<JournalPage>;
-    [[nodiscard]] auto joinJournalEntry(BlockId entryId, std::string authoredText)
-        -> Result<JournalPage>;
-    [[nodiscard]] auto moveJournalEntry(BlockId entryId, JournalEntryMove movement,
-                                        std::string authoredText) -> Result<JournalPage>;
-    [[nodiscard]] auto deleteJournalEntry(BlockId entryId) -> Result<JournalPage>;
-    [[nodiscard]] auto deleteJournalSubtrees(std::vector<BlockId> entryIds) -> Result<JournalPage>;
-    [[nodiscard]] auto journalEditCapabilities(JournalDate date) const -> Result<EditCapabilities>;
-    [[nodiscard]] auto undoJournalEdit(JournalDate date) -> Result<JournalPage>;
-    [[nodiscard]] auto redoJournalEdit(JournalDate date) -> Result<JournalPage>;
     [[nodiscard]] auto outline(PageAddress address) const -> Result<OutlinePage>;
     [[nodiscard]] auto insertEntry(PageAddress address, std::optional<BlockId> afterEntry,
                                    std::string authoredText) -> Result<OutlinePage>;
@@ -273,9 +237,31 @@ class NotebookSession {
 
   private:
     friend class NotebookSessionTestAccess;
-    enum class JournalHistoryDirection : std::uint8_t { undo, redo };
-    auto applyJournalHistory(JournalDate date, JournalHistoryDirection direction)
+    [[nodiscard]] auto journalPage(JournalDate date) const -> Result<JournalPage>;
+    [[nodiscard]] auto page(BlockId pageId) const -> Result<Page>;
+    [[nodiscard]] auto insertPageEntry(BlockId pageId, std::optional<BlockId> afterEntry,
+                                       std::string authoredText) -> Result<Page>;
+    [[nodiscard]] auto updatePageEntry(BlockId entryId, std::string authoredText) -> Result<Entry>;
+    [[nodiscard]] auto splitPageEntry(BlockId entryId, std::string authoredText,
+                                      std::size_t cursorByteOffset) -> Result<Page>;
+    [[nodiscard]] auto joinPageEntry(BlockId entryId, std::string authoredText) -> Result<Page>;
+    [[nodiscard]] auto movePageEntry(BlockId entryId, EntryMove movement, std::string authoredText)
+        -> Result<Page>;
+    [[nodiscard]] auto deletePageEntry(BlockId entryId) -> Result<Page>;
+    [[nodiscard]] auto deletePageSubtrees(std::vector<BlockId> entryIds) -> Result<Page>;
+    [[nodiscard]] auto insertJournalEntry(JournalDate date, std::optional<BlockId> afterEntry,
+                                          std::string authoredText) -> Result<JournalPage>;
+    [[nodiscard]] auto updateJournalEntry(BlockId entryId, std::string authoredText)
+        -> Result<Entry>;
+    [[nodiscard]] auto splitJournalEntry(BlockId entryId, std::string authoredText,
+                                         std::size_t cursorByteOffset) -> Result<JournalPage>;
+    [[nodiscard]] auto joinJournalEntry(BlockId entryId, std::string authoredText)
         -> Result<JournalPage>;
+    [[nodiscard]] auto moveJournalEntry(BlockId entryId, EntryMove movement,
+                                        std::string authoredText) -> Result<JournalPage>;
+    [[nodiscard]] auto deleteJournalEntry(BlockId entryId) -> Result<JournalPage>;
+    [[nodiscard]] auto deleteJournalSubtrees(std::vector<BlockId> entryIds) -> Result<JournalPage>;
+    [[nodiscard]] auto entryPageKind(BlockId entryId) const -> Result<PageKind>;
     auto runPageCommand(std::function<Result<Page>()> command) -> Result<Page>;
     class Impl;
     std::unique_ptr<Impl> impl_;
