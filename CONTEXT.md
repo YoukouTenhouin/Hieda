@@ -24,6 +24,18 @@ _Avoid_: Journal block, note
 A short authored-text block contained in an ordinary Page. It has the same outline editing behavior as a Journal Entry but remains a distinct Block type.
 _Avoid_: Journal Entry, document
 
+**Authored Text**:
+The exact canonical Unicode source of a Journal Entry or Page Entry, including literal text and any Authored Text Notation.
+_Avoid_: Rendered text, body
+
+**Authored Text Notation**:
+Lightweight constructs within Authored Text from which Hieda derives relationships and Properties without replacing the canonical source.
+_Avoid_: Authored text language, markup
+
+**Property**:
+An ordered named string value derived from Authored Text. A Block may carry multiple, duplicate-preserving values under the same name.
+_Avoid_: Metadata, field
+
 **Page**:
 A titled block that provides a stable destination for organizing and linking content. A journal page is a date-associated specialization of a page.
 _Avoid_: Document, article
