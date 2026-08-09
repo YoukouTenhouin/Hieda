@@ -110,6 +110,14 @@ ApplicationWindow {
         return editor.cursorRectangle.y + editor.cursorRectangle.height >= editor.contentHeight - editor.bottomPadding - 0.5;
     }
 
+    function htmlEscaped(text) {
+        return String(text).replace(/&/g, "&amp;")
+                           .replace(/</g, "&lt;")
+                           .replace(/>/g, "&gt;")
+                           .replace(/\"/g, "&quot;")
+                           .replace(/'/g, "&#39;");
+    }
+
     function textModifiers(modifiers) {
         return modifiers & ~Qt.KeypadModifier;
     }
@@ -157,6 +165,30 @@ ApplicationWindow {
                 item.focusBullet();
 
         });
+    }
+
+    function followSemanticReference(entryId, characterOffset, editorText) {
+        if (!notebookController.followSemanticReference(entryId, characterOffset, editorText))
+            return false;
+
+        const targetId = notebookController.identifiedBlockId;
+        if (targetId.length > 0) {
+            for (let row = 0; row < outlineList.count; ++row) {
+                if (notebookController.outlineEntryId(row) === targetId) {
+                    selectOutline(row, false);
+                    focusBullet(row);
+                    break;
+                }
+            }
+        }
+        return true;
+    }
+
+    function browseBlockLinkedReferences(targetId) {
+        if (!notebookController.browseLinkedReferences(targetId))
+            return false;
+        blockLinkedReferencesDrawer.open();
+        return true;
     }
 
     function selectOutline(row, extendSelection) {
@@ -844,6 +876,14 @@ ApplicationWindow {
                                 text: qsTr("Delete Page")
                                 onClicked: notebookController.deleteCurrentPage()
                             }
+                            Button {
+                                objectName: "selectPageBlockReferenceTargetButton"
+                                visible: !notebookController.currentPagePreview &&
+                                         notebookController.linkedReferenceTargetId.length > 0
+                                text: qsTr("Use Page as Block Reference Target")
+                                onClicked: notebookController.selectBlockReferenceTarget(
+                                    notebookController.linkedReferenceTargetId)
+                            }
                         }
 
                         Label {
@@ -855,7 +895,10 @@ ApplicationWindow {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             visible: notebookController.currentPagePreview
-                            text: pagePreviewSourceList.count === 0 ? qsTr("No unresolved Page Links") : qsTr("Linked references")
+                            text: notebookController.pagePreviewUnresolvedPageLinkSourceTotal === 0
+                                  ? qsTr("No unresolved Page Links")
+                                  : qsTr("%1 unresolved Page Link sources").arg(
+                                        notebookController.pagePreviewUnresolvedPageLinkSourceTotal)
                             font.weight: Font.DemiBold
                             Accessible.role: Accessible.Heading
                         }
@@ -872,29 +915,74 @@ ApplicationWindow {
                             anchors.topMargin: window.uiSpacing
                             anchors.left: parent.left
                             anchors.right: parent.right
-                            height: visible ? contentHeight : 0
+                            height: visible ? Math.max(contentHeight,
+                                                       count * window.uiSpacing * 8) : 0
                             visible: notebookController.currentPagePreview
                             interactive: false
                             spacing: window.uiSpacing
                             model: notebookController.pagePreviewSources
+                            section.property: "linkedReferenceGroup"
+                            section.delegate: Label {
+                                required property string section
+                                width: pagePreviewSourceList.width
+                                text: section
+                                font.weight: Font.DemiBold
+                            }
                             Accessible.role: Accessible.List
                             Accessible.name: qsTr("Unresolved Page Link sources")
 
                             delegate: Label {
                                 required property string entryId
-                                required property string authoredText
+                                required property string linkedReferenceContext
+                                required property string linkedReferencePresentation
+                                required property var linkedReferenceOccurrenceCount
+                                required property bool linkedReferenceHasMoreOccurrences
 
                                 width: pagePreviewSourceList.width
                                 padding: window.uiSpacing
-                                text: notebookController.committedEntryPresentation(entryId, authoredText)
+                                bottomPadding: linkedReferenceHasMoreOccurrences ?
+                                                   window.uiSpacing * 5 : window.uiSpacing
+                                text: "<b>" + window.htmlEscaped(linkedReferenceContext) +
+                                      "</b><br>" + linkedReferencePresentation +
+                                      qsTr("<br>%1 occurrences").arg(
+                                          linkedReferenceOccurrenceCount)
                                 textFormat: Text.StyledText
                                 wrapMode: Text.Wrap
-                                background: Rectangle {
-                                    color: palette.alternateBase
-                                }
+                                background: Rectangle { color: palette.alternateBase }
                                 Accessible.role: Accessible.ListItem
                                 Accessible.name: text
+                                TapHandler {
+                                    onTapped: {
+                                        if (!notebookController.followPagePreviewSource(entryId))
+                                            return;
+                                        for (let row = 0; row < outlineList.count; ++row) {
+                                            if (notebookController.outlineEntryId(row) === entryId) {
+                                                window.selectOutline(row, false);
+                                                window.focusBullet(row);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                ToolButton {
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    visible: linkedReferenceHasMoreOccurrences
+                                    text: qsTr("Load more snippets")
+                                    onClicked: notebookController.loadMorePagePreviewUnresolvedPageLinkOccurrences(
+                                                   entryId)
+                                }
                             }
+                        }
+
+                        Button {
+                            anchors.top: pagePreviewSourceList.bottom
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            visible: notebookController.currentPagePreview &&
+                                     notebookController.hasMorePagePreviewUnresolvedPageLinkSources
+                            text: qsTr("Load more unresolved Page Link sources")
+                            onClicked: notebookController.loadMorePagePreviewUnresolvedPageLinkSources()
                         }
 
                     }
@@ -1036,15 +1124,10 @@ ApplicationWindow {
 
                                 MouseArea {
                                     anchors.fill: parent
-                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    acceptedButtons: Qt.LeftButton
                                     onClicked: function(mouse) {
-                                        if (mouse.button === Qt.RightButton) {
-                                            if (!entryRoot.outlineSelected)
-                                                window.selectOutline(entryRoot.index, false);
-                                            entryRoot.openContextMenu();
-                                        } else {
-                                            window.selectOutline(entryRoot.index, (mouse.modifiers & Qt.ShiftModifier) !== 0);
-                                        }
+                                        window.selectOutline(entryRoot.index,
+                                                             (mouse.modifiers & Qt.ShiftModifier) !== 0);
                                     }
                                 }
 
@@ -1079,11 +1162,35 @@ ApplicationWindow {
 
                                 MenuItem {
                                     objectName: "followPageLinkMenuItem-" + entryRoot.index
-                                    text: qsTr("Follow Page Link")
+                                    text: qsTr("Follow Link")
                                     enabled: !entryEditor.hasPendingEdit
-                                    onTriggered: notebookController.followPageLink(
+                                    onTriggered: window.followSemanticReference(
                                         entryRoot.entryId, entryEditor.cursorPosition,
                                         entryEditor.text)
+                                }
+
+                                MenuItem {
+                                    objectName: "selectBlockReferenceTargetMenuItem-" + entryRoot.index
+                                    text: qsTr("Use as Block Reference Target")
+                                    onTriggered: notebookController.selectBlockReferenceTarget(
+                                        entryRoot.entryId)
+                                }
+
+                                MenuItem {
+                                    objectName: "insertBlockReferenceMenuItem-" + entryRoot.index
+                                    text: qsTr("Insert Block Reference to Selected Target")
+                                    enabled: !entryEditor.hasPendingEdit &&
+                                             notebookController.selectedBlockReferenceTargetId.length > 0
+                                    onTriggered: notebookController.insertSelectedBlockReference(
+                                        entryRoot.entryId, entryEditor.cursorPosition,
+                                        entryEditor.text)
+                                }
+
+                                MenuItem {
+                                    objectName: "browseLinkedReferencesMenuItem-" + entryRoot.index
+                                    text: qsTr("Browse Linked References")
+                                    onTriggered: window.browseBlockLinkedReferences(
+                                        entryRoot.entryId)
                                 }
 
                                 MenuSeparator {
@@ -1225,7 +1332,7 @@ ApplicationWindow {
                                     } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && (event.modifiers & window.structureModifier)) {
                                         event.accepted = true;
                                         if (!hasPendingEdit)
-                                            notebookController.followPageLink(entryRoot.entryId, cursorPosition, text);
+                                            window.followSemanticReference(entryRoot.entryId, cursorPosition, text);
                                     } else if (notebookController.currentPagePreview &&
                                                (event.key === Qt.Key_Return || event.key === Qt.Key_Enter ||
                                                 event.key === Qt.Key_Backspace || event.key === Qt.Key_Delete ||
@@ -1295,7 +1402,7 @@ ApplicationWindow {
                                     color: palette.text
                                     Accessible.name: text
                                     onLinkActivated: function(link) {
-                                        notebookController.followPageLink(
+                                        window.followSemanticReference(
                                             entryRoot.entryId, Number(link),
                                             entryRoot.authoredText);
                                     }
@@ -1319,6 +1426,22 @@ ApplicationWindow {
 
                         }
 
+                        MouseArea {
+                            objectName: "outlineEntryContextArea-" + entryRoot.index
+                            x: entryRoot.outlineIndent
+                            width: parent.width - x
+                            height: entryRoot.editorHeight
+                            z: 2
+                            acceptedButtons: Qt.RightButton
+
+                            onClicked: function(mouse) {
+                                if (!entryRoot.outlineSelected)
+                                    window.selectOutline(entryRoot.index, false);
+                                entryRoot.openContextMenu();
+                                mouse.accepted = true;
+                            }
+                        }
+
                         JournalDraft {
                             id: inlineDraft
 
@@ -1338,7 +1461,8 @@ ApplicationWindow {
                         readonly property bool hasTrailingDraft: !notebookController.currentPagePreview && (window.draftAfterId === "" || window.draftAfterId === lastEntryId)
 
                         width: outlineList.width
-                        height: Math.max(trailingDraft.implicitHeight + (window.uiSpacing * 10), outlineList.height * 0.45)
+                        height: Math.max(trailingDraft.implicitHeight + linkedReferencesPanel.height +
+                                         (window.uiSpacing * 12), outlineList.height * 0.45)
 
                         JournalDraft {
                             id: trailingDraft
@@ -1347,6 +1471,108 @@ ApplicationWindow {
                             insertionAfterId: parent.lastEntryId === window.draftAfterId ? parent.lastEntryId : ""
                             anchorRow: outlineList.count - 1
                             activeDraft: parent.hasTrailingDraft
+                        }
+
+                        Column {
+                            id: linkedReferencesPanel
+                            property bool expanded: false
+                            z: 2
+
+                            anchors.top: trailingDraft.bottom
+                            anchors.topMargin: window.uiSpacing * 4
+                            width: parent.width
+                            visible: !notebookController.currentPagePreview &&
+                                     notebookController.linkedReferenceTargetId.length > 0
+                            spacing: window.uiSpacing
+
+                            ToolButton {
+                                width: parent.width
+                                text: notebookController.linkedReferenceTotal === 0
+                                      ? qsTr("No Linked References")
+                                      : qsTr("%1 Linked References").arg(
+                                            notebookController.linkedReferenceTotal)
+                                enabled: notebookController.linkedReferenceTotal > 0
+                                checkable: true
+                                checked: linkedReferencesPanel.expanded
+                                onToggled: linkedReferencesPanel.expanded = checked
+                                Accessible.role: Accessible.Heading
+                            }
+
+                            ListView {
+                                id: linkedReferenceList
+                                objectName: "linkedReferenceList"
+                                width: parent.width
+                                height: visible ? contentHeight : 0
+                                visible: linkedReferencesPanel.expanded
+                                interactive: false
+                                spacing: window.uiSpacing
+                                model: notebookController.linkedReferenceSources
+                                section.property: "linkedReferenceGroup"
+                                section.delegate: Label {
+                                    required property string section
+                                    width: linkedReferenceList.width
+                                    topPadding: window.uiSpacing
+                                    text: section
+                                    font.weight: Font.DemiBold
+                                    Accessible.role: Accessible.Heading
+                                }
+                                Accessible.role: Accessible.List
+                                Accessible.name: qsTr("Incoming Linked References")
+
+                                delegate: Label {
+                                    required property string entryId
+                                    required property string authoredText
+                                    required property string linkedReferenceContext
+                                    required property string linkedReferencePresentation
+                                    required property var linkedReferenceOccurrenceCount
+                                    required property bool linkedReferenceHasMoreOccurrences
+
+                                    width: linkedReferenceList.width
+                                    padding: window.uiSpacing
+                                    text: "<b>" + window.htmlEscaped(linkedReferenceContext) +
+                                          "</b><br>" + linkedReferencePresentation +
+                                          qsTr("<br>%1 occurrences").arg(
+                                              linkedReferenceOccurrenceCount)
+                                    textFormat: Text.StyledText
+                                    wrapMode: Text.Wrap
+                                    background: Rectangle {
+                                        color: palette.alternateBase
+                                    }
+                                    Accessible.role: Accessible.ListItem
+                                    Accessible.name: text
+
+                                    TapHandler {
+                                        onTapped: {
+                                            if (!notebookController.followLinkedReferenceSource(entryId))
+                                                return;
+                                            for (let row = 0; row < outlineList.count; ++row) {
+                                                if (notebookController.outlineEntryId(row) === entryId) {
+                                                    window.selectOutline(row, false);
+                                                    window.focusBullet(row);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    ToolButton {
+                                        anchors.right: parent.right
+                                        anchors.bottom: parent.bottom
+                                        visible: linkedReferenceHasMoreOccurrences
+                                        text: qsTr("Load more snippets")
+                                        onClicked: notebookController.loadMoreLinkedReferenceOccurrences(
+                                                       entryId)
+                                    }
+                                }
+                            }
+
+                            Button {
+                                width: parent.width
+                                visible: notebookController.hasMoreLinkedReferences
+                                text: qsTr("Load more Linked References")
+                                onClicked: notebookController.loadMoreLinkedReferences()
+                            }
+
                         }
 
                         Item {
@@ -1399,8 +1625,100 @@ ApplicationWindow {
 
     }
 
+    Drawer {
+        id: blockLinkedReferencesDrawer
+        objectName: "blockLinkedReferencesDrawer"
+        edge: Qt.RightEdge
+        width: Math.min(window.width * 0.45, window.maximumDocumentWidth)
+        height: window.height
+        modal: false
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: window.uiSpacing * 2
+
+            Label {
+                Layout.fillWidth: true
+                text: qsTr("Block Linked References")
+                font.pixelSize: Math.round(window.font.pixelSize * 1.3)
+                font.weight: Font.DemiBold
+                Accessible.role: Accessible.Heading
+            }
+
+            ListView {
+                id: blockLinkedReferenceList
+                objectName: "blockLinkedReferenceList"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: notebookController.blockLinkedReferenceSources
+                section.property: "linkedReferenceGroup"
+                section.delegate: Label {
+                    required property string section
+                    width: blockLinkedReferenceList.width
+                    topPadding: window.uiSpacing
+                    text: section
+                    font.weight: Font.DemiBold
+                }
+
+                delegate: Label {
+                    required property string entryId
+                    required property string authoredText
+                    required property string linkedReferenceContext
+                    required property string linkedReferencePresentation
+                    required property var linkedReferenceOccurrenceCount
+                    required property bool linkedReferenceHasMoreOccurrences
+
+                    width: blockLinkedReferenceList.width
+                    padding: window.uiSpacing
+                    text: "<b>" + window.htmlEscaped(linkedReferenceContext) + "</b><br>" +
+                          linkedReferencePresentation + qsTr("<br>%1 occurrences").arg(
+                              linkedReferenceOccurrenceCount)
+                    textFormat: Text.StyledText
+                    wrapMode: Text.Wrap
+                    background: Rectangle {
+                        color: palette.alternateBase
+                    }
+
+                    TapHandler {
+                        onTapped: {
+                            if (!notebookController.followBlockLinkedReferenceSource(entryId))
+                                return;
+                            blockLinkedReferencesDrawer.close();
+                            for (let row = 0; row < outlineList.count; ++row) {
+                                if (notebookController.outlineEntryId(row) === entryId) {
+                                    window.selectOutline(row, false);
+                                    window.focusBullet(row);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    ToolButton {
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        visible: linkedReferenceHasMoreOccurrences
+                        text: qsTr("Load more snippets")
+                        onClicked: notebookController.loadMoreBlockLinkedReferenceOccurrences(
+                                       entryId)
+                    }
+                }
+            }
+
+            Button {
+                Layout.fillWidth: true
+                visible: notebookController.hasMoreBlockLinkedReferences
+                text: qsTr("Load more Linked References")
+                onClicked: notebookController.loadMoreBlockLinkedReferences()
+            }
+        }
+    }
+
     component JournalDraft: Item {
         id: draftRoot
+
+        objectName: activeDraft ? "activeJournalDraft" : ""
 
         required property string insertionAfterId
         required property int anchorRow
@@ -1448,6 +1766,24 @@ ApplicationWindow {
             return true;
         }
 
+        function openContextMenu() {
+            window.deferJournalFocusCommit = true;
+            draftMenu.popup();
+        }
+
+        function insertSelectedBlockReference() {
+            const notation = notebookController.blockReferenceNotation(
+                notebookController.selectedBlockReferenceTargetId);
+            if (notation.length === 0)
+                return false;
+
+            const insertionPosition = draftEditor.cursorPosition;
+            draftEditor.insert(insertionPosition, notation);
+            draftEditor.cursorPosition = insertionPosition + notation.length;
+            window.draftText = draftEditor.text;
+            return true;
+        }
+
         visible: activeDraft
         implicitHeight: activeDraft ? editorHeight : 0
         height: implicitHeight
@@ -1483,6 +1819,26 @@ ApplicationWindow {
 
         HoverHandler {
             id: draftHover
+        }
+
+        Menu {
+            id: draftMenu
+
+            onClosed: {
+                if (window.deferJournalFocusCommit &&
+                    window.activeOutlineEditor === draftEditor) {
+                    draftRoot.focusEditor(draftEditor.cursorPosition);
+                    window.deferJournalFocusCommit = false;
+                }
+            }
+
+            MenuItem {
+                objectName: draftRoot.activeDraft ?
+                                "insertDraftBlockReferenceMenuItem" : ""
+                text: qsTr("Insert Block Reference to Selected Target")
+                enabled: notebookController.selectedBlockReferenceTargetId.length > 0
+                onTriggered: draftRoot.insertSelectedBlockReference()
+            }
         }
 
         RowLayout {
@@ -1538,6 +1894,9 @@ ApplicationWindow {
                         window.clearOutlineSelection();
                         window.registerOutlineEditor(draftEditor);
                     } else if (window.activeOutlineEditor === draftEditor) {
+                        if (window.deferJournalFocusCommit)
+                            return ;
+
                         if (draftEditor.inputMethodComposing) {
                             Qt.callLater(function() {
                                 draftEditor.forceActiveFocus();
@@ -1594,6 +1953,18 @@ ApplicationWindow {
 
             }
 
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            z: 2
+            acceptedButtons: Qt.RightButton
+            onPressed: function(mouse) {
+                window.deferJournalFocusCommit = true;
+                mouse.accepted = true;
+            }
+            onClicked: draftRoot.openContextMenu()
+            onCanceled: window.deferJournalFocusCommit = false
         }
 
     }

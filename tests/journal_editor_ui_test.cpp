@@ -281,6 +281,8 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     REQUIRE(root != nullptr);
     auto* window = qobject_cast<QQuickWindow*>(root.get());
     REQUIRE(window != nullptr);
+    window->setWidth(1254);
+    window->setHeight(863);
     window->show();
     auto* pageList = root->findChild<QQuickItem*>(QStringLiteral("pageList"));
     auto* heading = root->findChild<QQuickItem*>(QStringLiteral("pageHeading"));
@@ -349,6 +351,7 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
 
 TEST_CASE(
     "committed Page Links render titles follow from the keyboard and keep previews read-only") {
+    QAccessible::setActive(true);
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
@@ -413,13 +416,28 @@ TEST_CASE(
                previewSourceList->property("count").toInt() == 1;
     }));
     CHECK(previewSourceList->isVisible());
-    QVariant previewSourceValue;
-    REQUIRE(QMetaObject::invokeMethod(previewSourceList, "sourceItemAt",
-                                      Q_RETURN_ARG(QVariant, previewSourceValue),
-                                      Q_ARG(QVariant, 0)));
-    auto* previewSource = qobject_cast<QQuickItem*>(previewSourceValue.value<QObject*>());
+    const auto previewSourceAt = [previewSourceList](int row) -> QQuickItem* {
+        QVariant sourceValue;
+        if (!QMetaObject::invokeMethod(previewSourceList, "sourceItemAt",
+                                       Q_RETURN_ARG(QVariant, sourceValue), Q_ARG(QVariant, row))) {
+            return nullptr;
+        }
+        return qobject_cast<QQuickItem*>(sourceValue.value<QObject*>());
+    };
+    REQUIRE(waitUntil([&previewSourceAt]() -> bool { return previewSourceAt(0) != nullptr; }));
+    CHECK(previewSourceAt(1) == nullptr);
+    auto* previewSource = previewSourceAt(0);
     REQUIRE(previewSource != nullptr);
-    CHECK(previewSource->property("text").toString().contains(QStringLiteral("missing/page")));
+    const auto* previewSourceInterface = QAccessible::queryAccessibleInterface(previewSource);
+    REQUIRE(previewSourceInterface != nullptr);
+    CHECK(previewSourceInterface->role() == QAccessible::ListItem);
+    CHECK(previewSourceInterface->text(QAccessible::Name) ==
+          previewSource->property("text").toString());
+    CHECK(controller.pagePreviewSources()
+              ->data(controller.pagePreviewSources()->index(0, 0),
+                     OutlineEntryModel::LinkedReferencePresentationRole)
+              .toString()
+              .contains(QStringLiteral("missing/page")));
     CHECK(root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) == nullptr);
 
     controller.navigateToPageName(QStringLiteral("source"));
@@ -1412,6 +1430,132 @@ TEST_CASE("the Journal exposes list structure selection and multiline editing ac
     CHECK(editorInterface->role() == QAccessible::EditableText);
     CHECK(editorInterface->state().multiLine);
     CHECK(editorInterface->textInterface() != nullptr);
+}
+
+TEST_CASE("the packaged QML selects inserts and browses Block References") {
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("block-reference-ui.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("page"), QStringLiteral("Page")));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("target")) == 0);
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("source")) == 1);
+    const auto targetId = controller.outlineEntryId(0);
+    const auto sourceId = controller.outlineEntryId(1);
+
+    QQmlEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine,
+                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* window = qobject_cast<QQuickWindow*>(root.get());
+    REQUIRE(window != nullptr);
+    window->setWidth(1254);
+    window->setHeight(863);
+    window->show();
+    window->requestActivate();
+    REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
+    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    REQUIRE(outlineList != nullptr);
+    REQUIRE(
+        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 2; }));
+
+    QVariant targetEntryValue;
+    QVariant sourceEntryValue;
+    REQUIRE(QMetaObject::invokeMethod(
+        outlineList, "entryItemAt", Q_RETURN_ARG(QVariant, targetEntryValue), Q_ARG(QVariant, 0)));
+    REQUIRE(QMetaObject::invokeMethod(
+        outlineList, "entryItemAt", Q_RETURN_ARG(QVariant, sourceEntryValue), Q_ARG(QVariant, 1)));
+    auto* targetEntry = qobject_cast<QQuickItem*>(targetEntryValue.value<QObject*>());
+    auto* sourceEntry = qobject_cast<QQuickItem*>(sourceEntryValue.value<QObject*>());
+    REQUIRE(targetEntry != nullptr);
+    REQUIRE(sourceEntry != nullptr);
+
+    auto* selectTarget =
+        targetEntry->findChild<QObject*>(QStringLiteral("selectBlockReferenceTargetMenuItem-0"));
+    auto* insertReference =
+        sourceEntry->findChild<QObject*>(QStringLiteral("insertBlockReferenceMenuItem-1"));
+    auto* browseReferences =
+        targetEntry->findChild<QObject*>(QStringLiteral("browseLinkedReferencesMenuItem-0"));
+    REQUIRE(selectTarget != nullptr);
+    REQUIRE(insertReference != nullptr);
+    REQUIRE(browseReferences != nullptr);
+    REQUIRE(QMetaObject::invokeMethod(selectTarget, "click"));
+    CHECK(controller.selectedBlockReferenceTargetId() == targetId);
+    auto* sourceEditor =
+        sourceEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
+    auto* sourceContextArea =
+        sourceEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryContextArea-1"));
+    REQUIRE(sourceEditor != nullptr);
+    REQUIRE(sourceContextArea != nullptr);
+    CHECK(sourceContextArea->width() >= sourceEditor->width());
+    const auto sourceEditorCenter =
+        sourceEditor->mapToScene(QPointF(sourceEditor->width() / 2, sourceEditor->height() / 2));
+#ifdef Q_OS_MACOS
+    REQUIRE(QMetaObject::invokeMethod(sourceEntry, "openContextMenu"));
+#else
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, sourceEditorCenter.toPoint());
+#endif
+    CHECK(waitUntil(
+        [insertReference]() -> bool { return insertReference->property("visible").toBool(); }));
+    REQUIRE(QMetaObject::invokeMethod(insertReference, "click"));
+    CHECK(controller.outlineEntries()
+              ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString()
+              .startsWith(NotebookController::blockReferenceNotation(targetId)));
+
+    REQUIRE(QMetaObject::invokeMethod(browseReferences, "click"));
+    auto* drawer = root->findChild<QObject*>(QStringLiteral("blockLinkedReferencesDrawer"));
+    auto* referenceList = root->findChild<QQuickItem*>(QStringLiteral("blockLinkedReferenceList"));
+    REQUIRE(drawer != nullptr);
+    REQUIRE(referenceList != nullptr);
+    CHECK(controller.blockLinkedReferenceTargetId() == targetId);
+    CHECK(controller.blockLinkedReferenceTotal() == 1);
+    REQUIRE(waitUntil([drawer]() -> bool { return drawer->property("opened").toBool(); }));
+    CHECK(referenceList->property("count").toInt() == 1);
+    CHECK(controller.outlineEntryId(1) == sourceId);
+    REQUIRE(QMetaObject::invokeMethod(drawer, "close"));
+    REQUIRE(waitUntil([drawer]() -> bool { return !drawer->property("visible").toBool(); }));
+
+    REQUIRE(QMetaObject::invokeMethod(root.get(), "beginTrailingDraft"));
+    REQUIRE(waitUntil([root = root.get()]() -> bool {
+        return root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) != nullptr;
+    }));
+    auto* draftEditor = root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor"));
+    REQUIRE(draftEditor != nullptr);
+    REQUIRE(waitUntil([draftEditor]() -> bool { return draftEditor->hasActiveFocus(); }));
+    REQUIRE(draftEditor->width() > 0);
+    REQUIRE(draftEditor->height() > 0);
+    draftEditor->setProperty("text", QStringLiteral("draft"));
+    draftEditor->setProperty("cursorPosition", 2);
+    const auto draftEditorCenter =
+        draftEditor->mapToScene(QPointF(draftEditor->width() / 2, draftEditor->height() / 2));
+    REQUIRE(draftEditorCenter.x() >= 0);
+    REQUIRE(draftEditorCenter.x() < window->width());
+    REQUIRE(draftEditorCenter.y() >= 0);
+    REQUIRE(draftEditorCenter.y() < window->height());
+    auto* activeDraft = root->findChild<QObject*>(QStringLiteral("activeJournalDraft"));
+    REQUIRE(activeDraft != nullptr);
+#ifdef Q_OS_MACOS
+    REQUIRE(QMetaObject::invokeMethod(activeDraft, "openContextMenu"));
+#else
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, draftEditorCenter.toPoint());
+#endif
+    auto* insertDraftReference =
+        root->findChild<QObject*>(QStringLiteral("insertDraftBlockReferenceMenuItem"));
+    CHECK(insertDraftReference != nullptr);
+    if (insertDraftReference != nullptr) {
+        CHECK(waitUntil([insertDraftReference]() -> bool {
+            return insertDraftReference->property("visible").toBool();
+        }));
+        REQUIRE(QMetaObject::invokeMethod(insertDraftReference, "click"));
+        CHECK(draftEditor->property("text").toString() ==
+              QStringLiteral("dr%1aft").arg(NotebookController::blockReferenceNotation(targetId)));
+    }
+    CHECK(controller.outlineEntries()->rowCount() == 2);
 }
 
 auto main(int argc, char* argv[]) -> int {
