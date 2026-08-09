@@ -41,5 +41,5 @@ date materializes atomically when it first receives durable content.
 
 Name-derived Page Hierarchy was separated from Containment and continues in
 [issue 16](16-define-page-hierarchy-behavior.md). The accepted Page/Entry schema and interface
-refactor is tracked by
+refactor was completed by
 [implementation issue 19](../../notebook-v0-implementation/issues/19-unify-page-and-entry-block-types.md).
