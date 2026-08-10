@@ -4,16 +4,33 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <QAbstractItemModel>
+#include <QCoreApplication>
 #include <QDate>
 #include <QFile>
+#include <QThread>
 #include <QUrl>
 
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
 
 namespace {
+
+template <typename Predicate>
+auto
+waitUntil(Predicate predicate,
+          std::chrono::milliseconds timeout = std::chrono::seconds(2)) -> bool
+{
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!predicate() && std::chrono::steady_clock::now() < deadline) {
+        QCoreApplication::processEvents();
+        QThread::msleep(1);
+    }
+    QCoreApplication::processEvents();
+    return predicate();
+}
 
 class TemporaryDirectory {
   public:
@@ -800,4 +817,81 @@ TEST_CASE("the Qt adapter exposes and applies Journal undo and redo")
                      OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("changed"));
     CHECK_FALSE(controller.canRedo());
+}
+
+TEST_CASE("the Qt adapter exposes live Query results errors and navigation")
+{
+    auto argumentCount = 1;
+    std::array executableName{'h', 'i', 'e', 'd', 'a', '\0'};
+    std::array<char*, 2> arguments{executableName.data(), nullptr};
+    QCoreApplication application(argumentCount, arguments.data());
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "query-adapter.hieda"));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("status::closed")) ==
+            0);
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral(
+                "{{query (where (property-equals status \"open\"))}}")) == 1);
+    auto* model = controller.outlineEntries();
+    const auto candidateId = controller.outlineEntryId(0);
+    const auto queryId = controller.outlineEntryId(1);
+    auto queryIndex = model->index(1, 0);
+
+    controller.setQueryActive(queryId, true);
+    REQUIRE(waitUntil([&]() -> bool {
+        return !model->data(queryIndex, OutlineEntryModel::QueryLoadingRole)
+                    .toBool();
+    }));
+
+    CHECK(model->data(queryIndex, OutlineEntryModel::QueryHasIntentRole)
+              .toBool());
+    CHECK(model->data(queryIndex, OutlineEntryModel::QueryErrorRole)
+              .toString()
+              .isEmpty());
+    CHECK(model->data(queryIndex, OutlineEntryModel::QueryResultsRole)
+              .toList()
+              .isEmpty());
+
+    REQUIRE(controller.updateOutlineEntry(candidateId,
+                                          QStringLiteral("status::open")));
+    queryIndex = model->index(1, 0);
+    REQUIRE(waitUntil([&]() -> bool {
+        return model->data(queryIndex, OutlineEntryModel::QueryResultsRole)
+                   .toList()
+                   .size() == 1;
+    }));
+    const auto rows =
+        model->data(queryIndex, OutlineEntryModel::QueryResultsRole).toList();
+    REQUIRE(rows.size() == 1);
+    CHECK(rows.front().toMap().value(QStringLiteral("blockId")).toString() ==
+          candidateId);
+    CHECK_FALSE(
+        model->data(queryIndex, OutlineEntryModel::QueryHasMoreRole).toBool());
+    CHECK(controller.followQueryResult(candidateId));
+    CHECK(controller.identifiedBlockId() == candidateId);
+
+    REQUIRE(controller.updateOutlineEntry(
+        queryId, QStringLiteral("{{query (where (type unknown))}}")));
+    queryIndex = model->index(1, 0);
+    REQUIRE(waitUntil([&]() -> bool {
+        return !model->data(queryIndex, OutlineEntryModel::QueryErrorRole)
+                    .toString()
+                    .isEmpty();
+    }));
+    CHECK_FALSE(model->data(queryIndex, OutlineEntryModel::QueryErrorRole)
+                    .toString()
+                    .isEmpty());
+    CHECK(model->data(queryIndex, OutlineEntryModel::QueryResultsRole)
+              .toList()
+              .isEmpty());
+
+    controller.setQueryExpanded(queryId, false);
+    CHECK_FALSE(
+        model->data(queryIndex, OutlineEntryModel::QueryExpandedRole).toBool());
+    CHECK_FALSE(
+        model->data(queryIndex, OutlineEntryModel::QueryLoadingRole).toBool());
+    controller.setQueryExpanded(queryId, true);
+    CHECK(
+        model->data(queryIndex, OutlineEntryModel::QueryExpandedRole).toBool());
 }

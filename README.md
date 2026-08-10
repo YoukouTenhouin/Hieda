@@ -86,3 +86,19 @@ focus or structural change. Each such typing group and each structural command i
 action; a structural command also includes its pending text. Use the platform-standard Undo and
 Redo shortcuts or the Edit menu. History is maintained separately for each Journal Page, uses a
 shared 32 MiB memory budget, and clears when the Notebook is closed.
+
+## Queries and properties
+
+Property lines use `key::value` at the start of a logical line. Keys follow the same lowercase
+slash-separated grammar as Page names; values remain exact Unicode strings, including whitespace,
+empty values, and duplicates.
+
+An Entry whose trimmed committed text begins with `{{query` declares Query intent. A valid Query
+executes a saved live selection; invalid or incomplete intent remains editable and displays a Query
+Error without executing. Queries use Hieda's
+declarative S-expression syntax to filter Blocks by type, Named or Journal Page context, Journal
+Date, exact Authored Text substrings, and Properties. They support nested `and`, `or`, and `not`,
+creation/update/Journal Date ordering, and positive limits. Matching Blocks appear as read-only
+navigable rows below the Query Entry and refresh after committed Notebook changes. Invalid Query
+source remains saved and editable, displays a source-located error, and executes no partial or
+backend expression.
