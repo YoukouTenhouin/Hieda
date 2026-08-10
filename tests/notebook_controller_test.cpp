@@ -17,18 +17,23 @@ namespace {
 
 class TemporaryDirectory {
   public:
-    TemporaryDirectory() {
-        const auto suffix =
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-        path_ = std::filesystem::temp_directory_path() / ("hieda-controller-test-" + suffix);
+    TemporaryDirectory()
+    {
+        const auto suffix = std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        path_ = std::filesystem::temp_directory_path() /
+                ("hieda-controller-test-" + suffix);
         std::filesystem::create_directories(path_);
     }
 
-    ~TemporaryDirectory() {
+    ~TemporaryDirectory()
+    {
         std::filesystem::remove_all(path_);
     }
 
-    [[nodiscard]] auto path() const -> const std::filesystem::path& {
+    [[nodiscard]] auto
+    path() const -> const std::filesystem::path&
+    {
         return path_;
     }
 
@@ -36,7 +41,9 @@ class TemporaryDirectory {
     std::filesystem::path path_;
 };
 
-auto displayPath(const std::filesystem::path& path) -> QString {
+auto
+displayPath(const std::filesystem::path& path) -> QString
+{
 #ifdef _WIN32
     return QString::fromStdWString(path.native());
 #else
@@ -44,13 +51,16 @@ auto displayPath(const std::filesystem::path& path) -> QString {
 #endif
 }
 
-auto localFileUrl(const std::filesystem::path& path) -> QUrl {
+auto
+localFileUrl(const std::filesystem::path& path) -> QUrl
+{
     return QUrl::fromLocalFile(displayPath(path));
 }
 
 } // namespace
 
-TEST_CASE("the Qt adapter exposes create and close state") {
+TEST_CASE("the Qt adapter exposes create and close state")
+{
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath = temporaryDirectory.path() / "adapter.hieda";
     NotebookController controller;
@@ -67,7 +77,8 @@ TEST_CASE("the Qt adapter exposes create and close state") {
     CHECK(controller.notebookPath().isEmpty());
 }
 
-TEST_CASE("the Qt adapter presents invalid Notebook errors") {
+TEST_CASE("the Qt adapter presents invalid Notebook errors")
+{
     TemporaryDirectory temporaryDirectory;
     const auto invalidPath = temporaryDirectory.path() / "invalid.hieda";
     {
@@ -79,14 +90,17 @@ TEST_CASE("the Qt adapter presents invalid Notebook errors") {
     controller.openNotebook(localFileUrl(invalidPath));
 
     CHECK_FALSE(controller.hasOpenNotebook());
-    CHECK(controller.errorMessage() == QStringLiteral("That file is not a valid Hieda Notebook."));
+    CHECK(controller.errorMessage() ==
+          QStringLiteral("That file is not a valid Hieda Notebook."));
     controller.clearError();
     CHECK(controller.errorMessage().isEmpty());
 }
 
-TEST_CASE("the Qt adapter preserves a non-ASCII Notebook path") {
+TEST_CASE("the Qt adapter preserves a non-ASCII Notebook path")
+{
     TemporaryDirectory temporaryDirectory;
-    const auto notebookPath = temporaryDirectory.path() / std::filesystem::path(u8"筆記.hieda");
+    const auto notebookPath =
+        temporaryDirectory.path() / std::filesystem::path(u8"筆記.hieda");
     NotebookController controller;
 
     controller.createNotebook(localFileUrl(notebookPath));
@@ -96,9 +110,11 @@ TEST_CASE("the Qt adapter preserves a non-ASCII Notebook path") {
     CHECK(controller.notebookPath() == displayPath(notebookPath));
 }
 
-TEST_CASE("the Qt adapter presents and durably edits today's flat Journal") {
+TEST_CASE("the Qt adapter presents and durably edits today's flat Journal")
+{
     TemporaryDirectory temporaryDirectory;
-    const auto notebookPath = temporaryDirectory.path() / "journal-adapter.hieda";
+    const auto notebookPath =
+        temporaryDirectory.path() / "journal-adapter.hieda";
     NotebookController controller;
     controller.createNotebook(localFileUrl(notebookPath));
     REQUIRE(controller.hasOpenNotebook());
@@ -106,61 +122,76 @@ TEST_CASE("the Qt adapter presents and durably edits today's flat Journal") {
     auto* model = controller.outlineEntries();
     REQUIRE(model->rowCount() == 0);
 
-    const auto firstRow = controller.insertOutlineEntry(QStringLiteral("first"));
+    const auto firstRow =
+        controller.insertOutlineEntry(QStringLiteral("first"));
     REQUIRE(firstRow == 0);
     const auto firstIndex = model->index(firstRow, 0);
-    const auto firstId = model->data(firstIndex, OutlineEntryModel::EntryIdRole).toString();
+    const auto firstId =
+        model->data(firstIndex, OutlineEntryModel::EntryIdRole).toString();
     QPersistentModelIndex persistentFirst(firstIndex);
-    CHECK(model->data(firstIndex, OutlineEntryModel::AuthoredTextRole).toString() ==
-          QStringLiteral("first"));
+    CHECK(model->data(firstIndex, OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("first"));
 
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("third")) == 1);
-    REQUIRE(controller.insertOutlineEntry(QString::fromUtf8("第二 🎴"), firstId) == 1);
+    REQUIRE(controller.insertOutlineEntry(QString::fromUtf8("第二 🎴"),
+                                          firstId) == 1);
     REQUIRE(model->rowCount() == 3);
     CHECK(controller.outlineEntryId(1) ==
-          model->data(model->index(1, 0), OutlineEntryModel::EntryIdRole).toString());
+          model->data(model->index(1, 0), OutlineEntryModel::EntryIdRole)
+              .toString());
     CHECK(controller.outlineEntryId(-1).isEmpty());
     CHECK(persistentFirst.isValid());
     CHECK(persistentFirst.row() == 0);
-    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole).toString() ==
-          QString::fromUtf8("第二 🎴"));
+    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QString::fromUtf8("第二 🎴"));
 
     const auto secondId =
-        model->data(model->index(1, 0), OutlineEntryModel::EntryIdRole).toString();
-    REQUIRE(controller.updateOutlineEntry(secondId, QStringLiteral("  revised  ")));
-    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole).toString() ==
-          QStringLiteral("  revised  "));
+        model->data(model->index(1, 0), OutlineEntryModel::EntryIdRole)
+            .toString();
+    REQUIRE(
+        controller.updateOutlineEntry(secondId, QStringLiteral("  revised  ")));
+    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("  revised  "));
 
     controller.closeNotebook();
     controller.openNotebook(localFileUrl(notebookPath));
     REQUIRE(model->rowCount() == 3);
-    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole).toString() ==
-          QStringLiteral("  revised  "));
+    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("  revised  "));
 }
 
-TEST_CASE("the Qt adapter restores durable text after a rejected edit") {
+TEST_CASE("the Qt adapter restores durable text after a rejected edit")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "rejected-adapter.hieda"));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "rejected-adapter.hieda"));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("durable")) == 0);
     auto* model = controller.outlineEntries();
-    const auto id = model->data(model->index(0, 0), OutlineEntryModel::EntryIdRole).toString();
+    const auto id =
+        model->data(model->index(0, 0), OutlineEntryModel::EntryIdRole)
+            .toString();
 
-    CHECK_FALSE(controller.updateOutlineEntry(id, QStringLiteral("carriage\rreturn")));
-    CHECK(model->data(model->index(0, 0), OutlineEntryModel::AuthoredTextRole).toString() ==
-          QStringLiteral("durable"));
+    CHECK_FALSE(
+        controller.updateOutlineEntry(id, QStringLiteral("carriage\rreturn")));
+    CHECK(model->data(model->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("durable"));
     CHECK_FALSE(controller.errorMessage().isEmpty());
 }
 
-TEST_CASE("the Qt adapter switches Journal dates without materializing empty Pages") {
+TEST_CASE(
+    "the Qt adapter switches Journal dates without materializing empty Pages")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "dates.hieda"));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "dates.hieda"));
     const auto firstDate = QDate(2026, 8, 7);
     const auto secondDate = firstDate.addDays(1);
     int rolloverRequests = 0;
-    QObject::connect(&controller, &NotebookController::journalDateRolloverRequested, &controller,
-                     [&]() -> void {
+    QObject::connect(&controller,
+                     &NotebookController::journalDateRolloverRequested,
+                     &controller, [&]() -> void {
                          ++rolloverRequests;
                          controller.completeJournalDateRollover();
                      });
@@ -174,30 +205,36 @@ TEST_CASE("the Qt adapter switches Journal dates without materializing empty Pag
     controller.requestJournalDateRollover(firstDate);
     REQUIRE(controller.outlineEntries()->rowCount() == 1);
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("first day"));
     CHECK(rolloverRequests == 3);
 }
 
-TEST_CASE("the Qt adapter creates renames and navigates ordinary Pages") {
+TEST_CASE("the Qt adapter creates renames and navigates ordinary Pages")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "pages-adapter.hieda"));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "pages-adapter.hieda"));
 
-    REQUIRE(controller.createPage(QStringLiteral("project"), QStringLiteral("Project")));
+    REQUIRE(controller.createPage(QStringLiteral("project"),
+                                  QStringLiteral("Project")));
     CHECK_FALSE(controller.isJournalPage());
     CHECK(controller.currentPageName() == QStringLiteral("project"));
     CHECK(controller.currentPageTitle() == QStringLiteral("Project"));
-    CHECK(controller.pageChoices() == QStringList{QStringLiteral("Project — project")});
+    CHECK(controller.pageChoices() ==
+          QStringList{QStringLiteral("Project — project")});
     CHECK(controller.pageIdForChoice(QStringLiteral("Project — project")) ==
           controller.currentPageId());
-    CHECK_FALSE(controller.createPage(QStringLiteral("project"), QStringLiteral("Duplicate")));
+    CHECK_FALSE(controller.createPage(QStringLiteral("project"),
+                                      QStringLiteral("Duplicate")));
     CHECK_FALSE(controller.errorMessage().isEmpty());
     controller.clearError();
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("page content")) == 0);
 
-    REQUIRE(
-        controller.renameCurrentPage(QStringLiteral("renamed"), QStringLiteral("Renamed Project")));
+    REQUIRE(controller.renameCurrentPage(QStringLiteral("renamed"),
+                                         QStringLiteral("Renamed Project")));
     const auto pageId = controller.currentPageId();
     controller.navigateToToday();
     CHECK(controller.isJournalPage());
@@ -213,15 +250,20 @@ TEST_CASE("the Qt adapter creates renames and navigates ordinary Pages") {
     CHECK_FALSE(controller.errorMessage().isEmpty());
 
     controller.clearError();
-    controller.navigateToPage(QStringLiteral("00000000-0000-0000-0000-000000000001"));
+    controller.navigateToPage(
+        QStringLiteral("00000000-0000-0000-0000-000000000001"));
     CHECK(controller.errorMessage().contains(QStringLiteral("Page")));
 }
 
-TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy previews") {
+TEST_CASE(
+    "the Qt adapter lazily browses and materializes Page Hierarchy previews")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "hierarchy-adapter.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"), QStringLiteral("Alpha")));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "hierarchy-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"),
+                                  QStringLiteral("Alpha")));
 
     auto* hierarchy = controller.pageHierarchy();
     REQUIRE(hierarchy->rowCount() == 1);
@@ -230,16 +272,19 @@ TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy preview
           QStringLiteral("work"));
     CHECK(hierarchy->data(root, Qt::DisplayRole).toString() ==
           QStringLiteral("work (Page Preview)"));
-    CHECK_FALSE(hierarchy->data(root, PageHierarchyModel::MaterializedRole).toBool());
+    CHECK_FALSE(
+        hierarchy->data(root, PageHierarchyModel::MaterializedRole).toBool());
     CHECK(hierarchy->data(root, PageHierarchyModel::HasChildrenRole).toBool());
     auto client = hierarchy->index(0, 0, root);
-    CHECK(hierarchy->data(client, PageHierarchyModel::LocalSegmentRole).toString() ==
-          QStringLiteral("client"));
-    CHECK(hierarchy->data(client, PageHierarchyModel::PageNameRole).toString() ==
-          QStringLiteral("work/client"));
+    CHECK(hierarchy->data(client, PageHierarchyModel::LocalSegmentRole)
+              .toString() == QStringLiteral("client"));
+    CHECK(
+        hierarchy->data(client, PageHierarchyModel::PageNameRole).toString() ==
+        QStringLiteral("work/client"));
     CHECK(hierarchy->data(client, Qt::DisplayRole).toString() ==
           QStringLiteral("client (Page Preview)"));
-    CHECK_FALSE(hierarchy->data(client, PageHierarchyModel::MaterializedRole).toBool());
+    CHECK_FALSE(
+        hierarchy->data(client, PageHierarchyModel::MaterializedRole).toBool());
     CHECK(hierarchy->data(client, PageHierarchyModel::AccessibleDescriptionRole)
               .toString()
               .contains(QStringLiteral("Page Preview")));
@@ -258,27 +303,39 @@ TEST_CASE("the Qt adapter lazily browses and materializes Page Hierarchy preview
     const auto createdId = controller.currentPageId();
     CHECK_FALSE(createdId.isEmpty());
     client = hierarchy->index(0, 0, hierarchy->index(0, 0));
-    CHECK(hierarchy->data(client, PageHierarchyModel::MaterializedRole).toBool());
-    CHECK(hierarchy->data(client, Qt::DisplayRole).toString() == QStringLiteral("Client — client"));
+    CHECK(
+        hierarchy->data(client, PageHierarchyModel::MaterializedRole).toBool());
+    CHECK(hierarchy->data(client, Qt::DisplayRole).toString() ==
+          QStringLiteral("Client — client"));
     REQUIRE(controller.deleteCurrentPage());
     CHECK(controller.currentPagePreview());
     CHECK(controller.currentPageName() == QStringLiteral("work/client"));
 
-    REQUIRE(controller.undoOutlineEdit().value(QStringLiteral("succeeded")).toBool());
+    REQUIRE(controller.undoOutlineEdit()
+                .value(QStringLiteral("succeeded"))
+                .toBool());
     CHECK_FALSE(controller.currentPagePreview());
     CHECK(controller.currentPageId() == createdId);
-    REQUIRE(controller.redoOutlineEdit().value(QStringLiteral("succeeded")).toBool());
+    REQUIRE(controller.redoOutlineEdit()
+                .value(QStringLiteral("succeeded"))
+                .toBool());
     CHECK(controller.currentPagePreview());
 }
 
-TEST_CASE("the Qt adapter follows committed Page Links and presents unresolved sources") {
+TEST_CASE("the Qt adapter follows committed Page Links and presents unresolved "
+          "sources")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "page-links-adapter.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "page-links-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QStringLiteral("Target")));
     const auto targetId = controller.currentPageId();
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
-    REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]] and [[missing/page]]")) == 0);
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(
+                QStringLiteral("[[target]] and [[missing/page]]")) == 0);
     const auto sourceId = controller.outlineEntryId(0);
     const auto presentation = controller.committedEntryPresentation(
         sourceId, QStringLiteral("[[target]] and [[missing/page]]"));
@@ -286,14 +343,14 @@ TEST_CASE("the Qt adapter follows committed Page Links and presents unresolved s
     CHECK(presentation.contains(QStringLiteral(">missing/page</a>")));
     CHECK_FALSE(presentation.contains(QStringLiteral("[[target]]")));
 
-    REQUIRE(
-        controller.followPageLink(sourceId, 3, QStringLiteral("[[target]] and [[missing/page]]")));
+    REQUIRE(controller.followPageLink(
+        sourceId, 3, QStringLiteral("[[target]] and [[missing/page]]")));
     CHECK(controller.currentPageId() == targetId);
     CHECK(controller.currentPageName() == QStringLiteral("target"));
 
     controller.navigateToPageName(QStringLiteral("source"));
-    REQUIRE(
-        controller.followPageLink(sourceId, 20, QStringLiteral("[[target]] and [[missing/page]]")));
+    REQUIRE(controller.followPageLink(
+        sourceId, 20, QStringLiteral("[[target]] and [[missing/page]]")));
     CHECK(controller.currentPagePreview());
     CHECK(controller.currentPageName() == QStringLiteral("missing/page"));
     CHECK(controller.outlineEntries()->rowCount() == 0);
@@ -311,16 +368,22 @@ TEST_CASE("the Qt adapter follows committed Page Links and presents unresolved s
     CHECK(controller.pagePreviewSources()->rowCount() == 1);
 
     controller.navigateToPageName(QStringLiteral("source"));
-    CHECK_FALSE(controller.followPageLink(sourceId, 3, QStringLiteral("draft [[target]]")));
+    CHECK_FALSE(controller.followPageLink(sourceId, 3,
+                                          QStringLiteral("draft [[target]]")));
     CHECK(controller.currentPageName() == QStringLiteral("source"));
 }
 
-TEST_CASE("the Qt adapter presents dense Unicode Page Links at exact cursor offsets") {
+TEST_CASE(
+    "the Qt adapter presents dense Unicode Page Links at exact cursor offsets")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "dense-page-links.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "dense-page-links.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QStringLiteral("Target")));
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
     constexpr auto repetitions = 4096;
     QString authoredText;
     authoredText.reserve(static_cast<qsizetype>(repetitions) * 11);
@@ -330,7 +393,8 @@ TEST_CASE("the Qt adapter presents dense Unicode Page Links at exact cursor offs
     REQUIRE(controller.insertOutlineEntry(authoredText) == 0);
     const auto sourceId = controller.outlineEntryId(0);
 
-    const auto presentation = controller.committedEntryPresentation(sourceId, authoredText);
+    const auto presentation =
+        controller.committedEntryPresentation(sourceId, authoredText);
 
     CHECK(presentation.count(QStringLiteral("<a href=")) == repetitions);
     const auto lastCharacterOffset = ((repetitions - 1) * 11) + 1;
@@ -338,29 +402,36 @@ TEST_CASE("the Qt adapter presents dense Unicode Page Links at exact cursor offs
         QStringLiteral("<a href=\"%1\">Target</a>").arg(lastCharacterOffset)));
 }
 
-TEST_CASE("the Qt adapter inserts presents and follows Block References") {
+TEST_CASE("the Qt adapter inserts presents and follows Block References")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(
-        localFileUrl(temporaryDirectory.path() / "block-reference-adapter.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() /
+                                           "block-reference-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QStringLiteral("Target")));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("target text")) == 0);
     const auto targetPageId = controller.currentPageId();
     const auto targetId = controller.outlineEntryId(0);
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("before after")) == 0);
     const auto sourceId = controller.outlineEntryId(0);
 
     REQUIRE(controller.selectBlockReferenceTarget(targetId));
     CHECK(controller.selectedBlockReferenceTargetId() == targetId);
-    REQUIRE(controller.insertSelectedBlockReference(sourceId, 7, QStringLiteral("before after")));
+    REQUIRE(controller.insertSelectedBlockReference(
+        sourceId, 7, QStringLiteral("before after")));
 
     const auto notation = NotebookController::blockReferenceNotation(targetId);
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
-              .toString() == QStringLiteral("before ") + notation + QStringLiteral("after"));
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
+              .toString() ==
+          QStringLiteral("before ") + notation + QStringLiteral("after"));
     const auto presentation = controller.committedEntryPresentation(
-        sourceId, QStringLiteral("before ") + notation + QStringLiteral("after"));
+        sourceId,
+        QStringLiteral("before ") + notation + QStringLiteral("after"));
     CHECK(presentation.contains(QStringLiteral(">Block ") + targetId.first(8) +
                                 QStringLiteral("</a>")));
     REQUIRE(controller.browseLinkedReferences(targetId));
@@ -376,23 +447,29 @@ TEST_CASE("the Qt adapter inserts presents and follows Block References") {
                      OutlineEntryModel::LinkedReferenceGroupRole)
               .toString() == QStringLiteral("Source — source"));
     REQUIRE(controller.followBlockReference(
-        sourceId, 10, QStringLiteral("before ") + notation + QStringLiteral("after")));
+        sourceId, 10,
+        QStringLiteral("before ") + notation + QStringLiteral("after")));
     CHECK(controller.currentPageId() == targetPageId);
     CHECK(controller.identifiedBlockId() == targetId);
     CHECK(controller.linkedReferenceSources()->rowCount() == 0);
 }
 
-TEST_CASE("Page and Block Linked Reference views remain independent") {
+TEST_CASE("Page and Block Linked Reference views remain independent")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "independent-views.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("page-target"), QStringLiteral("Page Target")));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "independent-views.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("page-target"),
+                                  QStringLiteral("Page Target")));
     const auto pageTargetId = controller.currentPageId();
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("block target")) == 0);
     const auto blockTargetId = controller.outlineEntryId(0);
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
     REQUIRE(controller.insertOutlineEntry(
-                QStringLiteral("[[page-target]] [[block:%1]]").arg(blockTargetId)) == 0);
+                QStringLiteral("[[page-target]] [[block:%1]]")
+                    .arg(blockTargetId)) == 0);
 
     controller.navigateToPage(pageTargetId);
     REQUIRE(controller.linkedReferenceSources()->rowCount() == 1);
@@ -404,46 +481,58 @@ TEST_CASE("Page and Block Linked Reference views remain independent") {
     CHECK(controller.blockLinkedReferenceSources()->rowCount() == 1);
 }
 
-TEST_CASE("the Qt adapter incrementally loads Linked Reference occurrence snippets") {
+TEST_CASE(
+    "the Qt adapter incrementally loads Linked Reference occurrence snippets")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
     controller.createNotebook(
         localFileUrl(temporaryDirectory.path() / "occurrence-snippets.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QStringLiteral("Target")));
     const auto targetId = controller.currentPageId();
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
-    REQUIRE(controller.insertOutlineEntry(
-                QStringLiteral("first [[target]]\nsecond [[target]]\nthird [[target]]\nfourth "
-                               "context [[target]] tail")) == 0);
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral(
+                "first [[target]]\nsecond [[target]]\nthird [[target]]\nfourth "
+                "context [[target]] tail")) == 0);
     const auto sourceId = controller.outlineEntryId(0);
     controller.navigateToPage(targetId);
 
     const auto index = controller.linkedReferenceSources()->index(0, 0);
-    CHECK(controller.linkedReferenceSources()
-              ->data(index, OutlineEntryModel::LinkedReferenceOccurrenceCountRole)
-              .toLongLong() == 4);
+    CHECK(
+        controller.linkedReferenceSources()
+            ->data(index, OutlineEntryModel::LinkedReferenceOccurrenceCountRole)
+            .toLongLong() == 4);
     REQUIRE(controller.linkedReferenceSources()
-                ->data(index, OutlineEntryModel::LinkedReferenceHasMoreOccurrencesRole)
+                ->data(index,
+                       OutlineEntryModel::LinkedReferenceHasMoreOccurrencesRole)
                 .toBool());
     REQUIRE(controller.loadMoreLinkedReferenceOccurrences(sourceId));
-    CHECK_FALSE(controller.linkedReferenceSources()
-                    ->data(index, OutlineEntryModel::LinkedReferenceHasMoreOccurrencesRole)
-                    .toBool());
+    CHECK_FALSE(
+        controller.linkedReferenceSources()
+            ->data(index,
+                   OutlineEntryModel::LinkedReferenceHasMoreOccurrencesRole)
+            .toBool());
     CHECK(controller.linkedReferenceSources()
               ->data(index, OutlineEntryModel::LinkedReferencePresentationRole)
               .toString()
               .contains(QStringLiteral("fourth context")));
 }
 
-TEST_CASE("the Qt adapter refreshes a visible Linked Reference view after edits") {
+TEST_CASE(
+    "the Qt adapter refreshes a visible Linked Reference view after edits")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(
-        localFileUrl(temporaryDirectory.path() / "live-linked-reference-adapter.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    controller.createNotebook(localFileUrl(
+        temporaryDirectory.path() / "live-linked-reference-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QStringLiteral("Target")));
     const auto targetPageId = controller.currentPageId();
 
-    REQUIRE(controller.insertOutlineEntry(QStringLiteral("self [[target]]")) == 0);
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("self [[target]]")) ==
+            0);
     REQUIRE(controller.linkedReferenceSources()->rowCount() == 1);
     const auto sourceId = controller.outlineEntryId(0);
     REQUIRE(controller.updateOutlineEntry(sourceId, QStringLiteral("removed")));
@@ -452,16 +541,20 @@ TEST_CASE("the Qt adapter refreshes a visible Linked Reference view after edits"
     CHECK(controller.linkedReferenceTotal() == 0);
 }
 
-TEST_CASE("the Qt adapter browses incoming Page Linked References") {
+TEST_CASE("the Qt adapter browses incoming Page Linked References")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(
-        localFileUrl(temporaryDirectory.path() / "linked-reference-adapter.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    controller.createNotebook(localFileUrl(temporaryDirectory.path() /
+                                           "linked-reference-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QStringLiteral("Target")));
     const auto targetPageId = controller.currentPageId();
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
     const auto sourcePageId = controller.currentPageId();
-    REQUIRE(controller.insertOutlineEntry(QStringLiteral("mentions [[target]]")) == 0);
+    REQUIRE(controller.insertOutlineEntry(
+                QStringLiteral("mentions [[target]]")) == 0);
     const auto sourceId = controller.outlineEntryId(0);
 
     controller.navigateToPage(targetPageId);
@@ -475,16 +568,20 @@ TEST_CASE("the Qt adapter browses incoming Page Linked References") {
     CHECK(controller.currentPageId() == sourcePageId);
 }
 
-TEST_CASE("the Qt adapter loads Linked References in bounded batches") {
+TEST_CASE("the Qt adapter loads Linked References in bounded batches")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(
-        localFileUrl(temporaryDirectory.path() / "linked-reference-batches-adapter.hieda"));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target")));
+    controller.createNotebook(localFileUrl(
+        temporaryDirectory.path() / "linked-reference-batches-adapter.hieda"));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QStringLiteral("Target")));
     const auto targetPageId = controller.currentPageId();
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
     for (auto index = 0; index < 101; ++index) {
-        REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]]")) >= 0);
+        REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]]")) >=
+                0);
     }
 
     controller.navigateToPage(targetPageId);
@@ -497,13 +594,16 @@ TEST_CASE("the Qt adapter loads Linked References in bounded batches") {
     CHECK_FALSE(controller.hasMoreLinkedReferences());
 }
 
-TEST_CASE("the Qt hierarchy model fetches every revision-bound child batch") {
+TEST_CASE("the Qt hierarchy model fetches every revision-bound child batch")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "hierarchy-pages.hieda"));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "hierarchy-pages.hieda"));
     for (int index = 0; index < 101; ++index) {
-        REQUIRE(controller.createPage(QStringLiteral("many/p%1").arg(1000 + index),
-                                      QStringLiteral("Many")));
+        REQUIRE(
+            controller.createPage(QStringLiteral("many/p%1").arg(1000 + index),
+                                  QStringLiteral("Many")));
     }
     controller.navigateToToday();
     auto* hierarchy = controller.pageHierarchy();
@@ -518,44 +618,58 @@ TEST_CASE("the Qt hierarchy model fetches every revision-bound child batch") {
     CHECK_FALSE(hierarchy->canFetchMore(many));
 }
 
-TEST_CASE("the Qt adapter exposes and edits nested Journal structure") {
+TEST_CASE("the Qt adapter exposes and edits nested Journal structure")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "nested-adapter.hieda"));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "nested-adapter.hieda"));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("parent")) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("child")) == 1);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("tail")) == 2);
     auto* model = controller.outlineEntries();
     const auto childId = controller.outlineEntryId(1);
 
-    const auto indented = controller.indentOutlineEntry(childId, QStringLiteral("child"), 2);
+    const auto indented =
+        controller.indentOutlineEntry(childId, QStringLiteral("child"), 2);
     REQUIRE(indented.value(QStringLiteral("succeeded")).toBool());
     CHECK(indented.value(QStringLiteral("row")).toInt() == 1);
     CHECK(indented.value(QStringLiteral("cursorPosition")).toInt() == 2);
-    CHECK(model->data(model->index(1, 0), OutlineEntryModel::DepthRole).toInt() == 1);
-    CHECK(model->data(model->index(0, 0), OutlineEntryModel::HasChildrenRole).toBool());
-    CHECK_FALSE(model->data(model->index(0, 0), OutlineEntryModel::CanDeleteRole).toBool());
-    CHECK(model->data(model->index(1, 0), OutlineEntryModel::CanOutdentRole).toBool());
+    CHECK(
+        model->data(model->index(1, 0), OutlineEntryModel::DepthRole).toInt() ==
+        1);
+    CHECK(model->data(model->index(0, 0), OutlineEntryModel::HasChildrenRole)
+              .toBool());
+    CHECK_FALSE(
+        model->data(model->index(0, 0), OutlineEntryModel::CanDeleteRole)
+            .toBool());
+    CHECK(model->data(model->index(1, 0), OutlineEntryModel::CanOutdentRole)
+              .toBool());
 
-    const auto split = controller.splitOutlineEntry(childId, QStringLiteral("child"), 2);
+    const auto split =
+        controller.splitOutlineEntry(childId, QStringLiteral("child"), 2);
     REQUIRE(split.value(QStringLiteral("succeeded")).toBool());
     const auto splitRow = split.value(QStringLiteral("row")).toInt();
     CHECK(splitRow == 2);
-    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole).toString() ==
-          QStringLiteral("ch"));
-    CHECK(model->data(model->index(splitRow, 0), OutlineEntryModel::AuthoredTextRole).toString() ==
-          QStringLiteral("ild"));
-    CHECK(model->data(model->index(splitRow, 0), OutlineEntryModel::DepthRole).toInt() == 1);
+    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("ch"));
+    CHECK(model
+              ->data(model->index(splitRow, 0),
+                     OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("ild"));
+    CHECK(model->data(model->index(splitRow, 0), OutlineEntryModel::DepthRole)
+              .toInt() == 1);
 
-    const auto joined =
-        controller.joinOutlineEntry(controller.outlineEntryId(splitRow), QStringLiteral("ild"));
+    const auto joined = controller.joinOutlineEntry(
+        controller.outlineEntryId(splitRow), QStringLiteral("ild"));
     REQUIRE(joined.value(QStringLiteral("succeeded")).toBool());
     CHECK(joined.value(QStringLiteral("row")).toInt() == 1);
     CHECK(joined.value(QStringLiteral("cursorPosition")).toInt() == 2);
-    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole).toString() ==
-          QStringLiteral("child"));
+    CHECK(model->data(model->index(1, 0), OutlineEntryModel::AuthoredTextRole)
+              .toString() == QStringLiteral("child"));
 
-    const auto rejectedDelete = controller.deleteOutlineEntry(controller.outlineEntryId(0));
+    const auto rejectedDelete =
+        controller.deleteOutlineEntry(controller.outlineEntryId(0));
     CHECK_FALSE(rejectedDelete.value(QStringLiteral("succeeded")).toBool());
     CHECK_FALSE(controller.errorMessage().isEmpty());
     const auto deleted = controller.deleteOutlineEntry(childId);
@@ -563,22 +677,30 @@ TEST_CASE("the Qt adapter exposes and edits nested Journal structure") {
     CHECK(model->rowCount() == 2);
 }
 
-TEST_CASE("the Qt adapter preserves multiline cursor positions and formats selected subtrees") {
+TEST_CASE("the Qt adapter preserves multiline cursor positions and formats "
+          "selected subtrees")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "selection-adapter.hieda"));
-    REQUIRE(controller.insertOutlineEntry(QStringLiteral("parent\ncontinuation")) == 0);
-    REQUIRE(controller.insertOutlineEntry(QStringLiteral("child \U0001F3B4")) == 1);
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "selection-adapter.hieda"));
+    REQUIRE(controller.insertOutlineEntry(
+                QStringLiteral("parent\ncontinuation")) == 0);
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("child \U0001F3B4")) ==
+            1);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("tail")) == 2);
     const auto parentId = controller.outlineEntryId(0);
     const auto childId = controller.outlineEntryId(1);
     const auto tailId = controller.outlineEntryId(2);
-    REQUIRE(controller.indentOutlineEntry(childId, QStringLiteral("child \U0001F3B4"), 8)
-                .value(QStringLiteral("succeeded"))
-                .toBool());
+    REQUIRE(
+        controller
+            .indentOutlineEntry(childId, QStringLiteral("child \U0001F3B4"), 8)
+            .value(QStringLiteral("succeeded"))
+            .toBool());
 
     const auto parentSelection = controller.outlineEntrySelection(0, 0);
-    CHECK(parentSelection.value(QStringLiteral("roots")).toStringList() == QStringList{parentId});
+    CHECK(parentSelection.value(QStringLiteral("roots")).toStringList() ==
+          QStringList{parentId});
     CHECK(parentSelection.value(QStringLiteral("entries")).toStringList() ==
           QStringList{parentId, childId});
     const auto extendedSelection = controller.outlineEntrySelection(0, 2);
@@ -588,23 +710,29 @@ TEST_CASE("the Qt adapter preserves multiline cursor positions and formats selec
           QStringList{parentId, childId, tailId});
 
     CHECK(controller.outlineSelectionText({parentId, childId, tailId}) ==
-          QStringLiteral("\u2022 parent\n  continuation\n  \u2022 child \U0001F3B4\n\u2022 tail"));
+          QStringLiteral("\u2022 parent\n  continuation\n  \u2022 child "
+                         "\U0001F3B4\n\u2022 tail"));
 
-    const auto split =
-        controller.splitOutlineEntry(parentId, QStringLiteral("parent\ncontinuation"), 7);
+    const auto split = controller.splitOutlineEntry(
+        parentId, QStringLiteral("parent\ncontinuation"), 7);
     REQUIRE(split.value(QStringLiteral("succeeded")).toBool());
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("parent\n"));
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(2, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(2, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("continuation"));
 }
 
-TEST_CASE("the Qt adapter cuts selected Journal subtrees and returns predictable focus") {
+TEST_CASE("the Qt adapter cuts selected Journal subtrees and returns "
+          "predictable focus")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "cut-adapter.hieda"));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "cut-adapter.hieda"));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("parent")) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("child")) == 1);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("tail")) == 2);
@@ -621,28 +749,35 @@ TEST_CASE("the Qt adapter cuts selected Journal subtrees and returns predictable
     CHECK(cut.value(QStringLiteral("cursorPosition")).toInt() == 0);
     REQUIRE(controller.outlineEntries()->rowCount() == 1);
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("tail"));
-    REQUIRE(controller.undoOutlineEdit().value(QStringLiteral("succeeded")).toBool());
+    REQUIRE(controller.undoOutlineEdit()
+                .value(QStringLiteral("succeeded"))
+                .toBool());
     CHECK(controller.outlineEntries()->rowCount() == 3);
 
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("last parent")) == 3);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("last child")) == 4);
     const auto lastParentId = controller.outlineEntryId(3);
     const auto lastChildId = controller.outlineEntryId(4);
-    REQUIRE(controller.indentOutlineEntry(lastChildId, QStringLiteral("last child"), 10)
-                .value(QStringLiteral("succeeded"))
-                .toBool());
+    REQUIRE(
+        controller
+            .indentOutlineEntry(lastChildId, QStringLiteral("last child"), 10)
+            .value(QStringLiteral("succeeded"))
+            .toBool());
     const auto trailingCut = controller.deleteOutlineSubtrees({lastParentId});
     REQUIRE(trailingCut.value(QStringLiteral("succeeded")).toBool());
     CHECK(trailingCut.value(QStringLiteral("row")).toInt() == 2);
     CHECK(trailingCut.value(QStringLiteral("cursorPosition")).toInt() == 4);
 }
 
-TEST_CASE("the Qt adapter exposes and applies Journal undo and redo") {
+TEST_CASE("the Qt adapter exposes and applies Journal undo and redo")
+{
     TemporaryDirectory temporaryDirectory;
     NotebookController controller;
-    controller.createNotebook(localFileUrl(temporaryDirectory.path() / "undo-adapter.hieda"));
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "undo-adapter.hieda"));
     CHECK_FALSE(controller.canUndo());
     CHECK_FALSE(controller.canRedo());
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("first")) == 0);
@@ -653,14 +788,16 @@ TEST_CASE("the Qt adapter exposes and applies Journal undo and redo") {
     const auto undone = controller.undoOutlineEdit();
     REQUIRE(undone.value(QStringLiteral("succeeded")).toBool());
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("first"));
     CHECK(controller.canRedo());
 
     const auto redone = controller.redoOutlineEdit();
     REQUIRE(redone.value(QStringLiteral("succeeded")).toBool());
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("changed"));
     CHECK_FALSE(controller.canRedo());
 }

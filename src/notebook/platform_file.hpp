@@ -40,11 +40,13 @@ class ExclusiveFileLock final {
 
     std::unique_ptr<Impl> impl_;
 
-    friend auto acquireExclusiveFileLock(const std::filesystem::path& path, bool create)
+    friend auto acquireExclusiveFileLock(const std::filesystem::path& path,
+                                         bool create)
         -> std::variant<ExclusiveFileLock, FileError>;
 };
 
-[[nodiscard]] auto acquireExclusiveFileLock(const std::filesystem::path& path, bool create)
+[[nodiscard]] auto acquireExclusiveFileLock(const std::filesystem::path& path,
+                                            bool create)
     -> std::variant<ExclusiveFileLock, FileError>;
 [[nodiscard]] auto publishNewFile(const std::filesystem::path& temporaryPath,
                                   const std::filesystem::path& destinationPath)

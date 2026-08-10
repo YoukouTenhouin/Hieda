@@ -15,7 +15,9 @@
 
 namespace {
 
-auto localPath(const QUrl& url) -> std::filesystem::path {
+auto
+localPath(const QUrl& url) -> std::filesystem::path
+{
 #ifdef _WIN32
     return std::filesystem::path(url.toLocalFile().toStdWString());
 #else
@@ -24,7 +26,9 @@ auto localPath(const QUrl& url) -> std::filesystem::path {
 #endif
 }
 
-auto displayPath(const std::filesystem::path& path) -> QString {
+auto
+displayPath(const std::filesystem::path& path) -> QString
+{
 #ifdef _WIN32
     return QString::fromStdWString(path.native());
 #else
@@ -32,12 +36,16 @@ auto displayPath(const std::filesystem::path& path) -> QString {
 #endif
 }
 
-auto domainJournalDate(const QDate& date) -> hieda::notebook::JournalDate {
+auto
+domainJournalDate(const QDate& date) -> hieda::notebook::JournalDate
+{
     return {date.year(), static_cast<std::uint8_t>(date.month()),
             static_cast<std::uint8_t>(date.day())};
 }
 
-auto blockId(const QString& text) -> std::optional<hieda::notebook::BlockId> {
+auto
+blockId(const QString& text) -> std::optional<hieda::notebook::BlockId>
+{
     const auto compact = QString(text).remove(QLatin1Char('-'));
     if (compact.size() != 32) {
         return std::nullopt;
@@ -49,16 +57,22 @@ auto blockId(const QString& text) -> std::optional<hieda::notebook::BlockId> {
         if (!valid) {
             return std::nullopt;
         }
-        id.bytes[static_cast<std::size_t>(index / 2)] = static_cast<std::byte>(byte);
+        id.bytes[static_cast<std::size_t>(index / 2)] =
+            static_cast<std::byte>(byte);
     }
     return id;
 }
 
-auto displayId(const hieda::notebook::BlockId& blockIdentifier) -> QString {
+auto
+displayId(const hieda::notebook::BlockId& blockIdentifier) -> QString
+{
     return QString::fromStdString(blockIdentifier.toString());
 }
 
-auto outlineOutcome(bool succeeded, int row = -1, int cursorPosition = 0) -> QVariantMap {
+auto
+outlineOutcome(bool succeeded, int row = -1, int cursorPosition = 0)
+    -> QVariantMap
+{
     return {{QStringLiteral("succeeded"), succeeded},
             {QStringLiteral("row"), row},
             {QStringLiteral("cursorPosition"), cursorPosition}};
@@ -69,45 +83,58 @@ struct CommittedEntryPosition {
     std::size_t byteOffset{0};
 };
 
-auto committedEntryPosition(const OutlineEntryModel& entries, const QString& entryIdText,
-                            int characterOffset, const QString& editorText)
-    -> std::optional<CommittedEntryPosition> {
+auto
+committedEntryPosition(const OutlineEntryModel& entries,
+                       const QString& entryIdText, int characterOffset,
+                       const QString& editorText)
+    -> std::optional<CommittedEntryPosition>
+{
     const auto entryId = blockId(entryIdText);
     const auto row = entryId ? entries.rowForId(*entryId) : -1;
-    if (!entryId || row < 0 || characterOffset < 0 || characterOffset > editorText.size() ||
+    if (!entryId || row < 0 || characterOffset < 0 ||
+        characterOffset > editorText.size() ||
         editorText != entries.entryText(row)) {
         return std::nullopt;
     }
     return CommittedEntryPosition{
-        *entryId, static_cast<std::size_t>(editorText.first(characterOffset).toUtf8().size())};
+        *entryId, static_cast<std::size_t>(
+                      editorText.first(characterOffset).toUtf8().size())};
 }
 
 template <typename Occurrence>
-auto linkedReferenceSnippet(std::string_view authoredText, const Occurrence& occurrence)
-    -> QString {
-    const auto lineStart = authoredText.rfind('\n', occurrence.sourceByteOffset);
-    const auto lineEnd =
-        authoredText.find('\n', occurrence.sourceByteOffset + occurrence.sourceByteLength);
+auto
+linkedReferenceSnippet(std::string_view authoredText,
+                       const Occurrence& occurrence) -> QString
+{
+    const auto lineStart =
+        authoredText.rfind('\n', occurrence.sourceByteOffset);
+    const auto lineEnd = authoredText.find(
+        '\n', occurrence.sourceByteOffset + occurrence.sourceByteLength);
     const auto unboundedStart =
         lineStart == std::string_view::npos ? std::size_t{0} : lineStart + 1;
     auto snippetStart = unboundedStart;
-    const auto boundedLineEnd = lineEnd == std::string_view::npos ? authoredText.size() : lineEnd;
+    const auto boundedLineEnd =
+        lineEnd == std::string_view::npos ? authoredText.size() : lineEnd;
     if (occurrence.sourceByteOffset > snippetStart + 60) {
         snippetStart = occurrence.sourceByteOffset - 60;
         while (snippetStart < occurrence.sourceByteOffset &&
-               (static_cast<unsigned char>(authoredText[snippetStart]) & 0xC0U) == 0x80U) {
+               (static_cast<unsigned char>(authoredText[snippetStart]) &
+                0xC0U) == 0x80U) {
             ++snippetStart;
         }
     }
     auto snippetEnd = std::min(boundedLineEnd, occurrence.sourceByteOffset +
-                                                   occurrence.sourceByteLength + std::size_t{60});
+                                                   occurrence.sourceByteLength +
+                                                   std::size_t{60});
     while (snippetEnd < boundedLineEnd &&
-           (static_cast<unsigned char>(authoredText[snippetEnd]) & 0xC0U) == 0x80U) {
+           (static_cast<unsigned char>(authoredText[snippetEnd]) & 0xC0U) ==
+               0x80U) {
         ++snippetEnd;
     }
-    auto snippet = QString::fromUtf8(authoredText.data() + snippetStart,
-                                     static_cast<qsizetype>(snippetEnd - snippetStart))
-                       .toHtmlEscaped();
+    auto snippet =
+        QString::fromUtf8(authoredText.data() + snippetStart,
+                          static_cast<qsizetype>(snippetEnd - snippetStart))
+            .toHtmlEscaped();
     if (snippetStart > unboundedStart) {
         snippet.prepend(QStringLiteral("…"));
     }
@@ -118,24 +145,35 @@ auto linkedReferenceSnippet(std::string_view authoredText, const Occurrence& occ
 }
 
 template <typename DomainEntry>
-auto asOutlineEntries(const std::vector<DomainEntry>& domainEntries) -> std::vector<OutlineEntry> {
+auto
+asOutlineEntries(const std::vector<DomainEntry>& domainEntries)
+    -> std::vector<OutlineEntry>
+{
     std::vector<OutlineEntry> entries;
     entries.reserve(domainEntries.size());
     for (const auto& entry : domainEntries) {
-        entries.push_back({entry.metadata, entry.authoredText, entry.parentEntry});
+        entries.push_back(
+            {entry.metadata, entry.authoredText, entry.parentEntry});
     }
     return entries;
 }
 
 } // namespace
 
-OutlineEntryModel::OutlineEntryModel(QObject* parent) : QAbstractListModel(parent) {}
+OutlineEntryModel::OutlineEntryModel(QObject* parent)
+    : QAbstractListModel(parent)
+{
+}
 
-auto OutlineEntryModel::rowCount(const QModelIndex& parent) const -> int {
+auto
+OutlineEntryModel::rowCount(const QModelIndex& parent) const -> int
+{
     return parent.isValid() ? 0 : static_cast<int>(entries_.size());
 }
 
-auto OutlineEntryModel::data(const QModelIndex& index, int role) const -> QVariant {
+auto
+OutlineEntryModel::data(const QModelIndex& index, int role) const -> QVariant
+{
     if (!index.isValid() || index.row() < 0 ||
         static_cast<std::size_t>(index.row()) >= entries_.size()) {
         return {};
@@ -145,8 +183,9 @@ auto OutlineEntryModel::data(const QModelIndex& index, int role) const -> QVaria
         return displayId(entry.metadata.id);
     }
     if (role == AuthoredTextRole) {
-        return QString::fromUtf8(entry.authoredText.data(),
-                                 static_cast<qsizetype>(entry.authoredText.size()));
+        return QString::fromUtf8(
+            entry.authoredText.data(),
+            static_cast<qsizetype>(entry.authoredText.size()));
     }
     if (role == ParentEntryIdRole) {
         return entry.parentEntry ? displayId(*entry.parentEntry) : QString{};
@@ -167,14 +206,16 @@ auto OutlineEntryModel::data(const QModelIndex& index, int role) const -> QVaria
         return entry.linkedReferenceHasMoreOccurrences;
     }
     const auto parent = entry.parentEntry;
-    const auto hasChildren = std::ranges::any_of(entries_, [&](const auto& candidate) -> bool {
-        return candidate.parentEntry == entry.metadata.id;
-    });
+    const auto hasChildren =
+        std::ranges::any_of(entries_, [&](const auto& candidate) -> bool {
+            return candidate.parentEntry == entry.metadata.id;
+        });
     const auto depth = entryDepth(index.row());
     bool hasPreviousSibling = false;
     bool hasNextSibling = false;
     for (std::size_t row = 0; row < entries_.size(); ++row) {
-        if (entries_[row].parentEntry != parent || entries_[row].metadata.id == entry.metadata.id) {
+        if (entries_[row].parentEntry != parent ||
+            entries_[row].metadata.id == entry.metadata.id) {
             continue;
         }
         if (std::cmp_less(row, index.row())) {
@@ -204,31 +245,39 @@ auto OutlineEntryModel::data(const QModelIndex& index, int role) const -> QVaria
     return {};
 }
 
-auto OutlineEntryModel::roleNames() const -> QHash<int, QByteArray> {
-    return {{EntryIdRole, "entryId"},
-            {AuthoredTextRole, "authoredText"},
-            {ParentEntryIdRole, "parentEntryId"},
-            {DepthRole, "depth"},
-            {HasChildrenRole, "hasChildren"},
-            {CanIndentRole, "canIndent"},
-            {CanOutdentRole, "canOutdent"},
-            {CanMoveUpRole, "canMoveUp"},
-            {CanMoveDownRole, "canMoveDown"},
-            {CanDeleteRole, "canDelete"},
-            {LinkedReferenceContextRole, "linkedReferenceContext"},
-            {LinkedReferenceGroupRole, "linkedReferenceGroup"},
-            {LinkedReferencePresentationRole, "linkedReferencePresentation"},
-            {LinkedReferenceOccurrenceCountRole, "linkedReferenceOccurrenceCount"},
-            {LinkedReferenceHasMoreOccurrencesRole, "linkedReferenceHasMoreOccurrences"}};
+auto
+OutlineEntryModel::roleNames() const -> QHash<int, QByteArray>
+{
+    return {
+        {EntryIdRole, "entryId"},
+        {AuthoredTextRole, "authoredText"},
+        {ParentEntryIdRole, "parentEntryId"},
+        {DepthRole, "depth"},
+        {HasChildrenRole, "hasChildren"},
+        {CanIndentRole, "canIndent"},
+        {CanOutdentRole, "canOutdent"},
+        {CanMoveUpRole, "canMoveUp"},
+        {CanMoveDownRole, "canMoveDown"},
+        {CanDeleteRole, "canDelete"},
+        {LinkedReferenceContextRole, "linkedReferenceContext"},
+        {LinkedReferenceGroupRole, "linkedReferenceGroup"},
+        {LinkedReferencePresentationRole, "linkedReferencePresentation"},
+        {LinkedReferenceOccurrenceCountRole, "linkedReferenceOccurrenceCount"},
+        {LinkedReferenceHasMoreOccurrencesRole,
+         "linkedReferenceHasMoreOccurrences"}};
 }
 
-void OutlineEntryModel::setEntries(std::vector<OutlineEntry> entries) {
+void
+OutlineEntryModel::setEntries(std::vector<OutlineEntry> entries)
+{
     beginResetModel();
     entries_ = std::move(entries);
     endResetModel();
 }
 
-void OutlineEntryModel::appendEntries(std::vector<OutlineEntry> entries) {
+void
+OutlineEntryModel::appendEntries(std::vector<OutlineEntry> entries)
+{
     if (entries.empty()) {
         return;
     }
@@ -240,7 +289,9 @@ void OutlineEntryModel::appendEntries(std::vector<OutlineEntry> entries) {
     endInsertRows();
 }
 
-void OutlineEntryModel::insertEntry(int row, OutlineEntry entry) {
+void
+OutlineEntryModel::insertEntry(int row, OutlineEntry entry)
+{
     if (row < 0 || row > rowCount()) {
         return;
     }
@@ -249,15 +300,19 @@ void OutlineEntryModel::insertEntry(int row, OutlineEntry entry) {
     endInsertRows();
     if (!entries_.empty()) {
         emit dataChanged(index(0), index(rowCount() - 1),
-                         {DepthRole, HasChildrenRole, CanIndentRole, CanOutdentRole, CanMoveUpRole,
-                          CanMoveDownRole, CanDeleteRole});
+                         {DepthRole, HasChildrenRole, CanIndentRole,
+                          CanOutdentRole, CanMoveUpRole, CanMoveDownRole,
+                          CanDeleteRole});
     }
 }
 
-void OutlineEntryModel::updateEntry(const OutlineEntry& entry) {
-    const auto found = std::ranges::find_if(entries_, [&](const auto& current) -> bool {
-        return current.metadata.id == entry.metadata.id;
-    });
+void
+OutlineEntryModel::updateEntry(const OutlineEntry& entry)
+{
+    const auto found =
+        std::ranges::find_if(entries_, [&](const auto& current) -> bool {
+            return current.metadata.id == entry.metadata.id;
+        });
     if (found == entries_.end()) {
         return;
     }
@@ -267,11 +322,15 @@ void OutlineEntryModel::updateEntry(const OutlineEntry& entry) {
     emit dataChanged(changed, changed, {AuthoredTextRole});
 }
 
-void OutlineEntryModel::appendLinkedReferencePresentation(const hieda::notebook::BlockId& entryId,
-                                                          const QString& presentation,
-                                                          bool hasMore) {
-    const auto found = std::ranges::find_if(
-        entries_, [&](const auto& current) -> bool { return current.metadata.id == entryId; });
+void
+OutlineEntryModel::appendLinkedReferencePresentation(
+    const hieda::notebook::BlockId& entryId, const QString& presentation,
+    bool hasMore)
+{
+    const auto found =
+        std::ranges::find_if(entries_, [&](const auto& current) -> bool {
+            return current.metadata.id == entryId;
+        });
     if (found == entries_.end()) {
         return;
     }
@@ -285,17 +344,22 @@ void OutlineEntryModel::appendLinkedReferencePresentation(const hieda::notebook:
     const auto row = static_cast<int>(std::distance(entries_.begin(), found));
     const auto changed = index(row);
     emit dataChanged(changed, changed,
-                     {LinkedReferencePresentationRole, LinkedReferenceHasMoreOccurrencesRole});
+                     {LinkedReferencePresentationRole,
+                      LinkedReferenceHasMoreOccurrencesRole});
 }
 
-auto OutlineEntryModel::entryId(int row) const -> QString {
+auto
+OutlineEntryModel::entryId(int row) const -> QString
+{
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return {};
     }
     return displayId(entries_[static_cast<std::size_t>(row)].metadata.id);
 }
 
-auto OutlineEntryModel::entryText(int row) const -> QString {
+auto
+OutlineEntryModel::entryText(int row) const -> QString
+{
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return {};
     }
@@ -303,7 +367,9 @@ auto OutlineEntryModel::entryText(int row) const -> QString {
     return QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
 }
 
-auto OutlineEntryModel::entryParentId(int row) const -> QString {
+auto
+OutlineEntryModel::entryParentId(int row) const -> QString
+{
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return {};
     }
@@ -311,7 +377,9 @@ auto OutlineEntryModel::entryParentId(int row) const -> QString {
     return parent ? displayId(*parent) : QString{};
 }
 
-auto OutlineEntryModel::entryDepth(int row) const -> int {
+auto
+OutlineEntryModel::entryDepth(int row) const -> int
+{
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return 0;
     }
@@ -319,15 +387,18 @@ auto OutlineEntryModel::entryDepth(int row) const -> int {
     auto ancestor = entries_[static_cast<std::size_t>(row)].parentEntry;
     while (ancestor) {
         ++depth;
-        const auto found = std::ranges::find_if(entries_, [&](const auto& candidate) -> bool {
-            return candidate.metadata.id == *ancestor;
-        });
+        const auto found =
+            std::ranges::find_if(entries_, [&](const auto& candidate) -> bool {
+                return candidate.metadata.id == *ancestor;
+            });
         ancestor = found == entries_.end() ? std::nullopt : found->parentEntry;
     }
     return depth;
 }
 
-auto OutlineEntryModel::subtreeEnd(int row) const -> int {
+auto
+OutlineEntryModel::subtreeEnd(int row) const -> int
+{
     if (row < 0 || static_cast<std::size_t>(row) >= entries_.size()) {
         return row;
     }
@@ -339,70 +410,107 @@ auto OutlineEntryModel::subtreeEnd(int row) const -> int {
     return end;
 }
 
-auto OutlineEntryModel::rowForId(const hieda::notebook::BlockId& identifier) const -> int {
-    const auto found = std::ranges::find_if(
-        entries_, [&](const auto& entry) -> bool { return entry.metadata.id == identifier; });
-    return found == entries_.end() ? -1 : static_cast<int>(std::distance(entries_.begin(), found));
+auto
+OutlineEntryModel::rowForId(const hieda::notebook::BlockId& identifier) const
+    -> int
+{
+    const auto found =
+        std::ranges::find_if(entries_, [&](const auto& entry) -> bool {
+            return entry.metadata.id == identifier;
+        });
+    return found == entries_.end()
+               ? -1
+               : static_cast<int>(std::distance(entries_.begin(), found));
 }
 
-PageHierarchyModel::PageHierarchyModel(QObject* parent) : QAbstractItemModel(parent) {}
-
-auto PageHierarchyModel::node(const QModelIndex& index) -> Node* {
-    return index.isValid() ? static_cast<Node*>(index.internalPointer()) : nullptr;
+PageHierarchyModel::PageHierarchyModel(QObject* parent)
+    : QAbstractItemModel(parent)
+{
 }
 
-auto PageHierarchyModel::children(Node* parent) -> std::vector<std::unique_ptr<Node>>& {
+auto
+PageHierarchyModel::node(const QModelIndex& index) -> Node*
+{
+    return index.isValid() ? static_cast<Node*>(index.internalPointer())
+                           : nullptr;
+}
+
+auto
+PageHierarchyModel::children(Node* parent)
+    -> std::vector<std::unique_ptr<Node>>&
+{
     return parent == nullptr ? roots_ : parent->children;
 }
 
-auto PageHierarchyModel::children(const Node* parent) const
-    -> const std::vector<std::unique_ptr<Node>>& {
+auto
+PageHierarchyModel::children(const Node* parent) const
+    -> const std::vector<std::unique_ptr<Node>>&
+{
     return parent == nullptr ? roots_ : parent->children;
 }
 
-auto PageHierarchyModel::index(int row, int column, const QModelIndex& parentIndex) const
-    -> QModelIndex {
+auto
+PageHierarchyModel::index(int row, int column,
+                          const QModelIndex& parentIndex) const -> QModelIndex
+{
     if (row < 0 || column != 0) {
         return {};
     }
     const auto& siblings = children(node(parentIndex));
     return static_cast<std::size_t>(row) < siblings.size()
-               ? createIndex(row, column, siblings[static_cast<std::size_t>(row)].get())
+               ? createIndex(row, column,
+                             siblings[static_cast<std::size_t>(row)].get())
                : QModelIndex{};
 }
 
-auto PageHierarchyModel::parent(const QModelIndex& child) const -> QModelIndex {
+auto
+PageHierarchyModel::parent(const QModelIndex& child) const -> QModelIndex
+{
     const auto* childNode = node(child);
     if (childNode == nullptr || childNode->parent == nullptr) {
         return {};
     }
     const auto* parentNode = childNode->parent;
     const auto& siblings = children(parentNode->parent);
-    const auto found = std::ranges::find_if(
-        siblings, [&](const auto& candidate) -> bool { return candidate.get() == parentNode; });
+    const auto found =
+        std::ranges::find_if(siblings, [&](const auto& candidate) -> bool {
+            return candidate.get() == parentNode;
+        });
     return found == siblings.end()
                ? QModelIndex{}
-               : createIndex(static_cast<int>(std::distance(siblings.begin(), found)), 0,
-                             const_cast<Node*>(parentNode));
+               : createIndex(
+                     static_cast<int>(std::distance(siblings.begin(), found)),
+                     0, const_cast<Node*>(parentNode));
 }
 
-auto PageHierarchyModel::rowCount(const QModelIndex& parentIndex) const -> int {
-    return parentIndex.column() > 0 ? 0 : static_cast<int>(children(node(parentIndex)).size());
+auto
+PageHierarchyModel::rowCount(const QModelIndex& parentIndex) const -> int
+{
+    return parentIndex.column() > 0
+               ? 0
+               : static_cast<int>(children(node(parentIndex)).size());
 }
 
-auto PageHierarchyModel::hasChildren(const QModelIndex& parentIndex) const -> bool {
+auto
+PageHierarchyModel::hasChildren(const QModelIndex& parentIndex) const -> bool
+{
     if (!parentIndex.isValid()) {
         return !roots_.empty();
     }
     const auto* parentNode = node(parentIndex);
-    return parentIndex.column() == 0 && parentNode != nullptr && parentNode->node.hasChildren;
+    return parentIndex.column() == 0 && parentNode != nullptr &&
+           parentNode->node.hasChildren;
 }
 
-auto PageHierarchyModel::columnCount(const QModelIndex& /*parent*/) const -> int {
+auto
+PageHierarchyModel::columnCount(const QModelIndex& /*parent*/) const -> int
+{
     return 1;
 }
 
-auto PageHierarchyModel::data(const QModelIndex& index, int role) const -> QVariant {
+auto
+PageHierarchyModel::data(const QModelIndex& index, int role) const -> QVariant
+{
     const auto* item = node(index);
     if (item == nullptr) {
         return {};
@@ -410,8 +518,9 @@ auto PageHierarchyModel::data(const QModelIndex& index, int role) const -> QVari
     const auto& hierarchyNode = item->node;
     const auto name = QString::fromUtf8(hierarchyNode.name);
     const auto segment = QString::fromUtf8(hierarchyNode.localSegment);
-    const auto title =
-        hierarchyNode.page ? QString::fromUtf8(hierarchyNode.page->displayTitle) : QString{};
+    const auto title = hierarchyNode.page
+                           ? QString::fromUtf8(hierarchyNode.page->displayTitle)
+                           : QString{};
     switch (role) {
     case Qt::DisplayRole:
         return hierarchyNode.page ? tr("%1 — %2").arg(title, segment)
@@ -432,14 +541,18 @@ auto PageHierarchyModel::data(const QModelIndex& index, int role) const -> QVari
         return currentName_ == hierarchyNode.name;
     case AccessibleDescriptionRole:
         return hierarchyNode.page
-                   ? tr("Page %1, local segment %2, full Page Name %3").arg(title, segment, name)
-                   : tr("Page Preview %1, full Page Name %2, not materialized").arg(segment, name);
+                   ? tr("Page %1, local segment %2, full Page Name %3")
+                         .arg(title, segment, name)
+                   : tr("Page Preview %1, full Page Name %2, not materialized")
+                         .arg(segment, name);
     default:
         return {};
     }
 }
 
-auto PageHierarchyModel::roleNames() const -> QHash<int, QByteArray> {
+auto
+PageHierarchyModel::roleNames() const -> QHash<int, QByteArray>
+{
     return {{Qt::DisplayRole, "display"},
             {PageNameRole, "pageName"},
             {LocalSegmentRole, "localSegment"},
@@ -451,11 +564,15 @@ auto PageHierarchyModel::roleNames() const -> QHash<int, QByteArray> {
             {AccessibleDescriptionRole, "accessibleDescription"}};
 }
 
-void PageHierarchyModel::attach(hieda::notebook::NotebookSession* session) {
+void
+PageHierarchyModel::attach(hieda::notebook::NotebookSession* session)
+{
     session_ = session;
 }
 
-void PageHierarchyModel::clear() {
+void
+PageHierarchyModel::clear()
+{
     beginResetModel();
     roots_.clear();
     rootContinuationCursor_.reset();
@@ -464,12 +581,16 @@ void PageHierarchyModel::clear() {
     endResetModel();
 }
 
-auto PageHierarchyModel::loadNextBatch(Node* parentNode) -> bool {
+auto
+PageHierarchyModel::loadNextBatch(Node* parentNode) -> bool
+{
     auto& loaded = parentNode == nullptr ? rootsLoaded_ : parentNode->loaded;
-    auto& cursor = parentNode == nullptr ? rootContinuationCursor_ : parentNode->continuationCursor;
+    auto& cursor = parentNode == nullptr ? rootContinuationCursor_
+                                         : parentNode->continuationCursor;
     const auto result = session_->pageHierarchyChildren(
-        parentNode == nullptr ? std::optional<std::string>{}
-                              : std::optional<std::string>{parentNode->node.name},
+        parentNode == nullptr
+            ? std::optional<std::string>{}
+            : std::optional<std::string>{parentNode->node.name},
         cursor);
     if (!result) {
         return false;
@@ -487,29 +608,39 @@ auto PageHierarchyModel::loadNextBatch(Node* parentNode) -> bool {
     return true;
 }
 
-auto PageHierarchyModel::canFetchMore(const QModelIndex& parentIndex) const -> bool {
+auto
+PageHierarchyModel::canFetchMore(const QModelIndex& parentIndex) const -> bool
+{
     const auto* parentNode = node(parentIndex);
     return session_ != nullptr && session_->isOpen() &&
            (parentNode == nullptr
                 ? !rootsLoaded_ || rootContinuationCursor_.has_value()
-                : !parentNode->loaded || parentNode->continuationCursor.has_value());
+                : !parentNode->loaded ||
+                      parentNode->continuationCursor.has_value());
 }
 
-void PageHierarchyModel::fetchMore(const QModelIndex& parentIndex) {
+void
+PageHierarchyModel::fetchMore(const QModelIndex& parentIndex)
+{
     if (session_ == nullptr || !session_->isOpen()) {
         return;
     }
     auto* parentNode = node(parentIndex);
-    const auto parentName = parentNode == nullptr
-                                ? std::optional<std::string>{}
-                                : std::optional<std::string>{parentNode->node.name};
-    auto& cursor = parentNode == nullptr ? rootContinuationCursor_ : parentNode->continuationCursor;
+    const auto parentName =
+        parentNode == nullptr
+            ? std::optional<std::string>{}
+            : std::optional<std::string>{parentNode->node.name};
+    auto& cursor = parentNode == nullptr ? rootContinuationCursor_
+                                         : parentNode->continuationCursor;
     const auto batch = session_->pageHierarchyChildren(parentName, cursor);
     if (!batch) {
-        if (batch.error().code == hieda::notebook::NotebookErrorCode::staleHierarchyCursor) {
+        if (batch.error().code ==
+            hieda::notebook::NotebookErrorCode::staleHierarchyCursor) {
             QMetaObject::invokeMethod(
                 this,
-                [this]() -> void { static_cast<void>(refresh(QString::fromUtf8(currentName_))); },
+                [this]() -> void {
+                    static_cast<void>(refresh(QString::fromUtf8(currentName_)));
+                },
                 Qt::QueuedConnection);
         }
         return;
@@ -543,13 +674,16 @@ void PageHierarchyModel::fetchMore(const QModelIndex& parentIndex) {
     endInsertRows();
 }
 
-auto PageHierarchyModel::findNode(std::string_view pageName) const -> Node* {
+auto
+PageHierarchyModel::findNode(std::string_view pageName) const -> Node*
+{
     const auto findIn = [&](const auto& self, const auto& candidates) -> Node* {
         for (const auto& candidate : candidates) {
             if (candidate->node.name == pageName) {
                 return candidate.get();
             }
-            if (auto* found = self(self, candidate->children); found != nullptr) {
+            if (auto* found = self(self, candidate->children);
+                found != nullptr) {
                 return found;
             }
         }
@@ -558,7 +692,9 @@ auto PageHierarchyModel::findNode(std::string_view pageName) const -> Node* {
     return findIn(findIn, roots_);
 }
 
-auto PageHierarchyModel::loadCurrentPath() -> bool {
+auto
+PageHierarchyModel::loadCurrentPath() -> bool
+{
     Node* parentNode = nullptr;
     std::size_t segmentEnd = currentName_.find('/');
     while (!currentName_.empty()) {
@@ -566,7 +702,8 @@ auto PageHierarchyModel::loadCurrentPath() -> bool {
         const auto hasMore = [&]() -> bool {
             return parentNode == nullptr
                        ? !rootsLoaded_ || rootContinuationCursor_.has_value()
-                       : !parentNode->loaded || parentNode->continuationCursor.has_value();
+                       : !parentNode->loaded ||
+                             parentNode->continuationCursor.has_value();
         };
         while (findNode(targetName) == nullptr && hasMore()) {
             if (!loadNextBatch(parentNode)) {
@@ -582,14 +719,18 @@ auto PageHierarchyModel::loadCurrentPath() -> bool {
     return true;
 }
 
-auto PageHierarchyModel::refresh(const QString& currentName) -> bool {
+auto
+PageHierarchyModel::refresh(const QString& currentName) -> bool
+{
     const auto utf8 = currentName.toUtf8();
-    currentName_.assign(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+    currentName_.assign(utf8.constData(),
+                        static_cast<std::size_t>(utf8.size()));
     beginResetModel();
     roots_.clear();
     rootContinuationCursor_.reset();
     rootsLoaded_ = false;
-    auto succeeded = session_ == nullptr || !session_->isOpen() || loadNextBatch(nullptr);
+    auto succeeded =
+        session_ == nullptr || !session_->isOpen() || loadNextBatch(nullptr);
     if (succeeded && !currentName_.empty()) {
         const auto exact = session_->pageHierarchyNode(currentName_);
         succeeded = exact && (!exact.value() || loadCurrentPath());
@@ -598,29 +739,40 @@ auto PageHierarchyModel::refresh(const QString& currentName) -> bool {
     return succeeded;
 }
 
-auto PageHierarchyModel::indexForPageName(const QString& pageName) const -> QModelIndex {
+auto
+PageHierarchyModel::indexForPageName(const QString& pageName) const
+    -> QModelIndex
+{
     const auto utf8 = pageName.toUtf8();
-    auto* item = findNode({utf8.constData(), static_cast<std::size_t>(utf8.size())});
+    auto* item =
+        findNode({utf8.constData(), static_cast<std::size_t>(utf8.size())});
     if (item == nullptr) {
         return {};
     }
     const auto& siblings = children(item->parent);
-    const auto found = std::ranges::find_if(
-        siblings, [&](const auto& candidate) -> bool { return candidate.get() == item; });
+    const auto found =
+        std::ranges::find_if(siblings, [&](const auto& candidate) -> bool {
+            return candidate.get() == item;
+        });
     return found == siblings.end()
                ? QModelIndex{}
-               : createIndex(static_cast<int>(std::distance(siblings.begin(), found)), 0, item);
+               : createIndex(
+                     static_cast<int>(std::distance(siblings.begin(), found)),
+                     0, item);
 }
 
-auto PageHierarchyModel::pageName(const QModelIndex& index) -> QString {
+auto
+PageHierarchyModel::pageName(const QModelIndex& index) -> QString
+{
     const auto* item = node(index);
     return item == nullptr ? QString{} : QString::fromUtf8(item->node.name);
 }
 
 NotebookController::NotebookController(QObject* parent)
     : QObject(parent), outlineEntries_(this), pagePreviewSources_(this),
-      linkedReferenceSources_(this), blockLinkedReferenceSources_(this), pageHierarchy_(this),
-      midnightTimer_(this) {
+      linkedReferenceSources_(this), blockLinkedReferenceSources_(this),
+      pageHierarchy_(this), midnightTimer_(this)
+{
     pageHierarchy_.attach(&session_);
     subscription_ = session_.subscribeToChanges([this]() -> void {
         refreshLinkedReferences();
@@ -639,111 +791,178 @@ NotebookController::NotebookController(QObject* parent)
     scheduleMidnightRefresh();
 }
 
-auto NotebookController::hasOpenNotebook() const -> bool {
+auto
+NotebookController::hasOpenNotebook() const -> bool
+{
     return session_.isOpen();
 }
-auto NotebookController::notebookPath() const -> QString {
+auto
+NotebookController::notebookPath() const -> QString
+{
     return path_;
 }
-auto NotebookController::notebookName() const -> QString {
+auto
+NotebookController::notebookName() const -> QString
+{
     return name_;
 }
-auto NotebookController::errorMessage() const -> QString {
+auto
+NotebookController::errorMessage() const -> QString
+{
     return error_;
 }
-auto NotebookController::journalDate() const -> QDate {
+auto
+NotebookController::journalDate() const -> QDate
+{
     return journalDate_;
 }
-auto NotebookController::outlineEntries() -> QAbstractItemModel* {
+auto
+NotebookController::outlineEntries() -> QAbstractItemModel*
+{
     return &outlineEntries_;
 }
-auto NotebookController::pagePreviewSources() -> QAbstractItemModel* {
+auto
+NotebookController::pagePreviewSources() -> QAbstractItemModel*
+{
     return &pagePreviewSources_;
 }
-auto NotebookController::pagePreviewUnresolvedPageLinkSourceTotal() const -> qsizetype {
+auto
+NotebookController::pagePreviewUnresolvedPageLinkSourceTotal() const
+    -> qsizetype
+{
     return pagePreviewUnresolvedPageLinkSourceTotal_;
 }
-auto NotebookController::hasMorePagePreviewUnresolvedPageLinkSources() const -> bool {
+auto
+NotebookController::hasMorePagePreviewUnresolvedPageLinkSources() const -> bool
+{
     return pagePreviewUnresolvedPageLinkSourcesCursor_.has_value();
 }
 
-auto NotebookController::linkedReferenceSources() -> QAbstractItemModel* {
+auto
+NotebookController::linkedReferenceSources() -> QAbstractItemModel*
+{
     return &linkedReferenceSources_;
 }
-auto NotebookController::blockLinkedReferenceSources() -> QAbstractItemModel* {
+auto
+NotebookController::blockLinkedReferenceSources() -> QAbstractItemModel*
+{
     return &blockLinkedReferenceSources_;
 }
-auto NotebookController::pageHierarchy() -> QAbstractItemModel* {
+auto
+NotebookController::pageHierarchy() -> QAbstractItemModel*
+{
     return &pageHierarchy_;
 }
-auto NotebookController::canUndo() const -> bool {
+auto
+NotebookController::canUndo() const -> bool
+{
     if (!session_.isOpen()) {
         return false;
     }
     const auto capabilities = session_.editCapabilities();
     return capabilities && capabilities.value().canUndo;
 }
-auto NotebookController::canRedo() const -> bool {
+auto
+NotebookController::canRedo() const -> bool
+{
     if (!session_.isOpen()) {
         return false;
     }
     const auto capabilities = session_.editCapabilities();
     return capabilities && capabilities.value().canRedo;
 }
-auto NotebookController::isJournalPage() const -> bool {
+auto
+NotebookController::isJournalPage() const -> bool
+{
     return !currentPageId_.has_value() && !currentPagePreview_;
 }
-auto NotebookController::currentPageId() const -> QString {
+auto
+NotebookController::currentPageId() const -> QString
+{
     return currentPageId_ ? displayId(*currentPageId_) : QString{};
 }
-auto NotebookController::currentPageName() const -> QString {
+auto
+NotebookController::currentPageName() const -> QString
+{
     return currentPageName_;
 }
-auto NotebookController::currentPageTitle() const -> QString {
+auto
+NotebookController::currentPageTitle() const -> QString
+{
     return currentPageTitle_;
 }
-auto NotebookController::currentPagePreview() const -> bool {
+auto
+NotebookController::currentPagePreview() const -> bool
+{
     return currentPagePreview_;
 }
-auto NotebookController::pageChoices() const -> QStringList {
+auto
+NotebookController::pageChoices() const -> QStringList
+{
     return pageChoices_;
 }
-auto NotebookController::selectedBlockReferenceTargetId() const -> QString {
-    return selectedBlockReferenceTargetId_ ? displayId(*selectedBlockReferenceTargetId_)
-                                           : QString{};
+auto
+NotebookController::selectedBlockReferenceTargetId() const -> QString
+{
+    return selectedBlockReferenceTargetId_
+               ? displayId(*selectedBlockReferenceTargetId_)
+               : QString{};
 }
-auto NotebookController::linkedReferenceTargetId() const -> QString {
-    return pageLinkedReferences_.targetId ? displayId(*pageLinkedReferences_.targetId) : QString{};
+auto
+NotebookController::linkedReferenceTargetId() const -> QString
+{
+    return pageLinkedReferences_.targetId
+               ? displayId(*pageLinkedReferences_.targetId)
+               : QString{};
 }
-auto NotebookController::linkedReferenceTotal() const -> qsizetype {
+auto
+NotebookController::linkedReferenceTotal() const -> qsizetype
+{
     return pageLinkedReferences_.total;
 }
-auto NotebookController::hasMoreLinkedReferences() const -> bool {
+auto
+NotebookController::hasMoreLinkedReferences() const -> bool
+{
     return pageLinkedReferences_.cursor.has_value();
 }
-auto NotebookController::blockLinkedReferenceTargetId() const -> QString {
-    return blockLinkedReferences_.targetId ? displayId(*blockLinkedReferences_.targetId)
-                                           : QString{};
+auto
+NotebookController::blockLinkedReferenceTargetId() const -> QString
+{
+    return blockLinkedReferences_.targetId
+               ? displayId(*blockLinkedReferences_.targetId)
+               : QString{};
 }
-auto NotebookController::blockLinkedReferenceTotal() const -> qsizetype {
+auto
+NotebookController::blockLinkedReferenceTotal() const -> qsizetype
+{
     return blockLinkedReferences_.total;
 }
-auto NotebookController::hasMoreBlockLinkedReferences() const -> bool {
+auto
+NotebookController::hasMoreBlockLinkedReferences() const -> bool
+{
     return blockLinkedReferences_.cursor.has_value();
 }
-auto NotebookController::identifiedBlockId() const -> QString {
+auto
+NotebookController::identifiedBlockId() const -> QString
+{
     return identifiedBlockId_ ? displayId(*identifiedBlockId_) : QString{};
 }
-auto NotebookController::pageIdAt(qsizetype index) const -> QString {
+auto
+NotebookController::pageIdAt(qsizetype index) const -> QString
+{
     return index >= 0 && static_cast<std::size_t>(index) < pageIds_.size()
                ? displayId(pageIds_[static_cast<std::size_t>(index)])
                : QString{};
 }
-auto NotebookController::pageIdForChoice(const QString& choice) const -> QString {
+auto
+NotebookController::pageIdForChoice(const QString& choice) const -> QString
+{
     return pageIdAt(pageChoices_.indexOf(choice));
 }
 
-void NotebookController::createNotebook(const QUrl& url) {
+void
+NotebookController::createNotebook(const QUrl& url)
+{
     const auto path = localPath(url);
     try {
         const auto result = session_.create(path);
@@ -758,7 +977,9 @@ void NotebookController::createNotebook(const QUrl& url) {
     }
 }
 
-void NotebookController::openNotebook(const QUrl& url) {
+void
+NotebookController::openNotebook(const QUrl& url)
+{
     const auto path = localPath(url);
     try {
         const auto result = session_.open(path);
@@ -773,7 +994,9 @@ void NotebookController::openNotebook(const QUrl& url) {
     }
 }
 
-void NotebookController::closeNotebook() {
+void
+NotebookController::closeNotebook()
+{
     session_.close();
     path_.clear();
     name_.clear();
@@ -801,8 +1024,10 @@ void NotebookController::closeNotebook() {
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::insertOutlineEntry(const QString& authoredText,
-                                            const QString& afterEntryId) -> int {
+auto
+NotebookController::insertOutlineEntry(const QString& authoredText,
+                                       const QString& afterEntryId) -> int
+{
     if (currentPagePreview_) {
         error_ = tr("Create this Page before adding Entries.");
         emit stateChanged();
@@ -820,35 +1045,42 @@ auto NotebookController::insertOutlineEntry(const QString& authoredText,
     const auto utf8 = authoredText.toUtf8();
     try {
         std::vector<QString> existingIds;
-        existingIds.reserve(static_cast<std::size_t>(outlineEntries_.rowCount()));
+        existingIds.reserve(
+            static_cast<std::size_t>(outlineEntries_.rowCount()));
         for (int row = 0; row < outlineEntries_.rowCount(); ++row) {
             existingIds.push_back(outlineEntries_.entryId(row));
         }
         if (after) {
-            if (std::ranges::find(existingIds, afterEntryId) == existingIds.end()) {
+            if (std::ranges::find(existingIds, afterEntryId) ==
+                existingIds.end()) {
                 error_ = tr("The selected Entry is no longer on this Page.");
                 emit stateChanged();
                 return -1;
             }
         }
-        const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-        const auto result = session_.insertEntry(currentPageAddress(), after, text);
+        const auto text = std::string(utf8.constData(),
+                                      static_cast<std::size_t>(utf8.size()));
+        const auto result =
+            session_.insertEntry(currentPageAddress(), after, text);
         if (!result) {
             rejectSave(result.error());
             return -1;
         }
         auto entries = asOutlineEntries(result.value().entries);
-        const auto inserted = std::ranges::find_if(entries, [&](const auto& entry) -> bool {
-            return std::ranges::find(existingIds, displayId(entry.metadata.id)) ==
-                   existingIds.end();
-        });
+        const auto inserted =
+            std::ranges::find_if(entries, [&](const auto& entry) -> bool {
+                return std::ranges::find(existingIds,
+                                         displayId(entry.metadata.id)) ==
+                       existingIds.end();
+            });
         if (inserted == entries.end()) {
             error_ = tr("Hieda encountered an unexpected Notebook error.");
             emit stateChanged();
             loadJournalDate(journalDate_);
             return -1;
         }
-        const auto insertedRow = static_cast<int>(std::distance(entries.begin(), inserted));
+        const auto insertedRow =
+            static_cast<int>(std::distance(entries.begin(), inserted));
         outlineEntries_.insertEntry(insertedRow, *inserted);
         error_.clear();
         emit stateChanged();
@@ -861,13 +1093,17 @@ auto NotebookController::insertOutlineEntry(const QString& authoredText,
     return -1;
 }
 
-auto NotebookController::outlineEntryId(int row) const -> QString {
+auto
+NotebookController::outlineEntryId(int row) const -> QString
+{
     return outlineEntries_.entryId(row);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::updateOutlineEntry(const QString& entryId, const QString& authoredText)
-    -> bool {
+auto
+NotebookController::updateOutlineEntry(const QString& entryId,
+                                       const QString& authoredText) -> bool
+{
     const auto id = blockId(entryId);
     if (!id) {
         error_ = tr("That Entry is no longer available.");
@@ -876,15 +1112,18 @@ auto NotebookController::updateOutlineEntry(const QString& entryId, const QStrin
     }
     const auto utf8 = authoredText.toUtf8();
     try {
-        const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+        const auto text = std::string(utf8.constData(),
+                                      static_cast<std::size_t>(utf8.size()));
         const auto result = session_.updateEntry(*id, text);
         if (!result) {
             rejectSave(result.error());
-            currentPageId_ ? loadPage(*currentPageId_) : loadJournalDate(journalDate_);
+            currentPageId_ ? loadPage(*currentPageId_)
+                           : loadJournalDate(journalDate_);
             return false;
         }
-        outlineEntries_.updateEntry(
-            {result.value().metadata, result.value().authoredText, result.value().parentEntry});
+        outlineEntries_.updateEntry({result.value().metadata,
+                                     result.value().authoredText,
+                                     result.value().parentEntry});
         error_.clear();
         emit stateChanged();
         return true;
@@ -896,8 +1135,11 @@ auto NotebookController::updateOutlineEntry(const QString& entryId, const QStrin
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::splitOutlineEntry(const QString& entryId, const QString& authoredText,
-                                           int cursorPosition) -> QVariantMap {
+auto
+NotebookController::splitOutlineEntry(const QString& entryId,
+                                      const QString& authoredText,
+                                      int cursorPosition) -> QVariantMap
+{
     const auto id = blockId(entryId);
     if (!id) {
         error_ = tr("That Entry is no longer available.");
@@ -918,8 +1160,10 @@ auto NotebookController::splitOutlineEntry(const QString& entryId, const QString
     const auto prefix = authoredText.left(cursorPosition).toUtf8();
     const auto utf8 = authoredText.toUtf8();
     try {
-        const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-        const auto result = session_.splitEntry(*id, text, static_cast<std::size_t>(prefix.size()));
+        const auto text = std::string(utf8.constData(),
+                                      static_cast<std::size_t>(utf8.size()));
+        const auto result = session_.splitEntry(
+            *id, text, static_cast<std::size_t>(prefix.size()));
         if (!result) {
             rejectSave(result.error());
             return outlineOutcome(false);
@@ -929,7 +1173,8 @@ auto NotebookController::splitOutlineEntry(const QString& entryId, const QString
         auto insertedRow = -1;
         for (int current = 0; current < outlineEntries_.rowCount(); ++current) {
             const auto candidate = outlineEntries_.entryId(current);
-            if (std::ranges::find(existingIds, candidate) == existingIds.end()) {
+            if (std::ranges::find(existingIds, candidate) ==
+                existingIds.end()) {
                 insertedRow = current;
                 break;
             }
@@ -946,8 +1191,10 @@ auto NotebookController::splitOutlineEntry(const QString& entryId, const QString
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::joinOutlineEntry(const QString& entryId, const QString& authoredText)
-    -> QVariantMap {
+auto
+NotebookController::joinOutlineEntry(const QString& entryId,
+                                     const QString& authoredText) -> QVariantMap
+{
     const auto id = blockId(entryId);
     if (!id) {
         error_ = tr("That Entry is no longer available.");
@@ -962,11 +1209,13 @@ auto NotebookController::joinOutlineEntry(const QString& entryId, const QString&
     }
     const auto targetIdText = outlineEntries_.entryId(row - 1);
     const auto targetId = blockId(targetIdText);
-    const auto cursor = static_cast<int>(std::min<qsizetype>(
-        outlineEntries_.entryText(row - 1).size(), std::numeric_limits<int>::max()));
+    const auto cursor = static_cast<int>(
+        std::min<qsizetype>(outlineEntries_.entryText(row - 1).size(),
+                            std::numeric_limits<int>::max()));
     const auto utf8 = authoredText.toUtf8();
     try {
-        const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
+        const auto text = std::string(utf8.constData(),
+                                      static_cast<std::size_t>(utf8.size()));
         const auto result = session_.joinEntry(*id, text);
         if (!result) {
             rejectSave(result.error());
@@ -974,7 +1223,8 @@ auto NotebookController::joinOutlineEntry(const QString& entryId, const QString&
         }
         auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
-        const auto targetRow = targetId ? outlineEntries_.rowForId(*targetId) : -1;
+        const auto targetRow =
+            targetId ? outlineEntries_.rowForId(*targetId) : -1;
         error_.clear();
         emit stateChanged();
         emit destinationChanged();
@@ -987,9 +1237,12 @@ auto NotebookController::joinOutlineEntry(const QString& entryId, const QString&
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::moveOutlineEntry(const QString& entryId, const QString& authoredText,
-                                          OutlineEntryMove movement, int cursorPosition)
-    -> QVariantMap {
+auto
+NotebookController::moveOutlineEntry(const QString& entryId,
+                                     const QString& authoredText,
+                                     OutlineEntryMove movement,
+                                     int cursorPosition) -> QVariantMap
+{
     const auto id = blockId(entryId);
     if (!id) {
         error_ = tr("That Entry is no longer available.");
@@ -998,8 +1251,10 @@ auto NotebookController::moveOutlineEntry(const QString& entryId, const QString&
     }
     const auto utf8 = authoredText.toUtf8();
     try {
-        const auto text = std::string(utf8.constData(), static_cast<std::size_t>(utf8.size()));
-        const auto entryMove = static_cast<hieda::notebook::EntryMove>(movement);
+        const auto text = std::string(utf8.constData(),
+                                      static_cast<std::size_t>(utf8.size()));
+        const auto entryMove =
+            static_cast<hieda::notebook::EntryMove>(movement);
         const auto result = session_.moveEntry(*id, entryMove, text);
         if (!result) {
             rejectSave(result.error());
@@ -1020,30 +1275,48 @@ auto NotebookController::moveOutlineEntry(const QString& entryId, const QString&
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::indentOutlineEntry(const QString& entryId, const QString& authoredText,
-                                            int cursorPosition) -> QVariantMap {
-    return moveOutlineEntry(entryId, authoredText, OutlineEntryMove::indent, cursorPosition);
+auto
+NotebookController::indentOutlineEntry(const QString& entryId,
+                                       const QString& authoredText,
+                                       int cursorPosition) -> QVariantMap
+{
+    return moveOutlineEntry(entryId, authoredText, OutlineEntryMove::indent,
+                            cursorPosition);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::outdentOutlineEntry(const QString& entryId, const QString& authoredText,
-                                             int cursorPosition) -> QVariantMap {
-    return moveOutlineEntry(entryId, authoredText, OutlineEntryMove::outdent, cursorPosition);
+auto
+NotebookController::outdentOutlineEntry(const QString& entryId,
+                                        const QString& authoredText,
+                                        int cursorPosition) -> QVariantMap
+{
+    return moveOutlineEntry(entryId, authoredText, OutlineEntryMove::outdent,
+                            cursorPosition);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::moveOutlineEntryUp(const QString& entryId, const QString& authoredText,
-                                            int cursorPosition) -> QVariantMap {
-    return moveOutlineEntry(entryId, authoredText, OutlineEntryMove::up, cursorPosition);
+auto
+NotebookController::moveOutlineEntryUp(const QString& entryId,
+                                       const QString& authoredText,
+                                       int cursorPosition) -> QVariantMap
+{
+    return moveOutlineEntry(entryId, authoredText, OutlineEntryMove::up,
+                            cursorPosition);
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::moveOutlineEntryDown(const QString& entryId, const QString& authoredText,
-                                              int cursorPosition) -> QVariantMap {
-    return moveOutlineEntry(entryId, authoredText, OutlineEntryMove::down, cursorPosition);
+auto
+NotebookController::moveOutlineEntryDown(const QString& entryId,
+                                         const QString& authoredText,
+                                         int cursorPosition) -> QVariantMap
+{
+    return moveOutlineEntry(entryId, authoredText, OutlineEntryMove::down,
+                            cursorPosition);
 }
 
-auto NotebookController::deleteOutlineEntry(const QString& entryId) -> QVariantMap {
+auto
+NotebookController::deleteOutlineEntry(const QString& entryId) -> QVariantMap
+{
     const auto id = blockId(entryId);
     if (!id) {
         error_ = tr("That Entry is no longer available.");
@@ -1061,10 +1334,10 @@ auto NotebookController::deleteOutlineEntry(const QString& entryId) -> QVariantM
         outlineEntries_.setEntries(std::move(entries));
         const auto focusRow = std::min(oldRow, outlineEntries_.rowCount() - 1);
         const auto cursor =
-            focusRow >= 0
-                ? static_cast<int>(std::min<qsizetype>(outlineEntries_.entryText(focusRow).size(),
-                                                       std::numeric_limits<int>::max()))
-                : 0;
+            focusRow >= 0 ? static_cast<int>(std::min<qsizetype>(
+                                outlineEntries_.entryText(focusRow).size(),
+                                std::numeric_limits<int>::max()))
+                          : 0;
         error_.clear();
         emit stateChanged();
         emit destinationChanged();
@@ -1076,11 +1349,15 @@ auto NotebookController::deleteOutlineEntry(const QString& entryId) -> QVariantM
     }
 }
 
-auto NotebookController::outlineSelectionText(const QStringList& entryIds) const -> QString {
+auto
+NotebookController::outlineSelectionText(const QStringList& entryIds) const
+    -> QString
+{
     if (entryIds.empty()) {
         return {};
     }
-    std::vector<bool> selected(static_cast<std::size_t>(outlineEntries_.rowCount()), false);
+    std::vector<bool> selected(
+        static_cast<std::size_t>(outlineEntries_.rowCount()), false);
     auto minimumDepth = std::numeric_limits<int>::max();
     for (const auto& entryId : entryIds) {
         const auto id = blockId(entryId);
@@ -1091,7 +1368,8 @@ auto NotebookController::outlineSelectionText(const QStringList& entryIds) const
         const auto depth = outlineEntries_.entryDepth(row);
         minimumDepth = std::min(minimumDepth, depth);
         selected[static_cast<std::size_t>(row)] = true;
-        for (auto candidate = row + 1; candidate < outlineEntries_.rowCount(); ++candidate) {
+        for (auto candidate = row + 1; candidate < outlineEntries_.rowCount();
+             ++candidate) {
             const auto candidateDepth = outlineEntries_.entryDepth(candidate);
             if (candidateDepth <= depth) {
                 break;
@@ -1106,12 +1384,13 @@ auto NotebookController::outlineSelectionText(const QStringList& entryIds) const
             continue;
         }
         const auto depth = outlineEntries_.entryDepth(row);
-        const auto indentation =
-            QString(static_cast<qsizetype>(depth - minimumDepth) * 2, QLatin1Char(' '));
+        const auto indentation = QString(
+            static_cast<qsizetype>(depth - minimumDepth) * 2, QLatin1Char(' '));
         const auto continuationIndent = indentation + QStringLiteral("  ");
-        const auto lines =
-            outlineEntries_.entryText(row).split(QLatin1Char('\n'), Qt::KeepEmptyParts);
-        output.push_back(indentation + QStringLiteral("\u2022 ") + lines.front());
+        const auto lines = outlineEntries_.entryText(row).split(
+            QLatin1Char('\n'), Qt::KeepEmptyParts);
+        output.push_back(indentation + QStringLiteral("\u2022 ") +
+                         lines.front());
         for (qsizetype line = 1; line < lines.size(); ++line) {
             output.push_back(continuationIndent + lines[line]);
         }
@@ -1119,15 +1398,19 @@ auto NotebookController::outlineSelectionText(const QStringList& entryIds) const
     return output.join(QLatin1Char('\n'));
 }
 
-auto NotebookController::outlineEntrySelection(int anchorRow, int extentRow) const -> QVariantMap {
-    if (anchorRow < 0 || extentRow < 0 || anchorRow >= outlineEntries_.rowCount() ||
+auto
+NotebookController::outlineEntrySelection(int anchorRow, int extentRow) const
+    -> QVariantMap
+{
+    if (anchorRow < 0 || extentRow < 0 ||
+        anchorRow >= outlineEntries_.rowCount() ||
         extentRow >= outlineEntries_.rowCount()) {
         return {{QStringLiteral("roots"), QStringList{}},
                 {QStringLiteral("entries"), QStringList{}}};
     }
     const auto first = std::min(anchorRow, extentRow);
-    auto end =
-        std::max(outlineEntries_.subtreeEnd(anchorRow), outlineEntries_.subtreeEnd(extentRow));
+    auto end = std::max(outlineEntries_.subtreeEnd(anchorRow),
+                        outlineEntries_.subtreeEnd(extentRow));
     for (auto row = first; row < end; ++row) {
         end = std::max(end, outlineEntries_.subtreeEnd(row));
     }
@@ -1144,16 +1427,22 @@ auto NotebookController::outlineEntrySelection(int anchorRow, int extentRow) con
             roots.push_back(outlineEntries_.entryId(row));
         }
     }
-    return {{QStringLiteral("roots"), roots}, {QStringLiteral("entries"), entries}};
+    return {{QStringLiteral("roots"), roots},
+            {QStringLiteral("entries"), entries}};
 }
 
-void NotebookController::copyTextToClipboard(const QString& text) {
+void
+NotebookController::copyTextToClipboard(const QString& text)
+{
     if (auto* clipboard = QGuiApplication::clipboard(); clipboard != nullptr) {
         clipboard->setText(text);
     }
 }
 
-auto NotebookController::deleteOutlineSubtrees(const QStringList& entryIds) -> QVariantMap {
+auto
+NotebookController::deleteOutlineSubtrees(const QStringList& entryIds)
+    -> QVariantMap
+{
     std::vector<hieda::notebook::BlockId> ids;
     ids.reserve(static_cast<std::size_t>(entryIds.size()));
     auto firstRow = outlineEntries_.rowCount();
@@ -1185,7 +1474,8 @@ auto NotebookController::deleteOutlineSubtrees(const QStringList& entryIds) -> Q
             focusRow = std::min(firstRow, outlineEntries_.rowCount() - 1);
             if (focusRow < firstRow) {
                 cursor = static_cast<int>(std::min<qsizetype>(
-                    outlineEntries_.entryText(focusRow).size(), std::numeric_limits<int>::max()));
+                    outlineEntries_.entryText(focusRow).size(),
+                    std::numeric_limits<int>::max()));
             }
         }
         error_.clear();
@@ -1199,19 +1489,27 @@ auto NotebookController::deleteOutlineSubtrees(const QStringList& entryIds) -> Q
     }
 }
 
-auto NotebookController::undoOutlineEdit(const QString& preferredEntryId, int cursorPosition)
-    -> QVariantMap {
-    return applyOutlineHistory(OutlineHistoryDirection::undo, preferredEntryId, cursorPosition);
+auto
+NotebookController::undoOutlineEdit(const QString& preferredEntryId,
+                                    int cursorPosition) -> QVariantMap
+{
+    return applyOutlineHistory(OutlineHistoryDirection::undo, preferredEntryId,
+                               cursorPosition);
 }
 
-auto NotebookController::redoOutlineEdit(const QString& preferredEntryId, int cursorPosition)
-    -> QVariantMap {
-    return applyOutlineHistory(OutlineHistoryDirection::redo, preferredEntryId, cursorPosition);
+auto
+NotebookController::redoOutlineEdit(const QString& preferredEntryId,
+                                    int cursorPosition) -> QVariantMap
+{
+    return applyOutlineHistory(OutlineHistoryDirection::redo, preferredEntryId,
+                               cursorPosition);
 }
 
-auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
-                                             const QString& preferredEntryId, int cursorPosition)
-    -> QVariantMap {
+auto
+NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
+                                        const QString& preferredEntryId,
+                                        int cursorPosition) -> QVariantMap
+{
     struct EntrySnapshot {
         QString id;
         QString text;
@@ -1219,26 +1517,30 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
     std::vector<EntrySnapshot> oldEntries;
     oldEntries.reserve(static_cast<std::size_t>(outlineEntries_.rowCount()));
     for (int row = 0; row < outlineEntries_.rowCount(); ++row) {
-        oldEntries.push_back({outlineEntries_.entryId(row), outlineEntries_.entryText(row)});
+        oldEntries.push_back(
+            {outlineEntries_.entryId(row), outlineEntries_.entryText(row)});
     }
     try {
-        auto result =
-            direction == OutlineHistoryDirection::redo ? session_.redoEdit() : session_.undoEdit();
+        auto result = direction == OutlineHistoryDirection::redo
+                          ? session_.redoEdit()
+                          : session_.undoEdit();
         if (!result) {
             rejectSave(result.error());
             return outlineOutcome(false);
         }
         if (currentPagePreview_) {
-            const auto restored =
-                std::ranges::find_if(result.value(), [&](const auto& page) -> bool {
+            const auto restored = std::ranges::find_if(
+                result.value(), [&](const auto& page) -> bool {
                     return page.kind == hieda::notebook::PageKind::named &&
-                           QString::fromUtf8(page.name) == currentPageName_ && page.metadata;
+                           QString::fromUtf8(page.name) == currentPageName_ &&
+                           page.metadata;
                 });
             if (restored != result.value().end()) {
                 if (const auto restoredMetadata = restored->metadata) {
                     currentPageId_ = restoredMetadata->id;
                     currentPagePreview_ = false;
-                    currentPageTitle_ = QString::fromUtf8(restored->displayTitle);
+                    currentPageTitle_ =
+                        QString::fromUtf8(restored->displayTitle);
                 }
             }
             if (currentPagePreview_) {
@@ -1249,7 +1551,8 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
         }
         auto current = session_.outline(currentPageAddress());
         if (!current && currentPageId_ &&
-            current.error().code == hieda::notebook::NotebookErrorCode::pageNotFound) {
+            current.error().code ==
+                hieda::notebook::NotebookErrorCode::pageNotFound) {
             currentPageId_.reset();
             currentPagePreview_ = true;
             currentPageTitle_.clear();
@@ -1266,11 +1569,13 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
         auto preferredSurvived = false;
         const auto preferredId = blockId(preferredEntryId);
         if (preferredId) {
-            const auto preferred = std::ranges::find_if(entries, [&](const auto& entry) -> auto {
-                return entry.metadata.id == *preferredId;
-            });
+            const auto preferred =
+                std::ranges::find_if(entries, [&](const auto& entry) -> auto {
+                    return entry.metadata.id == *preferredId;
+                });
             if (preferred != entries.end()) {
-                focusRow = static_cast<int>(std::distance(entries.begin(), preferred));
+                focusRow =
+                    static_cast<int>(std::distance(entries.begin(), preferred));
                 preferredSurvived = true;
             }
         }
@@ -1280,35 +1585,39 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
             }
             const auto id = displayId(entries[row].metadata.id);
             const auto old = std::ranges::find_if(
-                oldEntries, [&](const auto& entry) -> bool { return entry.id == id; });
+                oldEntries,
+                [&](const auto& entry) -> bool { return entry.id == id; });
             if (old == oldEntries.end()) {
                 focusRow = static_cast<int>(row);
                 break;
             }
-            const auto oldRow = static_cast<std::size_t>(std::distance(oldEntries.begin(), old));
-            const auto text =
-                QString::fromUtf8(entries[row].authoredText.data(),
-                                  static_cast<qsizetype>(entries[row].authoredText.size()));
+            const auto oldRow = static_cast<std::size_t>(
+                std::distance(oldEntries.begin(), old));
+            const auto text = QString::fromUtf8(
+                entries[row].authoredText.data(),
+                static_cast<qsizetype>(entries[row].authoredText.size()));
             if (oldRow != row || old->text != text) {
                 focusRow = static_cast<int>(row);
                 break;
             }
         }
         if (focusRow < 0 && !entries.empty()) {
-            focusRow = std::min(static_cast<int>(entries.size()) - 1,
-                                std::max(0, static_cast<int>(oldEntries.size()) - 1));
+            focusRow =
+                std::min(static_cast<int>(entries.size()) - 1,
+                         std::max(0, static_cast<int>(oldEntries.size()) - 1));
         }
         outlineEntries_.setEntries(entries);
         refreshPages();
         auto cursor = 0;
         if (focusRow >= 0) {
-            const auto desiredCursor = preferredSurvived
-                                           ? std::max(0, cursorPosition)
-                                           : static_cast<int>(std::min<qsizetype>(
-                                                 outlineEntries_.entryText(focusRow).size(),
-                                                 std::numeric_limits<int>::max()));
-            cursor = static_cast<int>(
-                std::min<qsizetype>(desiredCursor, outlineEntries_.entryText(focusRow).size()));
+            const auto desiredCursor =
+                preferredSurvived
+                    ? std::max(0, cursorPosition)
+                    : static_cast<int>(std::min<qsizetype>(
+                          outlineEntries_.entryText(focusRow).size(),
+                          std::numeric_limits<int>::max()));
+            cursor = static_cast<int>(std::min<qsizetype>(
+                desiredCursor, outlineEntries_.entryText(focusRow).size()));
         }
         error_.clear();
         emit stateChanged();
@@ -1321,25 +1630,32 @@ auto NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
     }
 }
 
-void NotebookController::requestJournalDateRollover(const QDate& date) {
+void
+NotebookController::requestJournalDateRollover(const QDate& date)
+{
     if (hasOpenNotebook() && date.isValid()) {
         pendingJournalDate_ = date;
         emit journalDateRolloverRequested();
     }
 }
 
-void NotebookController::completeJournalDateRollover() {
+void
+NotebookController::completeJournalDateRollover()
+{
     if (hasOpenNotebook() && pendingJournalDate_.isValid()) {
         loadJournalDate(pendingJournalDate_);
         pendingJournalDate_ = {};
     }
 }
 
-auto NotebookController::eventFilter(QObject* watched, QEvent* event) -> bool {
+auto
+NotebookController::eventFilter(QObject* watched, QEvent* event) -> bool
+{
     if (watched == QCoreApplication::instance() &&
         event->type() == QEvent::ApplicationStateChange) {
         const auto currentDate = QDate::currentDate();
-        if (hasOpenNotebook() && isJournalPage() && currentDate != journalDate_) {
+        if (hasOpenNotebook() && isJournalPage() &&
+            currentDate != journalDate_) {
             requestJournalDateRollover(currentDate);
         }
         scheduleMidnightRefresh();
@@ -1347,19 +1663,24 @@ auto NotebookController::eventFilter(QObject* watched, QEvent* event) -> bool {
     return QObject::eventFilter(watched, event);
 }
 
-void NotebookController::clearError() {
+void
+NotebookController::clearError()
+{
     if (!error_.isEmpty()) {
         error_.clear();
         emit stateChanged();
     }
 }
 
-auto NotebookController::createPage(const QString& name, const QString& displayTitle) -> bool {
+auto
+NotebookController::createPage(const QString& name, const QString& displayTitle)
+    -> bool
+{
     const auto nameUtf8 = name.toUtf8();
     const auto titleUtf8 = displayTitle.toUtf8();
-    const auto result =
-        session_.createPage({nameUtf8.constData(), static_cast<std::size_t>(nameUtf8.size())},
-                            {titleUtf8.constData(), static_cast<std::size_t>(titleUtf8.size())});
+    const auto result = session_.createPage(
+        {nameUtf8.constData(), static_cast<std::size_t>(nameUtf8.size())},
+        {titleUtf8.constData(), static_cast<std::size_t>(titleUtf8.size())});
     if (!result) {
         reject(result.error());
         return false;
@@ -1369,7 +1690,9 @@ auto NotebookController::createPage(const QString& name, const QString& displayT
     return true;
 }
 
-auto NotebookController::createCurrentPage(const QString& displayTitle) -> bool {
+auto
+NotebookController::createCurrentPage(const QString& displayTitle) -> bool
+{
     if (!currentPagePreview_) {
         error_ = tr("Open a Page Preview before creating it.");
         emit stateChanged();
@@ -1378,7 +1701,9 @@ auto NotebookController::createCurrentPage(const QString& displayTitle) -> bool 
     return createPage(currentPageName_, displayTitle);
 }
 
-auto NotebookController::deleteCurrentPage() -> bool {
+auto
+NotebookController::deleteCurrentPage() -> bool
+{
     if (!currentPageId_) {
         error_ = tr("Select a materialized Page before deleting it.");
         emit stateChanged();
@@ -1395,8 +1720,10 @@ auto NotebookController::deleteCurrentPage() -> bool {
     return true;
 }
 
-auto NotebookController::renameCurrentPage(const QString& name, const QString& displayTitle)
-    -> bool {
+auto
+NotebookController::renameCurrentPage(const QString& name,
+                                      const QString& displayTitle) -> bool
+{
     if (!currentPageId_) {
         error_ = tr("Select an ordinary Page before renaming it.");
         emit stateChanged();
@@ -1405,7 +1732,8 @@ auto NotebookController::renameCurrentPage(const QString& name, const QString& d
     const auto nameUtf8 = name.toUtf8();
     const auto titleUtf8 = displayTitle.toUtf8();
     const auto result = session_.renamePage(
-        *currentPageId_, {nameUtf8.constData(), static_cast<std::size_t>(nameUtf8.size())},
+        *currentPageId_,
+        {nameUtf8.constData(), static_cast<std::size_t>(nameUtf8.size())},
         {titleUtf8.constData(), static_cast<std::size_t>(titleUtf8.size())});
     if (!result) {
         reject(result.error());
@@ -1415,7 +1743,8 @@ auto NotebookController::renameCurrentPage(const QString& name, const QString& d
     currentPageName_ = QString::fromUtf8(result.value().name);
     currentPageTitle_ = QString::fromUtf8(result.value().displayTitle);
     for (const auto& entry : result.value().entries) {
-        outlineEntries_.updateEntry({entry.metadata, entry.authoredText, entry.parentEntry});
+        outlineEntries_.updateEntry(
+            {entry.metadata, entry.authoredText, entry.parentEntry});
     }
     static_cast<void>(pageHierarchy_.refresh(currentPageName_));
     error_.clear();
@@ -1424,7 +1753,9 @@ auto NotebookController::renameCurrentPage(const QString& name, const QString& d
     return true;
 }
 
-void NotebookController::navigateToPage(const QString& pageId) {
+void
+NotebookController::navigateToPage(const QString& pageId)
+{
     const auto id = blockId(pageId);
     if (!id) {
         error_ = tr("That Page is no longer available.");
@@ -1434,10 +1765,12 @@ void NotebookController::navigateToPage(const QString& pageId) {
     loadPage(*id);
 }
 
-void NotebookController::navigateToPageName(const QString& pageName) {
+void
+NotebookController::navigateToPageName(const QString& pageName)
+{
     const auto utf8 = pageName.toUtf8();
-    const auto node =
-        session_.pageHierarchyNode({utf8.constData(), static_cast<std::size_t>(utf8.size())});
+    const auto node = session_.pageHierarchyNode(
+        {utf8.constData(), static_cast<std::size_t>(utf8.size())});
     if (!node) {
         reject(node.error());
         return;
@@ -1449,39 +1782,49 @@ void NotebookController::navigateToPageName(const QString& pageName) {
     loadPagePreview(pageName);
 }
 
-auto NotebookController::followPageLink(const QString& entryId, int characterOffset,
-                                        const QString& editorText) -> bool {
-    const auto position =
-        committedEntryPosition(outlineEntries_, entryId, characterOffset, editorText);
+auto
+NotebookController::followPageLink(const QString& entryId, int characterOffset,
+                                   const QString& editorText) -> bool
+{
+    const auto position = committedEntryPosition(outlineEntries_, entryId,
+                                                 characterOffset, editorText);
     if (!position) {
         return false;
     }
-    const auto destination = session_.followPageLink(position->entryId, position->byteOffset);
+    const auto destination =
+        session_.followPageLink(position->entryId, position->byteOffset);
     if (!destination) {
-        if (destination.error().code != hieda::notebook::NotebookErrorCode::pageLinkNotFound) {
+        if (destination.error().code !=
+            hieda::notebook::NotebookErrorCode::pageLinkNotFound) {
             reject(destination.error());
         }
         return false;
     }
-    if (const auto* page = std::get_if<hieda::notebook::PageSummary>(&destination.value())) {
+    if (const auto* page =
+            std::get_if<hieda::notebook::PageSummary>(&destination.value())) {
         loadPage(page->metadata.id);
     } else {
-        loadPagePreview(
-            QString::fromUtf8(std::get<hieda::notebook::PagePreview>(destination.value()).name));
+        loadPagePreview(QString::fromUtf8(
+            std::get<hieda::notebook::PagePreview>(destination.value()).name));
     }
     return true;
 }
 
-auto NotebookController::followBlockReference(const QString& entryId, int characterOffset,
-                                              const QString& editorText) -> bool {
-    const auto position =
-        committedEntryPosition(outlineEntries_, entryId, characterOffset, editorText);
+auto
+NotebookController::followBlockReference(const QString& entryId,
+                                         int characterOffset,
+                                         const QString& editorText) -> bool
+{
+    const auto position = committedEntryPosition(outlineEntries_, entryId,
+                                                 characterOffset, editorText);
     if (!position) {
         return false;
     }
-    const auto destination = session_.followBlockReference(position->entryId, position->byteOffset);
+    const auto destination =
+        session_.followBlockReference(position->entryId, position->byteOffset);
     if (!destination) {
-        if (destination.error().code == hieda::notebook::NotebookErrorCode::blockNotFound) {
+        if (destination.error().code ==
+            hieda::notebook::NotebookErrorCode::blockNotFound) {
             error_ = tr("Block not found.");
             emit stateChanged();
         } else if (destination.error().code !=
@@ -1490,46 +1833,61 @@ auto NotebookController::followBlockReference(const QString& entryId, int charac
         }
         return false;
     }
-    static_cast<void>(navigateToOutlinePage(destination.value().structuralPage));
+    static_cast<void>(
+        navigateToOutlinePage(destination.value().structuralPage));
     identifiedBlockId_ = destination.value().target.id;
     emit stateChanged();
     return true;
 }
 
-auto NotebookController::followSemanticReference(const QString& entryId, int characterOffset,
-                                                 const QString& editorText) -> bool {
+auto
+NotebookController::followSemanticReference(const QString& entryId,
+                                            int characterOffset,
+                                            const QString& editorText) -> bool
+{
     identifiedBlockId_.reset();
     return followPageLink(entryId, characterOffset, editorText) ||
            followBlockReference(entryId, characterOffset, editorText);
 }
 
-auto NotebookController::insertBlockReference(const QString& sourceEntryId, int characterOffset,
-                                              const QString& editorText,
-                                              const QString& targetIdText) -> bool {
-    const auto sourcePosition =
-        committedEntryPosition(outlineEntries_, sourceEntryId, characterOffset, editorText);
+auto
+NotebookController::insertBlockReference(const QString& sourceEntryId,
+                                         int characterOffset,
+                                         const QString& editorText,
+                                         const QString& targetIdText) -> bool
+{
+    const auto sourcePosition = committedEntryPosition(
+        outlineEntries_, sourceEntryId, characterOffset, editorText);
     const auto targetId = blockId(targetIdText);
     if (!sourcePosition || !targetId) {
         return false;
     }
-    const auto result = session_.insertBlockReference(sourcePosition->entryId,
-                                                      sourcePosition->byteOffset, *targetId);
+    const auto result = session_.insertBlockReference(
+        sourcePosition->entryId, sourcePosition->byteOffset, *targetId);
     if (!result) {
         rejectSave(result.error());
         return false;
     }
-    outlineEntries_.updateEntry(
-        {result.value().metadata, result.value().authoredText, result.value().parentEntry});
+    outlineEntries_.updateEntry({result.value().metadata,
+                                 result.value().authoredText,
+                                 result.value().parentEntry});
     error_.clear();
     emit stateChanged();
     return true;
 }
 
-auto NotebookController::blockReferenceNotation(const QString& targetId) -> QString {
-    return blockId(targetId) ? QStringLiteral("[[block:%1]]").arg(targetId.toLower()) : QString{};
+auto
+NotebookController::blockReferenceNotation(const QString& targetId) -> QString
+{
+    return blockId(targetId)
+               ? QStringLiteral("[[block:%1]]").arg(targetId.toLower())
+               : QString{};
 }
 
-auto NotebookController::selectBlockReferenceTarget(const QString& targetIdText) -> bool {
+auto
+NotebookController::selectBlockReferenceTarget(const QString& targetIdText)
+    -> bool
+{
     const auto targetId = blockId(targetIdText);
     if (!targetId) {
         return false;
@@ -1545,15 +1903,20 @@ auto NotebookController::selectBlockReferenceTarget(const QString& targetIdText)
     return true;
 }
 
-auto NotebookController::insertSelectedBlockReference(const QString& sourceEntryId,
-                                                      int characterOffset,
-                                                      const QString& editorText) -> bool {
+auto
+NotebookController::insertSelectedBlockReference(const QString& sourceEntryId,
+                                                 int characterOffset,
+                                                 const QString& editorText)
+    -> bool
+{
     return selectedBlockReferenceTargetId_ &&
            insertBlockReference(sourceEntryId, characterOffset, editorText,
                                 displayId(*selectedBlockReferenceTargetId_));
 }
 
-auto NotebookController::browseLinkedReferences(const QString& targetIdText) -> bool {
+auto
+NotebookController::browseLinkedReferences(const QString& targetIdText) -> bool
+{
     const auto targetId = blockId(targetIdText);
     if (!targetId) {
         return false;
@@ -1569,17 +1932,25 @@ auto NotebookController::browseLinkedReferences(const QString& targetIdText) -> 
     return true;
 }
 
-auto NotebookController::followLinkedReferenceSource(const QString& sourceEntryId) -> bool {
+auto
+NotebookController::followLinkedReferenceSource(const QString& sourceEntryId)
+    -> bool
+{
     return followLinkedReferenceSourceFor(sourceEntryId, pageLinkedReferences_);
 }
 
-auto NotebookController::followBlockLinkedReferenceSource(const QString& sourceEntryId) -> bool {
-    return followLinkedReferenceSourceFor(sourceEntryId, blockLinkedReferences_);
+auto
+NotebookController::followBlockLinkedReferenceSource(
+    const QString& sourceEntryId) -> bool
+{
+    return followLinkedReferenceSourceFor(sourceEntryId,
+                                          blockLinkedReferences_);
 }
 
-auto NotebookController::followLinkedReferenceSourceFor(const QString& sourceEntryId,
-                                                        const IncomingSourcesViewState& view)
-    -> bool {
+auto
+NotebookController::followLinkedReferenceSourceFor(
+    const QString& sourceEntryId, const IncomingSourcesViewState& view) -> bool
+{
     const auto sourceId = blockId(sourceEntryId);
     if (!sourceId || !view.targetId) {
         return false;
@@ -1591,9 +1962,10 @@ auto NotebookController::followLinkedReferenceSourceFor(const QString& sourceEnt
             reject(linked.error());
             return false;
         }
-        const auto found = std::ranges::find_if(linked.value().sources, [&](const auto& source) {
-            return source.source.metadata.id == *sourceId;
-        });
+        const auto found = std::ranges::find_if(
+            linked.value().sources, [&](const auto& source) {
+                return source.source.metadata.id == *sourceId;
+            });
         if (found != linked.value().sources.end()) {
             return navigateToOutlinePage(found->structuralPage);
         }
@@ -1602,11 +1974,17 @@ auto NotebookController::followLinkedReferenceSourceFor(const QString& sourceEnt
     return false;
 }
 
-auto NotebookController::linkedReferenceContext(const QString& sourceEntryId) const -> QString {
+auto
+NotebookController::linkedReferenceContext(const QString& sourceEntryId) const
+    -> QString
+{
     return pageLinkedReferences_.contexts.value(sourceEntryId);
 }
 
-auto NotebookController::followPagePreviewSource(const QString& sourceEntryId) -> bool {
+auto
+NotebookController::followPagePreviewSource(const QString& sourceEntryId)
+    -> bool
+{
     const auto sourceId = blockId(sourceEntryId);
     if (!sourceId || !currentPagePreview_) {
         return false;
@@ -1616,15 +1994,20 @@ auto NotebookController::followPagePreviewSource(const QString& sourceEntryId) -
         reject(destination.error());
         return false;
     }
-    static_cast<void>(navigateToOutlinePage(destination.value().structuralPage));
+    static_cast<void>(
+        navigateToOutlinePage(destination.value().structuralPage));
     identifiedBlockId_ = *sourceId;
     emit stateChanged();
     return true;
 }
 
-auto NotebookController::navigateToOutlinePage(const hieda::notebook::OutlinePage& page) -> bool {
+auto
+NotebookController::navigateToOutlinePage(
+    const hieda::notebook::OutlinePage& page) -> bool
+{
     if (page.kind == hieda::notebook::PageKind::journal) {
-        const auto date = page.journalDate.value_or(hieda::notebook::JournalDate{});
+        const auto date =
+            page.journalDate.value_or(hieda::notebook::JournalDate{});
         loadJournalDate(QDate(date.year, date.month, date.day));
         return true;
     }
@@ -1636,10 +2019,13 @@ auto NotebookController::navigateToOutlinePage(const hieda::notebook::OutlinePag
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-auto NotebookController::committedEntryPresentation(const QString& entryId,
-                                                    const QString& authoredText) const -> QString {
+auto
+NotebookController::committedEntryPresentation(
+    const QString& entryId, const QString& authoredText) const -> QString
+{
     const auto decodeText = [](std::string_view text) -> QString {
-        return QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
+        return QString::fromUtf8(text.data(),
+                                 static_cast<qsizetype>(text.size()));
     };
     const auto escapeText = [](const QString& text) -> QString {
         auto escaped = text.toHtmlEscaped();
@@ -1650,7 +2036,8 @@ auto NotebookController::committedEntryPresentation(const QString& entryId,
         return authoredText.toHtmlEscaped();
     }
     const auto utf8 = authoredText.toUtf8();
-    const std::string_view source{utf8.constData(), static_cast<std::size_t>(utf8.size())};
+    const std::string_view source{utf8.constData(),
+                                  static_cast<std::size_t>(utf8.size())};
     const auto pageLinks = session_.pageLinks(*id);
     const auto blockReferences = session_.blockReferences(*id);
     if (!pageLinks || !blockReferences) {
@@ -1662,38 +2049,46 @@ auto NotebookController::committedEntryPresentation(const QString& entryId,
         QString label;
     };
     std::vector<SemanticReferencePresentation> references;
-    references.reserve(pageLinks.value().size() + blockReferences.value().size());
+    references.reserve(pageLinks.value().size() +
+                       blockReferences.value().size());
     for (const auto& link : pageLinks.value()) {
         references.push_back(
             {link.sourceByteOffset, link.sourceByteLength,
-             QString::fromUtf8(link.target ? link.target->displayTitle : link.pageName)});
+             QString::fromUtf8(link.target ? link.target->displayTitle
+                                           : link.pageName)});
     }
     for (const auto& reference : blockReferences.value()) {
-        const auto prefix = QString::fromStdString(reference.targetId.toString()).first(8);
+        const auto prefix =
+            QString::fromStdString(reference.targetId.toString()).first(8);
         references.push_back(
             {reference.sourceByteOffset, reference.sourceByteLength,
-             reference.target ? tr("Block %1").arg(prefix) : tr("Missing Block %1").arg(prefix)});
+             reference.target ? tr("Block %1").arg(prefix)
+                              : tr("Missing Block %1").arg(prefix)});
     }
     std::ranges::sort(references, {}, &SemanticReferencePresentation::offset);
     QString presentation;
     std::size_t sourceOffset = 0;
     qsizetype characterOffset = 0;
     for (const auto& reference : references) {
-        const auto prefix =
-            decodeText(source.substr(sourceOffset, reference.offset - sourceOffset));
+        const auto prefix = decodeText(
+            source.substr(sourceOffset, reference.offset - sourceOffset));
         presentation += escapeText(prefix);
         characterOffset += prefix.size();
         presentation += QStringLiteral("<a href=\"%1\">%2</a>")
                             .arg(characterOffset)
                             .arg(reference.label.toHtmlEscaped());
-        characterOffset += decodeText(source.substr(reference.offset, reference.length)).size();
+        characterOffset +=
+            decodeText(source.substr(reference.offset, reference.length))
+                .size();
         sourceOffset = reference.offset + reference.length;
     }
     presentation += escapeText(decodeText(source.substr(sourceOffset)));
     return presentation;
 }
 
-void NotebookController::navigateToJournalDate(const QDate& date) {
+void
+NotebookController::navigateToJournalDate(const QDate& date)
+{
     if (!date.isValid()) {
         error_ = tr("Choose a valid Journal date.");
         emit stateChanged();
@@ -1701,20 +2096,34 @@ void NotebookController::navigateToJournalDate(const QDate& date) {
     }
     loadJournalDate(date);
 }
-void NotebookController::navigateToJournalDateText(const QString& isoDate) {
+void
+NotebookController::navigateToJournalDateText(const QString& isoDate)
+{
     navigateToJournalDate(QDate::fromString(isoDate, Qt::ISODate));
 }
-void NotebookController::navigateToToday() {
+void
+NotebookController::navigateToToday()
+{
     loadJournalDate(QDate::currentDate());
 }
-void NotebookController::navigateToPreviousJournalDate() {
-    loadJournalDate((journalDate_.isValid() ? journalDate_ : QDate::currentDate()).addDays(-1));
+void
+NotebookController::navigateToPreviousJournalDate()
+{
+    loadJournalDate(
+        (journalDate_.isValid() ? journalDate_ : QDate::currentDate())
+            .addDays(-1));
 }
-void NotebookController::navigateToNextJournalDate() {
-    loadJournalDate((journalDate_.isValid() ? journalDate_ : QDate::currentDate()).addDays(1));
+void
+NotebookController::navigateToNextJournalDate()
+{
+    loadJournalDate(
+        (journalDate_.isValid() ? journalDate_ : QDate::currentDate())
+            .addDays(1));
 }
 
-void NotebookController::accept(const hieda::notebook::NotebookInfo& info) {
+void
+NotebookController::accept(const hieda::notebook::NotebookInfo& info)
+{
     path_ = displayPath(info.path);
     name_ = QFileInfo(path_).completeBaseName();
     error_.clear();
@@ -1723,7 +2132,9 @@ void NotebookController::accept(const hieda::notebook::NotebookInfo& info) {
     emit stateChanged();
 }
 
-void NotebookController::reject(const hieda::notebook::NotebookError& error) {
+void
+NotebookController::reject(const hieda::notebook::NotebookError& error)
+{
     using hieda::notebook::NotebookErrorCode;
     switch (error.code) {
     case NotebookErrorCode::pathNotFound:
@@ -1739,7 +2150,8 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         error_ = tr("That file is not a valid Hieda Notebook.");
         break;
     case NotebookErrorCode::unsupportedVersion:
-        error_ = tr("That Notebook was created by an unsupported Hieda version.");
+        error_ =
+            tr("That Notebook was created by an unsupported Hieda version.");
         break;
     case NotebookErrorCode::alreadyOpen:
         error_ = tr("Close the current Notebook before opening another.");
@@ -1760,7 +2172,8 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         error_ = tr("Choose a valid Journal date.");
         break;
     case NotebookErrorCode::invalidAuthoredText:
-        error_ = tr("An Entry must contain at most 1 MiB of valid Unicode text and no control "
+        error_ = tr("An Entry must contain at most 1 MiB of valid Unicode text "
+                    "and no control "
                     "characters other than line feeds.");
         break;
     case NotebookErrorCode::blockNotFound:
@@ -1785,7 +2198,8 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         error_ = tr("There is no outline edit to redo.");
         break;
     case NotebookErrorCode::invalidPageName:
-        error_ = tr("A Page name must use slash-separated 1–64 character lowercase ASCII segments "
+        error_ = tr("A Page name must use slash-separated 1–64 character "
+                    "lowercase ASCII segments "
                     "and be at most 255 bytes.");
         break;
     case NotebookErrorCode::invalidPageTitle:
@@ -1798,22 +2212,28 @@ void NotebookController::reject(const hieda::notebook::NotebookError& error) {
         error_ = tr("That Page is no longer available.");
         break;
     case NotebookErrorCode::staleHierarchyCursor:
-        error_ = tr("The Page Hierarchy changed; reload it from the beginning.");
+        error_ =
+            tr("The Page Hierarchy changed; reload it from the beginning.");
         break;
     case NotebookErrorCode::pageLinkNotFound:
-        error_ = tr("Place the cursor inside a committed Page Link before following it.");
+        error_ = tr("Place the cursor inside a committed Page Link before "
+                    "following it.");
         break;
     case NotebookErrorCode::blockReferenceNotFound:
-        error_ = tr("Place the cursor inside a committed Block Reference before following it.");
+        error_ = tr("Place the cursor inside a committed Block Reference "
+                    "before following it.");
         break;
     case NotebookErrorCode::staleLinkedReferencesCursor:
-        error_ = tr("Linked References changed; reload them from the beginning.");
+        error_ =
+            tr("Linked References changed; reload them from the beginning.");
         break;
     }
     emit stateChanged();
 }
 
-void NotebookController::rejectSave(const hieda::notebook::NotebookError& error) {
+void
+NotebookController::rejectSave(const hieda::notebook::NotebookError& error)
+{
     if (error.code == hieda::notebook::NotebookErrorCode::ioFailure) {
         error_ = tr("Hieda could not safely save that outline change.");
         emit stateChanged();
@@ -1822,7 +2242,9 @@ void NotebookController::rejectSave(const hieda::notebook::NotebookError& error)
     reject(error);
 }
 
-void NotebookController::loadJournalDate(const QDate& date) {
+void
+NotebookController::loadJournalDate(const QDate& date)
+{
     try {
         const auto result = session_.outline(domainJournalDate(date));
         if (!result) {
@@ -1838,7 +2260,8 @@ void NotebookController::loadJournalDate(const QDate& date) {
         pagePreviewSources_.setEntries({});
         pageLinkedReferences_.targetId =
             result.value().metadata
-                ? std::optional<hieda::notebook::BlockId>{result.value().metadata->id}
+                ? std::optional<hieda::notebook::BlockId>{result.value()
+                                                              .metadata->id}
                 : std::nullopt;
         refreshLinkedReferences();
         static_cast<void>(pageHierarchy_.refresh({}));
@@ -1850,7 +2273,9 @@ void NotebookController::loadJournalDate(const QDate& date) {
     }
 }
 
-void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
+void
+NotebookController::loadPage(const hieda::notebook::BlockId& pageId)
+{
     try {
         const auto result = session_.outline(pageId);
         if (!result) {
@@ -1876,12 +2301,16 @@ void NotebookController::loadPage(const hieda::notebook::BlockId& pageId) {
     }
 }
 
-void NotebookController::loadPagePreview(const QString& pageName) {
+void
+NotebookController::loadPagePreview(const QString& pageName)
+{
     const auto utf8 = pageName.toUtf8();
-    const std::string name{utf8.constData(), static_cast<std::size_t>(utf8.size())};
+    const std::string name{utf8.constData(),
+                           static_cast<std::size_t>(utf8.size())};
     const auto preview = session_.unresolvedPageLinkSources(name);
     if (!preview) {
-        if (preview.error().code != hieda::notebook::NotebookErrorCode::pageNameConflict) {
+        if (preview.error().code !=
+            hieda::notebook::NotebookErrorCode::pageNameConflict) {
             reject(preview.error());
             return;
         }
@@ -1909,27 +2338,34 @@ void NotebookController::loadPagePreview(const QString& pageName) {
     emit stateChanged();
 }
 
-void NotebookController::appendPagePreviewUnresolvedPageLinkSourcesBatch(
-    const hieda::notebook::UnresolvedPageLinkSourcesBatch& batch) {
+void
+NotebookController::appendPagePreviewUnresolvedPageLinkSourcesBatch(
+    const hieda::notebook::UnresolvedPageLinkSourcesBatch& batch)
+{
     IncomingSourcesViewState view;
     appendIncomingSourcesBatch(batch, view, pagePreviewSources_);
     pagePreviewUnresolvedPageLinkSourceTotal_ = view.total;
     pagePreviewUnresolvedPageLinkSourcesCursor_ = view.cursor;
     const auto utf8 = currentPageName_.toUtf8();
-    const std::string name{utf8.constData(), static_cast<std::size_t>(utf8.size())};
+    const std::string name{utf8.constData(),
+                           static_cast<std::size_t>(utf8.size())};
     for (const auto& source : batch.sources) {
         if (source.occurrenceCount <= source.occurrences.size()) {
             continue;
         }
-        const auto first = session_.unresolvedPageLinkOccurrences(name, source.source.metadata.id);
+        const auto first = session_.unresolvedPageLinkOccurrences(
+            name, source.source.metadata.id);
         if (first && first.value().continuationCursor) {
             pagePreviewUnresolvedPageLinkOccurrenceCursors_.insert(
-                displayId(source.source.metadata.id), *first.value().continuationCursor);
+                displayId(source.source.metadata.id),
+                *first.value().continuationCursor);
         }
     }
 }
 
-auto NotebookController::loadMorePagePreviewUnresolvedPageLinkSources() -> bool {
+auto
+NotebookController::loadMorePagePreviewUnresolvedPageLinkSources() -> bool
+{
     if (!currentPagePreview_ || !pagePreviewUnresolvedPageLinkSourcesCursor_) {
         return false;
     }
@@ -1938,7 +2374,8 @@ auto NotebookController::loadMorePagePreviewUnresolvedPageLinkSources() -> bool 
         {utf8.constData(), static_cast<std::size_t>(utf8.size())},
         pagePreviewUnresolvedPageLinkSourcesCursor_);
     if (!batch &&
-        batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+        batch.error().code ==
+            hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
         loadPagePreview(currentPageName_);
         return true;
     }
@@ -1951,19 +2388,24 @@ auto NotebookController::loadMorePagePreviewUnresolvedPageLinkSources() -> bool 
     return true;
 }
 
-auto NotebookController::loadMorePagePreviewUnresolvedPageLinkOccurrences(
-    const QString& sourceEntryId) -> bool {
+auto
+NotebookController::loadMorePagePreviewUnresolvedPageLinkOccurrences(
+    const QString& sourceEntryId) -> bool
+{
     const auto sourceId = blockId(sourceEntryId);
-    const auto foundCursor = pagePreviewUnresolvedPageLinkOccurrenceCursors_.find(sourceEntryId);
+    const auto foundCursor =
+        pagePreviewUnresolvedPageLinkOccurrenceCursors_.find(sourceEntryId);
     if (!currentPagePreview_ || !sourceId ||
         foundCursor == pagePreviewUnresolvedPageLinkOccurrenceCursors_.end()) {
         return false;
     }
     const auto utf8 = currentPageName_.toUtf8();
     const auto batch = session_.unresolvedPageLinkOccurrences(
-        {utf8.constData(), static_cast<std::size_t>(utf8.size())}, *sourceId, foundCursor.value());
+        {utf8.constData(), static_cast<std::size_t>(utf8.size())}, *sourceId,
+        foundCursor.value());
     if (!batch) {
-        if (batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+        if (batch.error().code ==
+            hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
             loadPagePreview(currentPageName_);
             return true;
         }
@@ -1975,7 +2417,8 @@ auto NotebookController::loadMorePagePreviewUnresolvedPageLinkOccurrences(
     QStringList snippets;
     for (const auto& occurrence : batch.value().occurrences) {
         snippets.push_back(linkedReferenceSnippet(
-            {authored.constData(), static_cast<std::size_t>(authored.size())}, occurrence));
+            {authored.constData(), static_cast<std::size_t>(authored.size())},
+            occurrence));
     }
     if (batch.value().continuationCursor) {
         foundCursor.value() = *batch.value().continuationCursor;
@@ -1989,12 +2432,17 @@ auto NotebookController::loadMorePagePreviewUnresolvedPageLinkOccurrences(
     return true;
 }
 
-auto NotebookController::currentPageAddress() const -> hieda::notebook::PageAddress {
-    return currentPageId_ ? hieda::notebook::PageAddress{*currentPageId_}
-                          : hieda::notebook::PageAddress{domainJournalDate(journalDate_)};
+auto
+NotebookController::currentPageAddress() const -> hieda::notebook::PageAddress
+{
+    return currentPageId_
+               ? hieda::notebook::PageAddress{*currentPageId_}
+               : hieda::notebook::PageAddress{domainJournalDate(journalDate_)};
 }
 
-void NotebookController::refreshLinkedReferences() {
+void
+NotebookController::refreshLinkedReferences()
+{
     linkedReferenceSources_.setEntries({});
     pageLinkedReferences_.total = 0;
     pageLinkedReferences_.cursor.reset();
@@ -2003,18 +2451,22 @@ void NotebookController::refreshLinkedReferences() {
     if (!session_.isOpen() || !pageLinkedReferences_.targetId) {
         return;
     }
-    const auto batch = session_.linkedReferences(*pageLinkedReferences_.targetId);
+    const auto batch =
+        session_.linkedReferences(*pageLinkedReferences_.targetId);
     if (!batch) {
         pageLinkedReferences_.targetId.reset();
         return;
     }
-    appendIncomingSourcesBatch(batch.value(), pageLinkedReferences_, linkedReferenceSources_);
+    appendIncomingSourcesBatch(batch.value(), pageLinkedReferences_,
+                               linkedReferenceSources_);
 }
 
 template <typename Batch>
-void NotebookController::appendIncomingSourcesBatch(const Batch& batch,
-                                                    IncomingSourcesViewState& view,
-                                                    OutlineEntryModel& model) {
+void
+NotebookController::appendIncomingSourcesBatch(const Batch& batch,
+                                               IncomingSourcesViewState& view,
+                                               OutlineEntryModel& model)
+{
     view.total = static_cast<qsizetype>(batch.totalSourceCount);
     view.cursor = batch.continuationCursor;
     std::vector<OutlineEntry> entries;
@@ -2022,24 +2474,26 @@ void NotebookController::appendIncomingSourcesBatch(const Batch& batch,
     for (const auto& source : batch.sources) {
         QStringList pathParts;
         if (source.structuralPage.kind == hieda::notebook::PageKind::journal) {
-            const auto date =
-                source.structuralPage.journalDate.value_or(hieda::notebook::JournalDate{});
-            pathParts.push_back(QDate(date.year, date.month, date.day).toString(Qt::ISODate));
-        } else {
+            const auto date = source.structuralPage.journalDate.value_or(
+                hieda::notebook::JournalDate{});
             pathParts.push_back(
-                QStringLiteral("%1 — %2").arg(QString::fromUtf8(source.structuralPage.displayTitle),
-                                              QString::fromUtf8(source.structuralPage.name)));
+                QDate(date.year, date.month, date.day).toString(Qt::ISODate));
+        } else {
+            pathParts.push_back(QStringLiteral("%1 — %2").arg(
+                QString::fromUtf8(source.structuralPage.displayTitle),
+                QString::fromUtf8(source.structuralPage.name)));
         }
         for (const auto& ancestorId : source.containmentPath) {
             if (ancestorId == source.source.metadata.id) {
                 break;
             }
-            const auto ancestor =
-                std::ranges::find_if(source.structuralPage.entries, [&](const auto& entry) -> bool {
+            const auto ancestor = std::ranges::find_if(
+                source.structuralPage.entries, [&](const auto& entry) -> bool {
                     return entry.metadata.id == ancestorId;
                 });
             if (ancestor != source.structuralPage.entries.end()) {
-                auto label = QString::fromUtf8(ancestor->authoredText).section('\n', 0, 0);
+                auto label = QString::fromUtf8(ancestor->authoredText)
+                                 .section('\n', 0, 0);
                 if (label.size() > 40) {
                     label = label.first(37) + QStringLiteral("…");
                 }
@@ -2047,38 +2501,46 @@ void NotebookController::appendIncomingSourcesBatch(const Batch& batch,
             }
         }
         const auto group = pathParts.takeFirst();
-        const auto context =
-            pathParts.isEmpty() ? tr("Top level") : pathParts.join(QStringLiteral(" › "));
+        const auto context = pathParts.isEmpty()
+                                 ? tr("Top level")
+                                 : pathParts.join(QStringLiteral(" › "));
         QStringList snippets;
         for (const auto& occurrence : source.occurrences) {
-            snippets.push_back(linkedReferenceSnippet(source.source.authoredText, occurrence));
+            snippets.push_back(
+                linkedReferenceSnippet(source.source.authoredText, occurrence));
         }
         const auto presentation = snippets.join(QStringLiteral("<br>"));
         const auto sourceId = displayId(source.source.metadata.id);
         view.contexts.insert(sourceId, context);
-        if (view.targetId && source.occurrenceCount > source.occurrences.size()) {
-            const auto first =
-                session_.linkedReferenceOccurrences(*view.targetId, source.source.metadata.id);
+        if (view.targetId &&
+            source.occurrenceCount > source.occurrences.size()) {
+            const auto first = session_.linkedReferenceOccurrences(
+                *view.targetId, source.source.metadata.id);
             if (first && first.value().continuationCursor) {
-                view.occurrenceCursors.insert(sourceId, *first.value().continuationCursor);
+                view.occurrenceCursors.insert(
+                    sourceId, *first.value().continuationCursor);
             }
         }
         entries.push_back({source.source.metadata, source.source.authoredText,
-                           source.source.parentEntry, context, group, presentation,
+                           source.source.parentEntry, context, group,
+                           presentation,
                            static_cast<qsizetype>(source.occurrenceCount),
                            source.occurrenceCount > source.occurrences.size()});
     }
     model.appendEntries(std::move(entries));
 }
 
-auto NotebookController::loadMoreLinkedReferences() -> bool {
+auto
+NotebookController::loadMoreLinkedReferences() -> bool
+{
     if (!pageLinkedReferences_.targetId || !pageLinkedReferences_.cursor) {
         return false;
     }
-    auto batch =
-        session_.linkedReferences(*pageLinkedReferences_.targetId, pageLinkedReferences_.cursor);
+    auto batch = session_.linkedReferences(*pageLinkedReferences_.targetId,
+                                           pageLinkedReferences_.cursor);
     if (!batch &&
-        batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+        batch.error().code ==
+            hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
         refreshLinkedReferences();
         emit stateChanged();
         return true;
@@ -2087,12 +2549,15 @@ auto NotebookController::loadMoreLinkedReferences() -> bool {
         reject(batch.error());
         return false;
     }
-    appendIncomingSourcesBatch(batch.value(), pageLinkedReferences_, linkedReferenceSources_);
+    appendIncomingSourcesBatch(batch.value(), pageLinkedReferences_,
+                               linkedReferenceSources_);
     emit stateChanged();
     return true;
 }
 
-void NotebookController::refreshBlockLinkedReferences() {
+void
+NotebookController::refreshBlockLinkedReferences()
+{
     blockLinkedReferenceSources_.setEntries({});
     blockLinkedReferences_.total = 0;
     blockLinkedReferences_.cursor.reset();
@@ -2101,22 +2566,27 @@ void NotebookController::refreshBlockLinkedReferences() {
     if (!session_.isOpen() || !blockLinkedReferences_.targetId) {
         return;
     }
-    const auto batch = session_.linkedReferences(*blockLinkedReferences_.targetId);
+    const auto batch =
+        session_.linkedReferences(*blockLinkedReferences_.targetId);
     if (!batch) {
         blockLinkedReferences_.targetId.reset();
         return;
     }
-    appendIncomingSourcesBatch(batch.value(), blockLinkedReferences_, blockLinkedReferenceSources_);
+    appendIncomingSourcesBatch(batch.value(), blockLinkedReferences_,
+                               blockLinkedReferenceSources_);
 }
 
-auto NotebookController::loadMoreBlockLinkedReferences() -> bool {
+auto
+NotebookController::loadMoreBlockLinkedReferences() -> bool
+{
     if (!blockLinkedReferences_.targetId || !blockLinkedReferences_.cursor) {
         return false;
     }
-    auto batch =
-        session_.linkedReferences(*blockLinkedReferences_.targetId, blockLinkedReferences_.cursor);
+    auto batch = session_.linkedReferences(*blockLinkedReferences_.targetId,
+                                           blockLinkedReferences_.cursor);
     if (!batch &&
-        batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+        batch.error().code ==
+            hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
         refreshBlockLinkedReferences();
         emit stateChanged();
         return true;
@@ -2125,23 +2595,28 @@ auto NotebookController::loadMoreBlockLinkedReferences() -> bool {
         reject(batch.error());
         return false;
     }
-    appendIncomingSourcesBatch(batch.value(), blockLinkedReferences_, blockLinkedReferenceSources_);
+    appendIncomingSourcesBatch(batch.value(), blockLinkedReferences_,
+                               blockLinkedReferenceSources_);
     emit stateChanged();
     return true;
 }
 
-auto NotebookController::loadMoreLinkedReferenceOccurrencesFor(
+auto
+NotebookController::loadMoreLinkedReferenceOccurrencesFor(
     const hieda::notebook::BlockId& targetId, const QString& sourceEntryId,
-    OutlineEntryModel& model, QHash<QString, std::string>& occurrenceCursors) -> bool {
+    OutlineEntryModel& model, QHash<QString, std::string>& occurrenceCursors)
+    -> bool
+{
     const auto sourceId = blockId(sourceEntryId);
     const auto foundCursor = occurrenceCursors.find(sourceEntryId);
     if (!sourceId || foundCursor == occurrenceCursors.end()) {
         return false;
     }
-    const auto batch =
-        session_.linkedReferenceOccurrences(targetId, *sourceId, foundCursor.value());
+    const auto batch = session_.linkedReferenceOccurrences(targetId, *sourceId,
+                                                           foundCursor.value());
     if (!batch) {
-        if (batch.error().code == hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
+        if (batch.error().code ==
+            hieda::notebook::NotebookErrorCode::staleLinkedReferencesCursor) {
             refreshLinkedReferences();
             refreshBlockLinkedReferences();
             emit stateChanged();
@@ -2158,35 +2633,46 @@ auto NotebookController::loadMoreLinkedReferenceOccurrencesFor(
     QStringList snippets;
     for (const auto& occurrence : batch.value().occurrences) {
         snippets.push_back(linkedReferenceSnippet(
-            {authored.constData(), static_cast<std::size_t>(authored.size())}, occurrence));
+            {authored.constData(), static_cast<std::size_t>(authored.size())},
+            occurrence));
     }
     if (batch.value().continuationCursor) {
         foundCursor.value() = *batch.value().continuationCursor;
     } else {
         occurrenceCursors.erase(foundCursor);
     }
-    model.appendLinkedReferencePresentation(*sourceId, snippets.join(QStringLiteral("<br>")),
-                                            batch.value().continuationCursor.has_value());
+    model.appendLinkedReferencePresentation(
+        *sourceId, snippets.join(QStringLiteral("<br>")),
+        batch.value().continuationCursor.has_value());
     emit stateChanged();
     return true;
 }
 
-auto NotebookController::loadMoreLinkedReferenceOccurrences(const QString& sourceEntryId) -> bool {
+auto
+NotebookController::loadMoreLinkedReferenceOccurrences(
+    const QString& sourceEntryId) -> bool
+{
     return pageLinkedReferences_.targetId &&
-           loadMoreLinkedReferenceOccurrencesFor(*pageLinkedReferences_.targetId, sourceEntryId,
-                                                 linkedReferenceSources_,
-                                                 pageLinkedReferences_.occurrenceCursors);
+           loadMoreLinkedReferenceOccurrencesFor(
+               *pageLinkedReferences_.targetId, sourceEntryId,
+               linkedReferenceSources_,
+               pageLinkedReferences_.occurrenceCursors);
 }
 
-auto NotebookController::loadMoreBlockLinkedReferenceOccurrences(const QString& sourceEntryId)
-    -> bool {
+auto
+NotebookController::loadMoreBlockLinkedReferenceOccurrences(
+    const QString& sourceEntryId) -> bool
+{
     return blockLinkedReferences_.targetId &&
-           loadMoreLinkedReferenceOccurrencesFor(*blockLinkedReferences_.targetId, sourceEntryId,
-                                                 blockLinkedReferenceSources_,
-                                                 blockLinkedReferences_.occurrenceCursors);
+           loadMoreLinkedReferenceOccurrencesFor(
+               *blockLinkedReferences_.targetId, sourceEntryId,
+               blockLinkedReferenceSources_,
+               blockLinkedReferences_.occurrenceCursors);
 }
 
-void NotebookController::refreshPages() {
+void
+NotebookController::refreshPages()
+{
     const auto result = session_.pages();
     if (!result) {
         reject(result.error());
@@ -2196,17 +2682,21 @@ void NotebookController::refreshPages() {
     pageIds_.clear();
     for (const auto& page : result.value()) {
         pageIds_.push_back(page.metadata.id);
-        pageChoices_.push_back(QStringLiteral("%1 — %2").arg(QString::fromUtf8(page.displayTitle),
-                                                             QString::fromUtf8(page.name)));
+        pageChoices_.push_back(
+            QStringLiteral("%1 — %2").arg(QString::fromUtf8(page.displayTitle),
+                                          QString::fromUtf8(page.name)));
     }
-    static_cast<void>(pageHierarchy_.refresh(isJournalPage() ? QString{} : currentPageName_));
+    static_cast<void>(
+        pageHierarchy_.refresh(isJournalPage() ? QString{} : currentPageName_));
     emit stateChanged();
 }
 
-void NotebookController::scheduleMidnightRefresh() {
+void
+NotebookController::scheduleMidnightRefresh()
+{
     const auto now = QDateTime::currentDateTime();
     const auto nextMidnight = QDateTime(now.date().addDays(1).startOfDay());
     const auto milliseconds = std::max<qint64>(1, now.msecsTo(nextMidnight));
-    midnightTimer_.start(
-        static_cast<int>(std::min<qint64>(milliseconds, std::numeric_limits<int>::max())));
+    midnightTimer_.start(static_cast<int>(
+        std::min<qint64>(milliseconds, std::numeric_limits<int>::max())));
 }

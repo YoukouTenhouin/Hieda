@@ -28,8 +28,10 @@
 namespace {
 
 template <typename Predicate>
-auto waitUntil(const Predicate& predicate,
-               std::chrono::milliseconds timeout = std::chrono::seconds(1)) -> bool {
+auto
+waitUntil(const Predicate& predicate,
+          std::chrono::milliseconds timeout = std::chrono::seconds(1)) -> bool
+{
     QElapsedTimer timer;
     timer.start();
     while (!predicate() && timer.elapsed() < timeout.count()) {
@@ -39,15 +41,20 @@ auto waitUntil(const Predicate& predicate,
     return predicate();
 }
 
-void sendKeyClickWithoutProcessingEvents(QQuickWindow* window, Qt::Key key,
-                                         Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+void
+sendKeyClickWithoutProcessingEvents(
+    QQuickWindow* window, Qt::Key key,
+    Qt::KeyboardModifiers modifiers = Qt::NoModifier)
+{
     QKeyEvent press(QEvent::KeyPress, key, modifiers);
     QKeyEvent release(QEvent::KeyRelease, key, modifiers);
     QCoreApplication::sendEvent(window, &press);
     QCoreApplication::sendEvent(window, &release);
 }
 
-void collectQmlWarnings(QQmlEngine& engine, QStringList& messages) {
+void
+collectQmlWarnings(QQmlEngine& engine, QStringList& messages)
+{
     QObject::connect(&engine, &QQmlEngine::warnings, &engine,
                      [&messages](const QList<QQmlError>& warnings) -> void {
                          for (const auto& warning : warnings) {
@@ -61,24 +68,28 @@ void collectQmlWarnings(QQmlEngine& engine, QStringList& messages) {
 
 } // namespace
 
-TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
+TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation")
+{
     QAccessible::setActive(true);
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("page-ui.hieda"))));
-    REQUIRE(controller.createPage(QStringLiteral("project"), QStringLiteral("Project")));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("page-ui.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("project"),
+                                  QStringLiteral("Project")));
     const auto projectId = controller.currentPageId();
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("durable")) == 0);
-    REQUIRE(controller.createPage(QStringLiteral("second"), QStringLiteral("Second Page")));
+    REQUIRE(controller.createPage(QStringLiteral("second"),
+                                  QStringLiteral("Second Page")));
     controller.navigateToPage(projectId);
 
     QQmlEngine engine;
     QSignalSpy qmlWarnings(&engine, &QQmlEngine::warnings);
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -88,20 +99,27 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     REQUIRE(pageList != nullptr);
     CHECK(sidebar->isVisible());
     CHECK(pageList->property("rows").toInt() == 2);
-    REQUIRE(root->findChild<QObject*>(QStringLiteral("newPageAction")) != nullptr);
-    REQUIRE(root->findChild<QObject*>(QStringLiteral("goToPageAction")) != nullptr);
-    REQUIRE(root->findChild<QObject*>(QStringLiteral("renamePageAction")) != nullptr);
-    auto* pagePicker = root->findChild<QQuickItem*>(QStringLiteral("pagePicker"));
-    auto* pageFilterField = root->findChild<QQuickItem*>(QStringLiteral("pageFilterField"));
+    REQUIRE(root->findChild<QObject*>(QStringLiteral("newPageAction")) !=
+            nullptr);
+    REQUIRE(root->findChild<QObject*>(QStringLiteral("goToPageAction")) !=
+            nullptr);
+    REQUIRE(root->findChild<QObject*>(QStringLiteral("renamePageAction")) !=
+            nullptr);
+    auto* pagePicker =
+        root->findChild<QQuickItem*>(QStringLiteral("pagePicker"));
+    auto* pageFilterField =
+        root->findChild<QQuickItem*>(QStringLiteral("pageFilterField"));
     REQUIRE(pagePicker != nullptr);
     REQUIRE(pageFilterField != nullptr);
     CHECK_FALSE(pagePicker->property("editable").toBool());
     pageFilterField->setProperty("text", QStringLiteral("project"));
-    REQUIRE(
-        waitUntil([pagePicker]() -> bool { return pagePicker->property("count").toInt() == 1; }));
+    REQUIRE(waitUntil([pagePicker]() -> bool {
+        return pagePicker->property("count").toInt() == 1;
+    }));
 
     auto* window = qobject_cast<QQuickWindow*>(root.get());
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(window != nullptr);
     REQUIRE(outlineList != nullptr);
     window->setWidth(1254);
@@ -111,42 +129,55 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
     QVariant entryValue;
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)));
+                                      Q_RETURN_ARG(QVariant, entryValue),
+                                      Q_ARG(QVariant, 0)));
     auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
     REQUIRE(entry != nullptr);
-    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* editor =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
     REQUIRE(editor != nullptr);
     editor->forceActiveFocus();
     REQUIRE(waitUntil([editor]() -> bool { return editor->hasActiveFocus(); }));
     editor->setProperty("text", QStringLiteral("committed before rename"));
 
-    auto* renameAction = root->findChild<QObject*>(QStringLiteral("renamePageAction"));
-    auto* renameDialog = root->findChild<QObject*>(QStringLiteral("renamePageDialog"));
-    auto* renameName = root->findChild<QQuickItem*>(QStringLiteral("renamePageName"));
-    auto* renameTitle = root->findChild<QQuickItem*>(QStringLiteral("renamePageTitle"));
+    auto* renameAction =
+        root->findChild<QObject*>(QStringLiteral("renamePageAction"));
+    auto* renameDialog =
+        root->findChild<QObject*>(QStringLiteral("renamePageDialog"));
+    auto* renameName =
+        root->findChild<QQuickItem*>(QStringLiteral("renamePageName"));
+    auto* renameTitle =
+        root->findChild<QQuickItem*>(QStringLiteral("renamePageTitle"));
     REQUIRE(renameAction != nullptr);
     REQUIRE(renameDialog != nullptr);
     REQUIRE(renameName != nullptr);
     REQUIRE(renameTitle != nullptr);
     REQUIRE(QMetaObject::invokeMethod(renameAction, "trigger"));
-    REQUIRE(
-        waitUntil([renameDialog]() -> bool { return renameDialog->property("visible").toBool(); }));
+    REQUIRE(waitUntil([renameDialog]() -> bool {
+        return renameDialog->property("visible").toBool();
+    }));
     renameName->setProperty("text", QStringLiteral("renamed_project"));
     renameTitle->setProperty("text", QStringLiteral("Renamed Project"));
     REQUIRE(QMetaObject::invokeMethod(renameDialog, "accept"));
     REQUIRE(waitUntil([&controller]() -> bool {
-        return controller.currentPageName() == QStringLiteral("renamed_project") &&
-               controller.currentPageTitle() == QStringLiteral("Renamed Project");
+        return controller.currentPageName() ==
+                   QStringLiteral("renamed_project") &&
+               controller.currentPageTitle() ==
+                   QStringLiteral("Renamed Project");
     }));
     REQUIRE(waitUntil([editor]() -> bool { return editor->hasActiveFocus(); }));
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("committed before rename"));
     auto* heading = root->findChild<QQuickItem*>(QStringLiteral("pageHeading"));
     REQUIRE(heading != nullptr);
-    CHECK(heading->property("text").toString().contains(QStringLiteral("Renamed Project")));
-    CHECK(heading->property("text").toString().contains(QStringLiteral("renamed_project")));
-    auto* bullet = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryBullet-0"));
+    CHECK(heading->property("text").toString().contains(
+        QStringLiteral("Renamed Project")));
+    CHECK(heading->property("text").toString().contains(
+        QStringLiteral("renamed_project")));
+    auto* bullet =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryBullet-0"));
     REQUIRE(bullet != nullptr);
     auto* listInterface = QAccessible::queryAccessibleInterface(outlineList);
     auto* headingInterface = QAccessible::queryAccessibleInterface(heading);
@@ -156,15 +187,18 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     REQUIRE(headingInterface != nullptr);
     REQUIRE(bulletInterface != nullptr);
     REQUIRE(editorInterface != nullptr);
-    CHECK(listInterface->text(QAccessible::Name) == QStringLiteral("Page Entries"));
+    CHECK(listInterface->text(QAccessible::Name) ==
+          QStringLiteral("Page Entries"));
     CHECK(headingInterface->text(QAccessible::Name) ==
           QStringLiteral("Page title Renamed Project, name renamed_project"));
     CHECK(bulletInterface->role() == QAccessible::ListItem);
-    CHECK(bulletInterface->text(QAccessible::Name) == QStringLiteral("Select Page Entry 1"));
+    CHECK(bulletInterface->text(QAccessible::Name) ==
+          QStringLiteral("Select Page Entry 1"));
     CHECK(editorInterface->role() == QAccessible::EditableText);
 
     qsizetype projectIndex = -1;
-    for (qsizetype index = 0; index < controller.pageChoices().size(); ++index) {
+    for (qsizetype index = 0; index < controller.pageChoices().size();
+         ++index) {
         if (controller.pageIdAt(index) == projectId) {
             projectIndex = index;
             break;
@@ -175,46 +209,58 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     REQUIRE(QMetaObject::invokeMethod(pageList, "pageItemAt",
                                       Q_RETURN_ARG(QVariant, pageDelegateValue),
                                       Q_ARG(QVariant, projectIndex)));
-    auto* pageDelegate = qobject_cast<QQuickItem*>(pageDelegateValue.value<QObject*>());
+    auto* pageDelegate =
+        qobject_cast<QQuickItem*>(pageDelegateValue.value<QObject*>());
     REQUIRE(pageDelegate != nullptr);
     CHECK(pageDelegate->property("highlighted").toBool());
-    CHECK(pageDelegate->mapToItem(sidebar, QPointF(pageDelegate->width(), 0)).x() <=
-          sidebar->width());
+    CHECK(pageDelegate->mapToItem(sidebar, QPointF(pageDelegate->width(), 0))
+              .x() <= sidebar->width());
 
     REQUIRE(QMetaObject::invokeMethod(renameAction, "trigger"));
-    REQUIRE(
-        waitUntil([renameDialog]() -> bool { return renameDialog->property("visible").toBool(); }));
+    REQUIRE(waitUntil([renameDialog]() -> bool {
+        return renameDialog->property("visible").toBool();
+    }));
     renameName->setProperty("text", QStringLiteral("second"));
     renameTitle->setProperty("text", QStringLiteral("Conflict"));
     REQUIRE(QMetaObject::invokeMethod(renameDialog, "accept"));
-    REQUIRE(
-        waitUntil([renameDialog]() -> bool { return renameDialog->property("visible").toBool(); }));
+    REQUIRE(waitUntil([renameDialog]() -> bool {
+        return renameDialog->property("visible").toBool();
+    }));
     CHECK_FALSE(controller.errorMessage().isEmpty());
     REQUIRE(QMetaObject::invokeMethod(renameDialog, "reject"));
     REQUIRE(waitUntil([editor]() -> bool { return editor->hasActiveFocus(); }));
 
-    auto* goToAction = root->findChild<QObject*>(QStringLiteral("goToPageAction"));
-    auto* goToDialog = root->findChild<QObject*>(QStringLiteral("goToPageDialog"));
-    auto* openSelected = root->findChild<QQuickItem*>(QStringLiteral("openSelectedPageButton"));
+    auto* goToAction =
+        root->findChild<QObject*>(QStringLiteral("goToPageAction"));
+    auto* goToDialog =
+        root->findChild<QObject*>(QStringLiteral("goToPageDialog"));
+    auto* openSelected =
+        root->findChild<QQuickItem*>(QStringLiteral("openSelectedPageButton"));
     REQUIRE(goToAction != nullptr);
     REQUIRE(goToDialog != nullptr);
     REQUIRE(openSelected != nullptr);
     qmlWarnings.clear();
     REQUIRE(QMetaObject::invokeMethod(goToAction, "trigger"));
     pageFilterField->setProperty("text", QStringLiteral("second"));
-    REQUIRE(
-        waitUntil([pagePicker]() -> bool { return pagePicker->property("count").toInt() == 1; }));
+    REQUIRE(waitUntil([pagePicker]() -> bool {
+        return pagePicker->property("count").toInt() == 1;
+    }));
     CHECK(qmlWarnings.count() == 0);
     REQUIRE(QMetaObject::invokeMethod(openSelected, "clicked"));
     REQUIRE(waitUntil([&controller, projectId]() -> bool {
-        return !controller.isJournalPage() && controller.currentPageId() != projectId;
+        return !controller.isJournalPage() &&
+               controller.currentPageId() != projectId;
     }));
     CHECK_FALSE(goToDialog->property("visible").toBool());
 
-    auto* newPageAction = root->findChild<QObject*>(QStringLiteral("newPageAction"));
-    auto* newPageDialog = root->findChild<QObject*>(QStringLiteral("newPageDialog"));
-    auto* newPageName = root->findChild<QQuickItem*>(QStringLiteral("newPageName"));
-    auto* newPageTitle = root->findChild<QQuickItem*>(QStringLiteral("newPageTitle"));
+    auto* newPageAction =
+        root->findChild<QObject*>(QStringLiteral("newPageAction"));
+    auto* newPageDialog =
+        root->findChild<QObject*>(QStringLiteral("newPageDialog"));
+    auto* newPageName =
+        root->findChild<QQuickItem*>(QStringLiteral("newPageName"));
+    auto* newPageTitle =
+        root->findChild<QQuickItem*>(QStringLiteral("newPageTitle"));
     REQUIRE(newPageAction != nullptr);
     REQUIRE(newPageDialog != nullptr);
     REQUIRE(newPageName != nullptr);
@@ -224,30 +270,38 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     newPageTitle->setProperty("text", QStringLiteral("Created in Dialog"));
     REQUIRE(QMetaObject::invokeMethod(newPageDialog, "accept"));
     REQUIRE(waitUntil([&controller]() -> bool {
-        return controller.currentPageName() == QStringLiteral("created_in_dialog");
+        return controller.currentPageName() ==
+               QStringLiteral("created_in_dialog");
     }));
     REQUIRE(QMetaObject::invokeMethod(newPageAction, "trigger"));
     newPageName->setProperty("text", QStringLiteral("created_in_dialog"));
     newPageTitle->setProperty("text", QStringLiteral("Duplicate"));
     REQUIRE(QMetaObject::invokeMethod(newPageDialog, "accept"));
-    REQUIRE(waitUntil(
-        [newPageDialog]() -> bool { return newPageDialog->property("visible").toBool(); }));
+    REQUIRE(waitUntil([newPageDialog]() -> bool {
+        return newPageDialog->property("visible").toBool();
+    }));
     REQUIRE(QMetaObject::invokeMethod(newPageDialog, "reject"));
 
-    auto* todayButton = root->findChild<QQuickItem*>(QStringLiteral("todayJournalButton"));
-    auto* previousButton = root->findChild<QQuickItem*>(QStringLiteral("previousJournalButton"));
-    auto* nextButton = root->findChild<QQuickItem*>(QStringLiteral("nextJournalButton"));
-    auto* newPageButton = root->findChild<QQuickItem*>(QStringLiteral("newPageButton"));
+    auto* todayButton =
+        root->findChild<QQuickItem*>(QStringLiteral("todayJournalButton"));
+    auto* previousButton =
+        root->findChild<QQuickItem*>(QStringLiteral("previousJournalButton"));
+    auto* nextButton =
+        root->findChild<QQuickItem*>(QStringLiteral("nextJournalButton"));
+    auto* newPageButton =
+        root->findChild<QQuickItem*>(QStringLiteral("newPageButton"));
     REQUIRE(todayButton != nullptr);
     REQUIRE(previousButton != nullptr);
     REQUIRE(nextButton != nullptr);
     REQUIRE(newPageButton != nullptr);
     CHECK(previousButton->mapToItem(sidebar, QPointF{}).x() >= 0);
-    CHECK(nextButton->mapToItem(sidebar, QPointF(nextButton->width(), 0)).x() <= sidebar->width());
-    CHECK(newPageButton->mapToItem(sidebar, QPointF(newPageButton->width(), 0)).x() <=
+    CHECK(nextButton->mapToItem(sidebar, QPointF(nextButton->width(), 0)).x() <=
           sidebar->width());
+    CHECK(newPageButton->mapToItem(sidebar, QPointF(newPageButton->width(), 0))
+              .x() <= sidebar->width());
     REQUIRE(QMetaObject::invokeMethod(todayButton, "clicked"));
-    REQUIRE(waitUntil([&controller]() -> bool { return controller.isJournalPage(); }));
+    REQUIRE(waitUntil(
+        [&controller]() -> bool { return controller.isJournalPage(); }));
     const auto today = controller.journalDate();
     CHECK(todayButton->property("highlighted").toBool());
     REQUIRE(QMetaObject::invokeMethod(previousButton, "clicked"));
@@ -256,26 +310,30 @@ TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation") {
     CHECK(controller.journalDate() == today);
     controller.navigateToPage(projectId);
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("committed before rename"));
 }
 
-TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
+TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("hierarchy-ui.hieda"))));
-    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"), QStringLiteral("Alpha")));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("hierarchy-ui.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"),
+                                  QStringLiteral("Alpha")));
     controller.navigateToPageName(QStringLiteral("work/client"));
     REQUIRE(controller.currentPagePreview());
 
     QStringList qmlWarningMessages;
     QQmlEngine engine;
     collectQmlWarnings(engine, qmlWarningMessages);
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -286,9 +344,12 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     window->show();
     auto* pageList = root->findChild<QQuickItem*>(QStringLiteral("pageList"));
     auto* heading = root->findChild<QQuickItem*>(QStringLiteral("pageHeading"));
-    auto* materializeButton = root->findChild<QQuickItem*>(QStringLiteral("materializePageButton"));
-    auto* materializeDialog = root->findChild<QObject*>(QStringLiteral("materializePageDialog"));
-    auto* materializeTitle = root->findChild<QQuickItem*>(QStringLiteral("materializePageTitle"));
+    auto* materializeButton =
+        root->findChild<QQuickItem*>(QStringLiteral("materializePageButton"));
+    auto* materializeDialog =
+        root->findChild<QObject*>(QStringLiteral("materializePageDialog"));
+    auto* materializeTitle =
+        root->findChild<QQuickItem*>(QStringLiteral("materializePageTitle"));
     REQUIRE(pageList != nullptr);
     REQUIRE(heading != nullptr);
     REQUIRE(materializeButton != nullptr);
@@ -296,51 +357,62 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     REQUIRE(materializeTitle != nullptr);
     const auto hierarchyDelegateAt = [pageList](int row) -> QQuickItem* {
         QVariant item;
-        if (!QMetaObject::invokeMethod(pageList, "pageItemAt", Q_RETURN_ARG(QVariant, item),
+        if (!QMetaObject::invokeMethod(pageList, "pageItemAt",
+                                       Q_RETURN_ARG(QVariant, item),
                                        Q_ARG(QVariant, row))) {
             return nullptr;
         }
         return qobject_cast<QQuickItem*>(item.value<QObject*>());
     };
-    REQUIRE(
-        waitUntil([&hierarchyDelegateAt]() -> bool { return hierarchyDelegateAt(1) != nullptr; }));
+    REQUIRE(waitUntil([&hierarchyDelegateAt]() -> bool {
+        return hierarchyDelegateAt(1) != nullptr;
+    }));
     auto* clientDelegate = hierarchyDelegateAt(1);
     REQUIRE(clientDelegate != nullptr);
-    CHECK(clientDelegate->property("text").toString() == QStringLiteral("client (Page Preview)"));
+    CHECK(clientDelegate->property("text").toString() ==
+          QStringLiteral("client (Page Preview)"));
     CHECK(clientDelegate->isVisible());
     CHECK(clientDelegate->width() > 0);
     CHECK(clientDelegate->height() > 0);
     INFO(qmlWarningMessages.join(QLatin1Char('\n')).toStdString());
     CHECK(qmlWarningMessages.isEmpty());
-    CHECK(heading->property("text").toString() == QStringLiteral("work/client — Page Preview"));
+    CHECK(heading->property("text").toString() ==
+          QStringLiteral("work/client — Page Preview"));
     CHECK(materializeButton->isVisible());
 
     REQUIRE(QMetaObject::invokeMethod(materializeButton, "clicked"));
-    REQUIRE(waitUntil(
-        [materializeDialog]() -> bool { return materializeDialog->property("visible").toBool(); }));
+    REQUIRE(waitUntil([materializeDialog]() -> bool {
+        return materializeDialog->property("visible").toBool();
+    }));
     materializeTitle->setProperty("text", QStringLiteral("Client"));
     REQUIRE(QMetaObject::invokeMethod(materializeDialog, "accept"));
-    REQUIRE(waitUntil([&controller]() -> bool { return !controller.currentPagePreview(); }));
+    REQUIRE(waitUntil(
+        [&controller]() -> bool { return !controller.currentPagePreview(); }));
     REQUIRE(waitUntil([&hierarchyDelegateAt]() -> bool {
         const auto* delegate = hierarchyDelegateAt(1);
-        return delegate != nullptr &&
-               delegate->property("text").toString() == QStringLiteral("Client — client");
+        return delegate != nullptr && delegate->property("text").toString() ==
+                                          QStringLiteral("Client — client");
     }));
     clientDelegate = hierarchyDelegateAt(1);
     REQUIRE(clientDelegate != nullptr);
-    CHECK(clientDelegate->property("text").toString() == QStringLiteral("Client — client"));
+    CHECK(clientDelegate->property("text").toString() ==
+          QStringLiteral("Client — client"));
     CHECK(clientDelegate->isVisible());
     CHECK(qmlWarningMessages.isEmpty());
     CHECK(controller.currentPageName() == QStringLiteral("work/client"));
-    CHECK(heading->property("text").toString() == QStringLiteral("Client — work/client"));
+    CHECK(heading->property("text").toString() ==
+          QStringLiteral("Client — work/client"));
 
-    auto* deleteButton = root->findChild<QQuickItem*>(QStringLiteral("deletePageButton"));
+    auto* deleteButton =
+        root->findChild<QQuickItem*>(QStringLiteral("deletePageButton"));
     REQUIRE(deleteButton != nullptr);
     CHECK(deleteButton->isVisible());
     REQUIRE(QMetaObject::invokeMethod(deleteButton, "clicked"));
-    REQUIRE(waitUntil([&controller]() -> bool { return controller.currentPagePreview(); }));
+    REQUIRE(waitUntil(
+        [&controller]() -> bool { return controller.currentPagePreview(); }));
     CHECK(qmlWarningMessages.isEmpty());
-    CHECK(heading->property("text").toString() == QStringLiteral("work/client — Page Preview"));
+    CHECK(heading->property("text").toString() ==
+          QStringLiteral("work/client — Page Preview"));
     controller.closeNotebook();
     REQUIRE(waitUntil([root = root.get()]() -> bool {
         return root->property("hierarchyExpandedNames").toList().isEmpty();
@@ -349,29 +421,36 @@ TEST_CASE("the Page sidebar opens and materializes hierarchy Page Previews") {
     CHECK(qmlWarningMessages.isEmpty());
 }
 
-TEST_CASE(
-    "committed Page Links render titles follow from the keyboard and keep previews read-only") {
+TEST_CASE("committed Page Links render titles follow from the keyboard and "
+          "keep previews read-only")
+{
     QAccessible::setActive(true);
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("page-links-ui.hieda"))));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QStringLiteral("Target title")));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("page-links-ui.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QStringLiteral("Target title")));
     const auto targetId = controller.currentPageId();
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
-    REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]] then [[missing/page]]")) == 0);
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
+    REQUIRE(controller.insertOutlineEntry(
+                QStringLiteral("[[target]] then [[missing/page]]")) == 0);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
     auto* window = qobject_cast<QQuickWindow*>(root.get());
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
-    auto* previewSourceList = root->findChild<QQuickItem*>(QStringLiteral("pagePreviewSourceList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* previewSourceList =
+        root->findChild<QQuickItem*>(QStringLiteral("pagePreviewSourceList"));
     REQUIRE(window != nullptr);
     REQUIRE(outlineList != nullptr);
     REQUIRE(previewSourceList != nullptr);
@@ -382,23 +461,27 @@ TEST_CASE(
     const auto entryAt = [outlineList](int row) -> QQuickItem* {
         QVariant entryValue;
         if (!QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                       Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, row))) {
+                                       Q_RETURN_ARG(QVariant, entryValue),
+                                       Q_ARG(QVariant, row))) {
             return nullptr;
         }
         return qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
     };
     REQUIRE(waitUntil([&entryAt]() -> bool { return entryAt(0) != nullptr; }));
     auto* entry = entryAt(0);
-    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
-    auto* presentation =
-        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryPresentation-0"));
-    auto* followMenuItem =
-        entry->findChild<QQuickItem*>(QStringLiteral("followPageLinkMenuItem-0"));
+    auto* editor =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* presentation = entry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryPresentation-0"));
+    auto* followMenuItem = entry->findChild<QQuickItem*>(
+        QStringLiteral("followPageLinkMenuItem-0"));
     REQUIRE(editor != nullptr);
     REQUIRE(presentation != nullptr);
     REQUIRE(followMenuItem != nullptr);
-    CHECK(presentation->property("text").toString().contains(QStringLiteral("Target title")));
-    CHECK_FALSE(presentation->property("text").toString().contains(QStringLiteral("[[target]]")));
+    CHECK(presentation->property("text").toString().contains(
+        QStringLiteral("Target title")));
+    CHECK_FALSE(presentation->property("text").toString().contains(
+        QStringLiteral("[[target]]")));
     CHECK(followMenuItem->property("enabled").toBool());
 
     editor->forceActiveFocus();
@@ -409,7 +492,8 @@ TEST_CASE(
     constexpr auto structureModifier = Qt::ControlModifier;
 #endif
     QTest::keyClick(window, Qt::Key_Return, structureModifier);
-    REQUIRE(waitUntil([&controller]() -> bool { return controller.currentPagePreview(); }));
+    REQUIRE(waitUntil(
+        [&controller]() -> bool { return controller.currentPagePreview(); }));
     CHECK(controller.currentPageName() == QStringLiteral("missing/page"));
     REQUIRE(waitUntil([outlineList, previewSourceList]() -> bool {
         return outlineList->property("count").toInt() == 0 &&
@@ -419,16 +503,20 @@ TEST_CASE(
     const auto previewSourceAt = [previewSourceList](int row) -> QQuickItem* {
         QVariant sourceValue;
         if (!QMetaObject::invokeMethod(previewSourceList, "sourceItemAt",
-                                       Q_RETURN_ARG(QVariant, sourceValue), Q_ARG(QVariant, row))) {
+                                       Q_RETURN_ARG(QVariant, sourceValue),
+                                       Q_ARG(QVariant, row))) {
             return nullptr;
         }
         return qobject_cast<QQuickItem*>(sourceValue.value<QObject*>());
     };
-    REQUIRE(waitUntil([&previewSourceAt]() -> bool { return previewSourceAt(0) != nullptr; }));
+    REQUIRE(waitUntil([&previewSourceAt]() -> bool {
+        return previewSourceAt(0) != nullptr;
+    }));
     CHECK(previewSourceAt(1) == nullptr);
     auto* previewSource = previewSourceAt(0);
     REQUIRE(previewSource != nullptr);
-    const auto* previewSourceInterface = QAccessible::queryAccessibleInterface(previewSource);
+    const auto* previewSourceInterface =
+        QAccessible::queryAccessibleInterface(previewSource);
     REQUIRE(previewSourceInterface != nullptr);
     CHECK(previewSourceInterface->role() == QAccessible::ListItem);
     CHECK(previewSourceInterface->text(QAccessible::Name) ==
@@ -438,45 +526,55 @@ TEST_CASE(
                      OutlineEntryModel::LinkedReferencePresentationRole)
               .toString()
               .contains(QStringLiteral("missing/page")));
-    CHECK(root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) == nullptr);
+    CHECK(root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) ==
+          nullptr);
 
     controller.navigateToPageName(QStringLiteral("source"));
     REQUIRE(waitUntil([&entryAt]() -> bool { return entryAt(0) != nullptr; }));
     entry = entryAt(0);
-    editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
-    followMenuItem = entry->findChild<QQuickItem*>(QStringLiteral("followPageLinkMenuItem-0"));
+    editor =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    followMenuItem = entry->findChild<QQuickItem*>(
+        QStringLiteral("followPageLinkMenuItem-0"));
     REQUIRE(editor != nullptr);
     REQUIRE(followMenuItem != nullptr);
     editor->setProperty("cursorPosition", 2);
     REQUIRE(QMetaObject::invokeMethod(entry, "openContextMenu"));
-    REQUIRE(waitUntil([followMenuItem]() -> bool { return followMenuItem->isVisible(); }));
+    REQUIRE(waitUntil(
+        [followMenuItem]() -> bool { return followMenuItem->isVisible(); }));
     const auto menuItemCenter = followMenuItem->mapToScene(
         QPointF(followMenuItem->width() / 2, followMenuItem->height() / 2));
     QTest::mouseClick(followMenuItem->window(), Qt::LeftButton, Qt::NoModifier,
                       menuItemCenter.toPoint());
-    REQUIRE(waitUntil(
-        [&controller, &targetId]() -> bool { return controller.currentPageId() == targetId; }));
+    REQUIRE(waitUntil([&controller, &targetId]() -> bool {
+        return controller.currentPageId() == targetId;
+    }));
 }
 
-TEST_CASE("resolved Page Link titles size their outline rows") {
+TEST_CASE("resolved Page Link titles size their outline rows")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("page-link-height.hieda"))));
-    REQUIRE(controller.createPage(QStringLiteral("target"), QString(240, QLatin1Char('W'))));
-    REQUIRE(controller.createPage(QStringLiteral("source"), QStringLiteral("Source")));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("page-link-height.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("target"),
+                                  QString(240, QLatin1Char('W'))));
+    REQUIRE(controller.createPage(QStringLiteral("source"),
+                                  QStringLiteral("Source")));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("[[target]]")) == 0);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
     auto* window = qobject_cast<QQuickWindow*>(root.get());
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(window != nullptr);
     REQUIRE(outlineList != nullptr);
     window->setWidth(640);
@@ -486,14 +584,16 @@ TEST_CASE("resolved Page Link titles size their outline rows") {
     QVariant entryValue;
     REQUIRE(waitUntil([outlineList, &entryValue]() -> bool {
         return QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                         Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)) &&
+                                         Q_RETURN_ARG(QVariant, entryValue),
+                                         Q_ARG(QVariant, 0)) &&
                entryValue.value<QObject*>() != nullptr;
     }));
     auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
     REQUIRE(entry != nullptr);
-    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
-    auto* presentation =
-        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryPresentation-0"));
+    auto* editor =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* presentation = entry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryPresentation-0"));
     REQUIRE(editor != nullptr);
     REQUIRE(presentation != nullptr);
     REQUIRE(waitUntil([editor, presentation]() -> bool {
@@ -503,25 +603,29 @@ TEST_CASE("resolved Page Link titles size their outline rows") {
     CHECK(entry->height() >= presentation->property("contentHeight").toReal());
 }
 
-TEST_CASE("the platform TreeViewDelegate expands lazy Page Hierarchy nodes") {
+TEST_CASE("the platform TreeViewDelegate expands lazy Page Hierarchy nodes")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(QUrl::fromLocalFile(
-        temporaryDirectory.filePath(QStringLiteral("hierarchy-delegate.hieda"))));
-    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"), QStringLiteral("Alpha")));
+    controller.createNotebook(QUrl::fromLocalFile(temporaryDirectory.filePath(
+        QStringLiteral("hierarchy-delegate.hieda"))));
+    REQUIRE(controller.createPage(QStringLiteral("work/client/alpha"),
+                                  QStringLiteral("Alpha")));
     controller.navigateToPageName(QStringLiteral("work"));
     auto* hierarchyModel = controller.pageHierarchy();
     const auto rootIndex = hierarchyModel->index(0, 0);
     REQUIRE(rootIndex.isValid());
-    CHECK(hierarchyModel->data(rootIndex, PageHierarchyModel::HasChildrenRole).toBool());
+    CHECK(hierarchyModel->data(rootIndex, PageHierarchyModel::HasChildrenRole)
+              .toBool());
     CHECK(hierarchyModel->canFetchMore(rootIndex));
     CHECK(hierarchyModel->hasChildren(rootIndex));
 
     QStringList qmlWarningMessages;
     QQmlEngine engine;
     collectQmlWarnings(engine, qmlWarningMessages);
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
     QQmlComponent component(&engine);
     component.setData(R"QML(
 import QtQuick
@@ -554,8 +658,9 @@ ApplicationWindow {
 }
 )QML",
                       QUrl(QStringLiteral("inline:hierarchy-delegate.qml")));
-    REQUIRE(
-        waitUntil([&component]() -> bool { return component.status() != QQmlComponent::Loading; }));
+    REQUIRE(waitUntil([&component]() -> bool {
+        return component.status() != QQmlComponent::Loading;
+    }));
     INFO(component.errorString().toStdString());
     REQUIRE(component.status() == QQmlComponent::Ready);
     std::unique_ptr<QObject> root(component.create());
@@ -564,22 +669,27 @@ ApplicationWindow {
     REQUIRE(hierarchy != nullptr);
     REQUIRE(waitUntil([hierarchy]() -> bool {
         QVariant item;
-        return QMetaObject::invokeMethod(hierarchy, "hierarchyItemAt", Q_RETURN_ARG(QVariant, item),
+        return QMetaObject::invokeMethod(hierarchy, "hierarchyItemAt",
+                                         Q_RETURN_ARG(QVariant, item),
                                          Q_ARG(QVariant, 0)) &&
                item.value<QObject*>() != nullptr;
     }));
     QVariant item;
-    REQUIRE(QMetaObject::invokeMethod(hierarchy, "hierarchyItemAt", Q_RETURN_ARG(QVariant, item),
+    REQUIRE(QMetaObject::invokeMethod(hierarchy, "hierarchyItemAt",
+                                      Q_RETURN_ARG(QVariant, item),
                                       Q_ARG(QVariant, 0)));
     auto* delegate = item.value<QObject*>();
     REQUIRE(delegate != nullptr);
     auto* window = qobject_cast<QQuickWindow*>(root.get());
-    auto* indicator = qobject_cast<QQuickItem*>(delegate->property("indicator").value<QObject*>());
+    auto* indicator = qobject_cast<QQuickItem*>(
+        delegate->property("indicator").value<QObject*>());
     REQUIRE(window != nullptr);
     REQUIRE(indicator != nullptr);
     const auto indicatorCenter = indicator->mapToItem(
-        window->contentItem(), QPointF(indicator->width() / 2, indicator->height() / 2));
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, indicatorCenter.toPoint());
+        window->contentItem(),
+        QPointF(indicator->width() / 2, indicator->height() / 2));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                      indicatorCenter.toPoint());
     REQUIRE(waitUntil([hierarchy]() -> bool {
         QVariant expanded;
         return QMetaObject::invokeMethod(hierarchy, "rootIsExpanded",
@@ -589,33 +699,38 @@ ApplicationWindow {
     REQUIRE(waitUntil([hierarchy]() -> bool {
         QVariant child;
         return QMetaObject::invokeMethod(hierarchy, "hierarchyItemAt",
-                                         Q_RETURN_ARG(QVariant, child), Q_ARG(QVariant, 1)) &&
+                                         Q_RETURN_ARG(QVariant, child),
+                                         Q_ARG(QVariant, 1)) &&
                child.value<QObject*>() != nullptr;
     }));
     INFO(qmlWarningMessages.join(QLatin1Char('\n')).toStdString());
     CHECK(qmlWarningMessages.isEmpty());
 }
 
-TEST_CASE("the Page editor preserves consecutive outline key presses") {
+TEST_CASE("the Page editor preserves consecutive outline key presses")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("page-keys.hieda"))));
-    REQUIRE(controller.createPage(QStringLiteral("keys"), QStringLiteral("Keys")));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("page-keys.hieda"))));
+    REQUIRE(
+        controller.createPage(QStringLiteral("keys"), QStringLiteral("Keys")));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("a")) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("b")) == 1);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("c")) == 2);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
     auto* window = qobject_cast<QQuickWindow*>(root.get());
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(window != nullptr);
     REQUIRE(outlineList != nullptr);
     window->show();
@@ -624,7 +739,8 @@ TEST_CASE("the Page editor preserves consecutive outline key presses") {
 
     const auto entryAt = [outlineList](int row) -> QQuickItem* {
         QVariant value;
-        if (!QMetaObject::invokeMethod(outlineList, "entryItemAt", Q_RETURN_ARG(QVariant, value),
+        if (!QMetaObject::invokeMethod(outlineList, "entryItemAt",
+                                       Q_RETURN_ARG(QVariant, value),
                                        Q_ARG(QVariant, row))) {
             return nullptr;
         }
@@ -632,50 +748,60 @@ TEST_CASE("the Page editor preserves consecutive outline key presses") {
     };
     auto* firstEntry = entryAt(0);
     REQUIRE(firstEntry != nullptr);
-    auto* firstEditor = firstEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* firstEditor = firstEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-0"));
     REQUIRE(firstEditor != nullptr);
     firstEditor->forceActiveFocus();
-    REQUIRE(waitUntil([firstEditor]() -> bool { return firstEditor->hasActiveFocus(); }));
+    REQUIRE(waitUntil(
+        [firstEditor]() -> bool { return firstEditor->hasActiveFocus(); }));
 
     sendKeyClickWithoutProcessingEvents(window, Qt::Key_Down);
     sendKeyClickWithoutProcessingEvents(window, Qt::Key_Down);
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("outlineEntryEditor-2");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("outlineEntryEditor-2");
     }));
 
     auto* secondEntry = entryAt(1);
     REQUIRE(secondEntry != nullptr);
-    auto* secondEditor =
-        secondEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
+    auto* secondEditor = secondEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-1"));
     REQUIRE(secondEditor != nullptr);
     secondEditor->forceActiveFocus();
-    REQUIRE(waitUntil([secondEditor]() -> bool { return secondEditor->hasActiveFocus(); }));
+    REQUIRE(waitUntil(
+        [secondEditor]() -> bool { return secondEditor->hasActiveFocus(); }));
     sendKeyClickWithoutProcessingEvents(window, Qt::Key_Tab);
     REQUIRE(controller.outlineEntries()
-                ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::DepthRole)
+                ->data(controller.outlineEntries()->index(1, 0),
+                       OutlineEntryModel::DepthRole)
                 .toInt() == 1);
-    sendKeyClickWithoutProcessingEvents(window, Qt::Key_Backtab, Qt::ShiftModifier);
+    sendKeyClickWithoutProcessingEvents(window, Qt::Key_Backtab,
+                                        Qt::ShiftModifier);
     REQUIRE(waitUntil([&controller]() -> bool {
         return controller.outlineEntries()
-                   ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::DepthRole)
+                   ->data(controller.outlineEntries()->index(1, 0),
+                          OutlineEntryModel::DepthRole)
                    .toInt() == 0;
     }));
 }
 
-TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings") {
+TEST_CASE(
+    "the Journal editor keeps aligned drafts focused without QML warnings")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("ui-test.hieda"))));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("ui-test.hieda"))));
     REQUIRE(controller.insertOutlineEntry(QString(400, QLatin1Char('x'))) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("second")) == 1);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -687,23 +813,30 @@ TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings"
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
 
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 2; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 2;
+    }));
     QVariant firstEntryValue;
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, firstEntryValue), Q_ARG(QVariant, 0)));
-    auto* firstEntry = qobject_cast<QQuickItem*>(firstEntryValue.value<QObject*>());
+                                      Q_RETURN_ARG(QVariant, firstEntryValue),
+                                      Q_ARG(QVariant, 0)));
+    auto* firstEntry =
+        qobject_cast<QQuickItem*>(firstEntryValue.value<QObject*>());
     REQUIRE(firstEntry != nullptr);
-    auto* editor = firstEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* editor = firstEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-0"));
     REQUIRE(editor != nullptr);
     REQUIRE(editor->window() == window);
     REQUIRE(editor->isVisible());
     REQUIRE(editor->isEnabled());
     CHECK(editor->metaObject()->indexOfProperty("background") == -1);
-    REQUIRE(waitUntil([outlineList]() -> bool { return outlineList->width() <= 780; }));
-    auto* pageSidebar = root->findChild<QQuickItem*>(QStringLiteral("pageSidebar"));
+    REQUIRE(waitUntil(
+        [outlineList]() -> bool { return outlineList->width() <= 780; }));
+    auto* pageSidebar =
+        root->findChild<QQuickItem*>(QStringLiteral("pageSidebar"));
     REQUIRE(pageSidebar != nullptr);
     const auto listPosition = outlineList->mapToScene({});
     const auto sidebarPosition = pageSidebar->mapToScene({});
@@ -711,55 +844,69 @@ TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings"
     CHECK(firstEntry->width() <= outlineList->width());
     const auto editorPosition = editor->mapToScene({});
     CHECK(editorPosition.x() >= listPosition.x());
-    CHECK(editorPosition.x() + editor->width() <= listPosition.x() + outlineList->width() + 4);
+    CHECK(editorPosition.x() + editor->width() <=
+          listPosition.x() + outlineList->width() + 4);
     CHECK(editor->height() > 0);
 
     QSignalSpy qmlWarnings(&engine, &QQmlEngine::warnings);
     editor->forceActiveFocus();
     REQUIRE(waitUntil([editor]() -> bool { return editor->hasActiveFocus(); }));
-    REQUIRE(QMetaObject::invokeMethod(root.get(), "beginDraft",
-                                      Q_ARG(QVariant, controller.outlineEntryId(0))));
+    REQUIRE(QMetaObject::invokeMethod(
+        root.get(), "beginDraft",
+        Q_ARG(QVariant, controller.outlineEntryId(0))));
 
     REQUIRE(waitUntil([firstEntry]() -> bool {
-        return firstEntry->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) != nullptr;
+        return firstEntry->findChild<QQuickItem*>(
+                   QStringLiteral("journalDraftEditor")) != nullptr;
     }));
-    auto* draftEditor = firstEntry->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor"));
+    auto* draftEditor = firstEntry->findChild<QQuickItem*>(
+        QStringLiteral("journalDraftEditor"));
     REQUIRE(draftEditor != nullptr);
     CHECK(draftEditor->metaObject()->indexOfProperty("background") == -1);
-    REQUIRE(waitUntil([draftEditor]() -> bool { return draftEditor->hasActiveFocus(); }));
+    REQUIRE(waitUntil(
+        [draftEditor]() -> bool { return draftEditor->hasActiveFocus(); }));
     QTest::qWait(50);
-    CHECK(firstEntry->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) == draftEditor);
+    CHECK(firstEntry->findChild<QQuickItem*>(
+              QStringLiteral("journalDraftEditor")) == draftEditor);
 
-    auto* entryBullet = firstEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryBullet-0"));
-    auto* draftBullet = firstEntry->findChild<QQuickItem*>(QStringLiteral("journalDraftBullet"));
+    auto* entryBullet = firstEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryBullet-0"));
+    auto* draftBullet = firstEntry->findChild<QQuickItem*>(
+        QStringLiteral("journalDraftBullet"));
     REQUIRE(entryBullet != nullptr);
     REQUIRE(draftBullet != nullptr);
     CHECK(draftBullet->mapToScene({}).x() == entryBullet->mapToScene({}).x());
 
     QTest::keyClick(window, Qt::Key_Escape);
     QVariant secondEntryValue;
-    REQUIRE(QMetaObject::invokeMethod(
-        outlineList, "entryItemAt", Q_RETURN_ARG(QVariant, secondEntryValue), Q_ARG(QVariant, 1)));
-    auto* secondEntry = qobject_cast<QQuickItem*>(secondEntryValue.value<QObject*>());
+    REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
+                                      Q_RETURN_ARG(QVariant, secondEntryValue),
+                                      Q_ARG(QVariant, 1)));
+    auto* secondEntry =
+        qobject_cast<QQuickItem*>(secondEntryValue.value<QObject*>());
     REQUIRE(secondEntry != nullptr);
-    auto* secondEditor =
-        secondEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
+    auto* secondEditor = secondEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-1"));
     REQUIRE(secondEditor != nullptr);
     secondEditor->forceActiveFocus();
-    REQUIRE(waitUntil([secondEditor]() -> bool { return secondEditor->hasActiveFocus(); }));
-    REQUIRE(QMetaObject::invokeMethod(root.get(), "beginDraft",
-                                      Q_ARG(QVariant, controller.outlineEntryId(1))));
+    REQUIRE(waitUntil(
+        [secondEditor]() -> bool { return secondEditor->hasActiveFocus(); }));
+    REQUIRE(QMetaObject::invokeMethod(
+        root.get(), "beginDraft",
+        Q_ARG(QVariant, controller.outlineEntryId(1))));
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("journalDraftEditor");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("journalDraftEditor");
     }));
     draftEditor = window->activeFocusItem();
     QTest::qWait(50);
     CHECK(window->activeFocusItem() == draftEditor);
-    draftBullet = draftEditor->parentItem()->parentItem()->findChild<QQuickItem*>(
-        QStringLiteral("journalDraftBullet"));
-    auto* secondBullet =
-        secondEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryBullet-1"));
+    draftBullet =
+        draftEditor->parentItem()->parentItem()->findChild<QQuickItem*>(
+            QStringLiteral("journalDraftBullet"));
+    auto* secondBullet = secondEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryBullet-1"));
     REQUIRE(draftBullet != nullptr);
     REQUIRE(secondBullet != nullptr);
     CHECK(draftBullet->mapToScene({}).x() == secondBullet->mapToScene({}).x());
@@ -771,21 +918,24 @@ TEST_CASE("the Journal editor keeps aligned drafts focused without QML warnings"
     CHECK(qmlWarnings.count() == 0);
 }
 
-TEST_CASE("the Journal editor routes nested outline keys and exposes pointer actions") {
+TEST_CASE(
+    "the Journal editor routes nested outline keys and exposes pointer actions")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("outline-ui.hieda"))));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("outline-ui.hieda"))));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("parent")) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("child")) == 1);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("tail")) == 2);
     const auto childId = controller.outlineEntryId(1);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -794,14 +944,17 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 3; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 3;
+    }));
 
     const auto entryAt = [outlineList](int row) -> QQuickItem* {
         QVariant value;
-        if (!QMetaObject::invokeMethod(outlineList, "entryItemAt", Q_RETURN_ARG(QVariant, value),
+        if (!QMetaObject::invokeMethod(outlineList, "entryItemAt",
+                                       Q_RETURN_ARG(QVariant, value),
                                        Q_ARG(QVariant, row))) {
             return nullptr;
         }
@@ -811,17 +964,20 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
     auto* childEntry = entryAt(1);
     REQUIRE(parentEntry != nullptr);
     REQUIRE(childEntry != nullptr);
-    auto* childEditor = childEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
+    auto* childEditor = childEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-1"));
     REQUIRE(childEditor != nullptr);
     childEditor->forceActiveFocus();
-    REQUIRE(waitUntil([childEditor]() -> bool { return childEditor->hasActiveFocus(); }));
+    REQUIRE(waitUntil(
+        [childEditor]() -> bool { return childEditor->hasActiveFocus(); }));
     childEditor->setProperty("cursorPosition", 5);
     QTest::keyClick(window, Qt::Key_X);
     REQUIRE(QMetaObject::invokeMethod(childEntry, "openContextMenu"));
-    auto* indentMenuItem =
-        childEntry->findChild<QQuickItem*>(QStringLiteral("journalIndentMenuItem-1"));
+    auto* indentMenuItem = childEntry->findChild<QQuickItem*>(
+        QStringLiteral("journalIndentMenuItem-1"));
     REQUIRE(indentMenuItem != nullptr);
-    REQUIRE(waitUntil([indentMenuItem]() -> bool { return indentMenuItem->isVisible(); }));
+    REQUIRE(waitUntil(
+        [indentMenuItem]() -> bool { return indentMenuItem->isVisible(); }));
     const auto menuItemCenter = indentMenuItem->mapToScene(
         QPointF(indentMenuItem->width() / 2, indentMenuItem->height() / 2));
     QTest::mouseClick(indentMenuItem->window(), Qt::LeftButton, Qt::NoModifier,
@@ -854,13 +1010,15 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
     }));
     childEntry = entryAt(1);
     REQUIRE(childEntry != nullptr);
-    childEditor = childEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
+    childEditor = childEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-1"));
     REQUIRE(childEditor != nullptr);
     childEditor->forceActiveFocus();
     QTest::keyClick(window, Qt::Key_Tab);
     REQUIRE(waitUntil([&controller]() -> bool {
         return controller.outlineEntries()
-                   ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::DepthRole)
+                   ->data(controller.outlineEntries()->index(1, 0),
+                          OutlineEntryModel::DepthRole)
                    .toInt() == 1;
     }));
 
@@ -868,9 +1026,10 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
     childEntry = entryAt(1);
     REQUIRE(parentEntry != nullptr);
     REQUIRE(childEntry != nullptr);
-    auto* parentEditor =
-        parentEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
-    childEditor = childEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
+    auto* parentEditor = parentEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-0"));
+    childEditor = childEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-1"));
     REQUIRE(parentEditor != nullptr);
     REQUIRE(childEditor != nullptr);
     CHECK(childEditor->mapToScene({}).x() > parentEditor->mapToScene({}).x());
@@ -879,20 +1038,24 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
     childEditor->forceActiveFocus();
     childEditor->setProperty("cursorPosition", 2);
     QTest::keyClick(window, Qt::Key_Return);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 4; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 4;
+    }));
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("outlineEntryEditor-2");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("outlineEntryEditor-2");
     }));
     auto* suffixEditor = window->activeFocusItem();
     CHECK(suffixEditor->property("cursorPosition").toInt() == 0);
     QTest::keyClick(window, Qt::Key_Backspace);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 3; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 3;
+    }));
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("outlineEntryEditor-1");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("outlineEntryEditor-1");
     }));
     childEditor = window->activeFocusItem();
     CHECK(childEditor->property("cursorPosition").toInt() == 2);
@@ -901,27 +1064,32 @@ TEST_CASE("the Journal editor routes nested outline keys and exposes pointer act
     QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
     REQUIRE(waitUntil([&controller]() -> bool {
         return controller.outlineEntries()
-                   ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::DepthRole)
+                   ->data(controller.outlineEntries()->index(1, 0),
+                          OutlineEntryModel::DepthRole)
                    .toInt() == 0;
     }));
     constexpr auto structureModifier = undoModifier;
-    QTest::keyClick(window, Qt::Key_Down, structureModifier | Qt::ShiftModifier);
-    REQUIRE(waitUntil(
-        [&controller, &childId]() -> bool { return controller.outlineEntryId(2) == childId; }));
+    QTest::keyClick(window, Qt::Key_Down,
+                    structureModifier | Qt::ShiftModifier);
+    REQUIRE(waitUntil([&controller, &childId]() -> bool {
+        return controller.outlineEntryId(2) == childId;
+    }));
 }
 
-TEST_CASE("the Journal editor groups typing and routes standard undo and redo") {
+TEST_CASE("the Journal editor groups typing and routes standard undo and redo")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("undo-ui.hieda"))));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("undo-ui.hieda"))));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("before")) == 0);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -930,16 +1098,20 @@ TEST_CASE("the Journal editor groups typing and routes standard undo and redo") 
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 1; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 1;
+    }));
     QVariant entryValue;
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)));
+                                      Q_RETURN_ARG(QVariant, entryValue),
+                                      Q_ARG(QVariant, 0)));
     auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
     REQUIRE(entry != nullptr);
-    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* editor =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
     REQUIRE(editor != nullptr);
     editor->forceActiveFocus();
     editor->setProperty("cursorPosition", 6);
@@ -972,7 +1144,8 @@ TEST_CASE("the Journal editor groups typing and routes standard undo and redo") 
     }));
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("outlineEntryEditor-0");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("outlineEntryEditor-0");
     }));
     CHECK(window->activeFocusItem()->property("cursorPosition").toInt() == 3);
     CHECK(redoAction->property("enabled").toBool());
@@ -986,34 +1159,42 @@ TEST_CASE("the Journal editor groups typing and routes standard undo and redo") 
 
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("outlineEntryEditor-0");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("outlineEntryEditor-0");
     }));
     QTest::keyClick(window, Qt::Key_Y);
-    const auto textBeforeClose = window->activeFocusItem()->property("text").toString();
-    auto* closeAction = root->findChild<QObject*>(QStringLiteral("closeAction"));
+    const auto textBeforeClose =
+        window->activeFocusItem()->property("text").toString();
+    auto* closeAction =
+        root->findChild<QObject*>(QStringLiteral("closeAction"));
     REQUIRE(closeAction != nullptr);
     REQUIRE(QMetaObject::invokeMethod(closeAction, "trigger"));
-    REQUIRE(waitUntil([&controller]() -> bool { return !controller.hasOpenNotebook(); }));
-    controller.openNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("undo-ui.hieda"))));
+    REQUIRE(waitUntil(
+        [&controller]() -> bool { return !controller.hasOpenNotebook(); }));
+    controller.openNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("undo-ui.hieda"))));
     REQUIRE(controller.outlineEntries()->rowCount() == 1);
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == textBeforeClose);
 }
 
-TEST_CASE("the Journal editor inserts and pastes multiline Unicode before splitting on Enter") {
+TEST_CASE("the Journal editor inserts and pastes multiline Unicode before "
+          "splitting on Enter")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("multiline-ui.hieda"))));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("multiline-ui.hieda"))));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("alpha")) == 0);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -1022,16 +1203,20 @@ TEST_CASE("the Journal editor inserts and pastes multiline Unicode before splitt
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 1; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 1;
+    }));
     QVariant entryValue;
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)));
+                                      Q_RETURN_ARG(QVariant, entryValue),
+                                      Q_ARG(QVariant, 0)));
     auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
     REQUIRE(entry != nullptr);
-    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* editor =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
     REQUIRE(editor != nullptr);
     editor->forceActiveFocus();
     editor->setProperty("cursorPosition", 5);
@@ -1041,30 +1226,38 @@ TEST_CASE("the Journal editor inserts and pastes multiline Unicode before splitt
     REQUIRE(waitUntil([editor]() -> bool {
         return editor->property("text").toString() == QStringLiteral("alpha\n");
     }));
-    QGuiApplication::clipboard()->setText(QStringLiteral("\u03B2\n\u65E5\u672C\u8A9E"));
+    QGuiApplication::clipboard()->setText(
+        QStringLiteral("\u03B2\n\u65E5\u672C\u8A9E"));
     QTest::keySequence(window, QKeySequence::Paste);
     REQUIRE(waitUntil([editor]() -> bool {
         return editor->property("text").toString() ==
                QStringLiteral("alpha\n\u03B2\n\u65E5\u672C\u8A9E");
     }));
-    const auto dragStart = editor->mapToScene(QPointF(2, editor->height() * 0.2));
-    const auto dragEnd =
-        editor->mapToScene(QPointF(std::min(editor->width() - 2, 80.0), editor->height() * 0.2));
-    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, dragStart.toPoint());
+    const auto dragStart =
+        editor->mapToScene(QPointF(2, editor->height() * 0.2));
+    const auto dragEnd = editor->mapToScene(
+        QPointF(std::min(editor->width() - 2, 80.0), editor->height() * 0.2));
+    QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier,
+                      dragStart.toPoint());
     QTest::mouseMove(window, dragEnd.toPoint());
-    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, dragEnd.toPoint());
-    CHECK(editor->property("selectionStart").toInt() != editor->property("selectionEnd").toInt());
-    REQUIRE(QMetaObject::invokeMethod(editor, "select", Q_ARG(int, 6), Q_ARG(int, 7)));
+    QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier,
+                        dragEnd.toPoint());
+    CHECK(editor->property("selectionStart").toInt() !=
+          editor->property("selectionEnd").toInt());
+    REQUIRE(QMetaObject::invokeMethod(editor, "select", Q_ARG(int, 6),
+                                      Q_ARG(int, 7)));
     auto* copyAction = root->findChild<QObject*>(QStringLiteral("copyAction"));
     auto* cutAction = root->findChild<QObject*>(QStringLiteral("cutAction"));
-    auto* pasteAction = root->findChild<QObject*>(QStringLiteral("pasteAction"));
+    auto* pasteAction =
+        root->findChild<QObject*>(QStringLiteral("pasteAction"));
     REQUIRE(copyAction != nullptr);
     REQUIRE(cutAction != nullptr);
     REQUIRE(pasteAction != nullptr);
     REQUIRE(QMetaObject::invokeMethod(copyAction, "trigger"));
     CHECK(QGuiApplication::clipboard()->text() == QStringLiteral("\u03B2"));
     REQUIRE(QMetaObject::invokeMethod(cutAction, "trigger"));
-    CHECK(editor->property("text").toString() == QStringLiteral("alpha\n\n\u65E5\u672C\u8A9E"));
+    CHECK(editor->property("text").toString() ==
+          QStringLiteral("alpha\n\n\u65E5\u672C\u8A9E"));
     REQUIRE(QMetaObject::invokeMethod(pasteAction, "trigger"));
     CHECK(editor->property("text").toString() ==
           QStringLiteral("alpha\n\u03B2\n\u65E5\u672C\u8A9E"));
@@ -1073,7 +1266,8 @@ TEST_CASE("the Journal editor inserts and pastes multiline Unicode before splitt
             return controller.outlineEntries()
                        ->data(controller.outlineEntries()->index(0, 0),
                               OutlineEntryModel::AuthoredTextRole)
-                       .toString() == QStringLiteral("alpha\n\u03B2\n\u65E5\u672C\u8A9E");
+                       .toString() ==
+                   QStringLiteral("alpha\n\u03B2\n\u65E5\u672C\u8A9E");
         },
         std::chrono::seconds(2)));
 
@@ -1089,33 +1283,42 @@ TEST_CASE("the Journal editor inserts and pastes multiline Unicode before splitt
 
     editor->setProperty("cursorPosition", 6);
     QTest::keyClick(window, Qt::Key_Return);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 2; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 2;
+    }));
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("alpha\n"));
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(1, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("\u03B2\n\u65E5\u672C\u8A9E"));
 }
 
-TEST_CASE("Journal bullets select and cut complete subtrees with accessible clipboard text") {
+TEST_CASE("Journal bullets select and cut complete subtrees with accessible "
+          "clipboard text")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("selection-ui.hieda"))));
-    REQUIRE(controller.insertOutlineEntry(QStringLiteral("parent\ncontinuation")) == 0);
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("selection-ui.hieda"))));
+    REQUIRE(controller.insertOutlineEntry(
+                QStringLiteral("parent\ncontinuation")) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("child")) == 1);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("tail")) == 2);
-    REQUIRE(controller.indentOutlineEntry(controller.outlineEntryId(1), QStringLiteral("child"), 5)
+    REQUIRE(controller
+                .indentOutlineEntry(controller.outlineEntryId(1),
+                                    QStringLiteral("child"), 5)
                 .value(QStringLiteral("succeeded"))
                 .toBool());
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -1124,21 +1327,25 @@ TEST_CASE("Journal bullets select and cut complete subtrees with accessible clip
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 3; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 3;
+    }));
 
     auto bulletAt = [outlineList](int row) -> QQuickItem* {
         QVariant entryValue;
         if (!QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                       Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, row))) {
+                                       Q_RETURN_ARG(QVariant, entryValue),
+                                       Q_ARG(QVariant, row))) {
             return nullptr;
         }
         auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
         return entry == nullptr ? nullptr
                                 : entry->findChild<QQuickItem*>(
-                                      QStringLiteral("outlineEntryBullet-") + QString::number(row));
+                                      QStringLiteral("outlineEntryBullet-") +
+                                      QString::number(row));
     };
     auto* parentBullet = bulletAt(0);
     auto* tailBullet = bulletAt(2);
@@ -1165,9 +1372,10 @@ TEST_CASE("Journal bullets select and cut complete subtrees with accessible clip
         return root->property("outlineSelectionCount").toInt() == 2;
     }));
     parentActions->doAction(QAccessibleActionInterface::pressAction());
-    const auto tailCenter =
-        tailBullet->mapToScene(QPointF(tailBullet->width() / 2, tailBullet->height() / 2));
-    QTest::mouseClick(window, Qt::LeftButton, Qt::ShiftModifier, tailCenter.toPoint());
+    const auto tailCenter = tailBullet->mapToScene(
+        QPointF(tailBullet->width() / 2, tailBullet->height() / 2));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::ShiftModifier,
+                      tailCenter.toPoint());
     REQUIRE(waitUntil([root = root.get()]() -> bool {
         return root->property("outlineSelectionCount").toInt() == 3;
     }));
@@ -1178,31 +1386,39 @@ TEST_CASE("Journal bullets select and cut complete subtrees with accessible clip
     REQUIRE(cutAction != nullptr);
     REQUIRE(QMetaObject::invokeMethod(copyAction, "trigger"));
     CHECK(QGuiApplication::clipboard()->text() ==
-          QStringLiteral("\u2022 parent\n  continuation\n  \u2022 child\n\u2022 tail"));
+          QStringLiteral(
+              "\u2022 parent\n  continuation\n  \u2022 child\n\u2022 tail"));
     REQUIRE(QMetaObject::invokeMethod(cutAction, "trigger"));
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 0; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 0;
+    }));
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("journalDraftEditor");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("journalDraftEditor");
     }));
-    REQUIRE(controller.undoOutlineEdit().value(QStringLiteral("succeeded")).toBool());
+    REQUIRE(controller.undoOutlineEdit()
+                .value(QStringLiteral("succeeded"))
+                .toBool());
     CHECK(controller.outlineEntries()->rowCount() == 3);
 }
 
-TEST_CASE("Up and Down move within multiline Entries before crossing outline boundaries") {
+TEST_CASE("Up and Down move within multiline Entries before crossing outline "
+          "boundaries")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("arrow-ui.hieda"))));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("arrow-ui.hieda"))));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("first\nline")) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("second\nline")) == 1);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -1211,16 +1427,20 @@ TEST_CASE("Up and Down move within multiline Entries before crossing outline bou
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 2; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 2;
+    }));
     QVariant firstValue;
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, firstValue), Q_ARG(QVariant, 0)));
+                                      Q_RETURN_ARG(QVariant, firstValue),
+                                      Q_ARG(QVariant, 0)));
     auto* firstEntry = qobject_cast<QQuickItem*>(firstValue.value<QObject*>());
     REQUIRE(firstEntry != nullptr);
-    auto* firstEditor = firstEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* firstEditor = firstEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-0"));
     REQUIRE(firstEditor != nullptr);
     firstEditor->forceActiveFocus();
     firstEditor->setProperty("cursorPosition", 0);
@@ -1229,35 +1449,41 @@ TEST_CASE("Up and Down move within multiline Entries before crossing outline bou
     REQUIRE(window->activeFocusItem() == firstEditor);
     CHECK(firstEditor->property("cursorPosition").toInt() > 5);
 
-    firstEditor->setProperty("cursorPosition", firstEditor->property("length").toInt());
+    firstEditor->setProperty("cursorPosition",
+                             firstEditor->property("length").toInt());
     QTest::keyClick(window, Qt::Key_Down);
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("outlineEntryEditor-1");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("outlineEntryEditor-1");
     }));
     auto* secondEditor = window->activeFocusItem();
     CHECK(secondEditor->property("cursorPosition").toInt() < 7);
     QTest::keyClick(window, Qt::Key_Up);
     REQUIRE(waitUntil([window]() -> bool {
         return window->activeFocusItem() != nullptr &&
-               window->activeFocusItem()->objectName() == QStringLiteral("outlineEntryEditor-0");
+               window->activeFocusItem()->objectName() ==
+                   QStringLiteral("outlineEntryEditor-0");
     }));
     CHECK(window->activeFocusItem()->property("cursorPosition").toInt() > 5);
 }
 
-TEST_CASE("IME preedit commits and cancels without premature Journal persistence") {
+TEST_CASE(
+    "IME preedit commits and cancels without premature Journal persistence")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("ime-ui.hieda"))));
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("ime-ui.hieda"))));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("base")) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("other")) == 1);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -1266,23 +1492,29 @@ TEST_CASE("IME preedit commits and cancels without premature Journal persistence
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 2; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 2;
+    }));
     QVariant firstValue;
     QVariant secondValue;
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, firstValue), Q_ARG(QVariant, 0)));
+                                      Q_RETURN_ARG(QVariant, firstValue),
+                                      Q_ARG(QVariant, 0)));
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, secondValue), Q_ARG(QVariant, 1)));
+                                      Q_RETURN_ARG(QVariant, secondValue),
+                                      Q_ARG(QVariant, 1)));
     auto* firstEntry = qobject_cast<QQuickItem*>(firstValue.value<QObject*>());
-    auto* secondEntry = qobject_cast<QQuickItem*>(secondValue.value<QObject*>());
+    auto* secondEntry =
+        qobject_cast<QQuickItem*>(secondValue.value<QObject*>());
     REQUIRE(firstEntry != nullptr);
     REQUIRE(secondEntry != nullptr);
-    auto* firstEditor = firstEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
-    auto* secondEditor =
-        secondEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
+    auto* firstEditor = firstEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-0"));
+    auto* secondEditor = secondEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-1"));
     REQUIRE(firstEditor != nullptr);
     REQUIRE(secondEditor != nullptr);
     firstEditor->forceActiveFocus();
@@ -1295,16 +1527,19 @@ TEST_CASE("IME preedit commits and cancels without premature Journal persistence
     CHECK(controller.outlineEntries()->rowCount() == 2);
     QTest::qWait(1100);
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("base"));
     secondEditor->forceActiveFocus();
-    REQUIRE(waitUntil([firstEditor]() -> bool { return firstEditor->hasActiveFocus(); }));
+    REQUIRE(waitUntil(
+        [firstEditor]() -> bool { return firstEditor->hasActiveFocus(); }));
 
     QInputMethodEvent commit;
     commit.setCommitString(QStringLiteral("\u65E5\u672C\u8A9E"));
     QCoreApplication::sendEvent(firstEditor, &commit);
     REQUIRE_FALSE(firstEditor->property("inputMethodComposing").toBool());
-    CHECK(firstEditor->property("text").toString() == QStringLiteral("base\u65E5\u672C\u8A9E"));
+    CHECK(firstEditor->property("text").toString() ==
+          QStringLiteral("base\u65E5\u672C\u8A9E"));
     REQUIRE(waitUntil(
         [&controller]() -> bool {
             return controller.outlineEntries()
@@ -1320,22 +1555,25 @@ TEST_CASE("IME preedit commits and cancels without premature Journal persistence
     QInputMethodEvent cancel;
     QCoreApplication::sendEvent(firstEditor, &cancel);
     REQUIRE_FALSE(firstEditor->property("inputMethodComposing").toBool());
-    CHECK(firstEditor->property("text").toString() == QStringLiteral("base\u65E5\u672C\u8A9E"));
+    CHECK(firstEditor->property("text").toString() ==
+          QStringLiteral("base\u65E5\u672C\u8A9E"));
     CHECK(controller.outlineEntries()->rowCount() == 2);
 }
 
-TEST_CASE("outline selection refuses to discard a rejected pending edit") {
+TEST_CASE("outline selection refuses to discard a rejected pending edit")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(QUrl::fromLocalFile(
-        temporaryDirectory.filePath(QStringLiteral("selection-save-ui.hieda"))));
+    controller.createNotebook(QUrl::fromLocalFile(temporaryDirectory.filePath(
+        QStringLiteral("selection-save-ui.hieda"))));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("durable")) == 0);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -1344,48 +1582,58 @@ TEST_CASE("outline selection refuses to discard a rejected pending edit") {
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 1; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 1;
+    }));
     QVariant entryValue;
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)));
+                                      Q_RETURN_ARG(QVariant, entryValue),
+                                      Q_ARG(QVariant, 0)));
     auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
     REQUIRE(entry != nullptr);
-    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* editor =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
     REQUIRE(editor != nullptr);
     editor->forceActiveFocus();
     editor->setProperty("text", QStringLiteral("unsaved"));
     entry->setProperty("entryId", QStringLiteral("missing-entry"));
     QVariant selected;
 
-    REQUIRE(QMetaObject::invokeMethod(root.get(), "selectOutline", Q_RETURN_ARG(QVariant, selected),
-                                      Q_ARG(QVariant, 0), Q_ARG(QVariant, false)));
+    REQUIRE(QMetaObject::invokeMethod(
+        root.get(), "selectOutline", Q_RETURN_ARG(QVariant, selected),
+        Q_ARG(QVariant, 0), Q_ARG(QVariant, false)));
 
     CHECK_FALSE(selected.toBool());
     CHECK(root->property("outlineSelectionCount").toInt() == 0);
     CHECK(editor->hasActiveFocus());
     CHECK(editor->property("text").toString() == QStringLiteral("durable"));
     CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(0, 0), OutlineEntryModel::AuthoredTextRole)
+              ->data(controller.outlineEntries()->index(0, 0),
+                     OutlineEntryModel::AuthoredTextRole)
               .toString() == QStringLiteral("durable"));
     CHECK_FALSE(controller.errorMessage().isEmpty());
 }
 
-TEST_CASE("the Journal exposes list structure selection and multiline editing accessibly") {
+TEST_CASE("the Journal exposes list structure selection and multiline editing "
+          "accessibly")
+{
     QAccessible::setActive(true);
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(
-        QUrl::fromLocalFile(temporaryDirectory.filePath(QStringLiteral("accessible-ui.hieda"))));
-    REQUIRE(controller.insertOutlineEntry(QStringLiteral("accessible\ntext")) == 0);
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("accessible-ui.hieda"))));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("accessible\ntext")) ==
+            0);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -1394,22 +1642,28 @@ TEST_CASE("the Journal exposes list structure selection and multiline editing ac
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 1; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 1;
+    }));
     QVariant entryValue;
     REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
-                                      Q_RETURN_ARG(QVariant, entryValue), Q_ARG(QVariant, 0)));
+                                      Q_RETURN_ARG(QVariant, entryValue),
+                                      Q_ARG(QVariant, 0)));
     auto* entry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
     REQUIRE(entry != nullptr);
-    auto* bullet = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryBullet-0"));
-    auto* editor = entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
+    auto* bullet =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryBullet-0"));
+    auto* editor =
+        entry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-0"));
     REQUIRE(bullet != nullptr);
     REQUIRE(editor != nullptr);
     QVariant selected;
-    REQUIRE(QMetaObject::invokeMethod(root.get(), "selectOutline", Q_RETURN_ARG(QVariant, selected),
-                                      Q_ARG(QVariant, 0), Q_ARG(QVariant, false)));
+    REQUIRE(QMetaObject::invokeMethod(
+        root.get(), "selectOutline", Q_RETURN_ARG(QVariant, selected),
+        Q_ARG(QVariant, 0), Q_ARG(QVariant, false)));
     REQUIRE(waitUntil([root = root.get()]() -> bool {
         return root->property("outlineSelectionCount").toInt() == 1;
     }));
@@ -1423,7 +1677,8 @@ TEST_CASE("the Journal exposes list structure selection and multiline editing ac
     REQUIRE(editorInterface != nullptr);
     CHECK(listInterface->role() == QAccessible::List);
     CHECK(bulletInterface->role() == QAccessible::ListItem);
-    CHECK(bulletInterface->text(QAccessible::Name) == QStringLiteral("Select Journal Entry 1"));
+    CHECK(bulletInterface->text(QAccessible::Name) ==
+          QStringLiteral("Select Journal Entry 1"));
     CHECK(bulletInterface->state().selectable);
     CHECK(bulletInterface->state().selected);
     CHECK(bulletInterface->state().focused);
@@ -1432,22 +1687,25 @@ TEST_CASE("the Journal exposes list structure selection and multiline editing ac
     CHECK(editorInterface->textInterface() != nullptr);
 }
 
-TEST_CASE("the packaged QML selects inserts and browses Block References") {
+TEST_CASE("the packaged QML selects inserts and browses Block References")
+{
     QTemporaryDir temporaryDirectory;
     REQUIRE(temporaryDirectory.isValid());
     NotebookController controller;
-    controller.createNotebook(QUrl::fromLocalFile(
-        temporaryDirectory.filePath(QStringLiteral("block-reference-ui.hieda"))));
-    REQUIRE(controller.createPage(QStringLiteral("page"), QStringLiteral("Page")));
+    controller.createNotebook(QUrl::fromLocalFile(temporaryDirectory.filePath(
+        QStringLiteral("block-reference-ui.hieda"))));
+    REQUIRE(
+        controller.createPage(QStringLiteral("page"), QStringLiteral("Page")));
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("target")) == 0);
     REQUIRE(controller.insertOutlineEntry(QStringLiteral("source")) == 1);
     const auto targetId = controller.outlineEntryId(0);
     const auto sourceId = controller.outlineEntryId(1);
 
     QQmlEngine engine;
-    engine.rootContext()->setContextProperty(QStringLiteral("notebookController"), &controller);
-    QQmlComponent component(&engine,
-                            QUrl::fromLocalFile(QStringLiteral(HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
     std::unique_ptr<QObject> root(component.create());
     INFO(component.errorString().toStdString());
     REQUIRE(root != nullptr);
@@ -1458,94 +1716,113 @@ TEST_CASE("the packaged QML selects inserts and browses Block References") {
     window->show();
     window->requestActivate();
     REQUIRE(waitUntil([window]() -> bool { return window->isActive(); }));
-    auto* outlineList = root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
     REQUIRE(outlineList != nullptr);
-    REQUIRE(
-        waitUntil([outlineList]() -> bool { return outlineList->property("count").toInt() == 2; }));
+    REQUIRE(waitUntil([outlineList]() -> bool {
+        return outlineList->property("count").toInt() == 2;
+    }));
 
     QVariant targetEntryValue;
     QVariant sourceEntryValue;
-    REQUIRE(QMetaObject::invokeMethod(
-        outlineList, "entryItemAt", Q_RETURN_ARG(QVariant, targetEntryValue), Q_ARG(QVariant, 0)));
-    REQUIRE(QMetaObject::invokeMethod(
-        outlineList, "entryItemAt", Q_RETURN_ARG(QVariant, sourceEntryValue), Q_ARG(QVariant, 1)));
-    auto* targetEntry = qobject_cast<QQuickItem*>(targetEntryValue.value<QObject*>());
-    auto* sourceEntry = qobject_cast<QQuickItem*>(sourceEntryValue.value<QObject*>());
+    REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
+                                      Q_RETURN_ARG(QVariant, targetEntryValue),
+                                      Q_ARG(QVariant, 0)));
+    REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
+                                      Q_RETURN_ARG(QVariant, sourceEntryValue),
+                                      Q_ARG(QVariant, 1)));
+    auto* targetEntry =
+        qobject_cast<QQuickItem*>(targetEntryValue.value<QObject*>());
+    auto* sourceEntry =
+        qobject_cast<QQuickItem*>(sourceEntryValue.value<QObject*>());
     REQUIRE(targetEntry != nullptr);
     REQUIRE(sourceEntry != nullptr);
 
-    auto* selectTarget =
-        targetEntry->findChild<QObject*>(QStringLiteral("selectBlockReferenceTargetMenuItem-0"));
-    auto* insertReference =
-        sourceEntry->findChild<QObject*>(QStringLiteral("insertBlockReferenceMenuItem-1"));
-    auto* browseReferences =
-        targetEntry->findChild<QObject*>(QStringLiteral("browseLinkedReferencesMenuItem-0"));
+    auto* selectTarget = targetEntry->findChild<QObject*>(
+        QStringLiteral("selectBlockReferenceTargetMenuItem-0"));
+    auto* insertReference = sourceEntry->findChild<QObject*>(
+        QStringLiteral("insertBlockReferenceMenuItem-1"));
+    auto* browseReferences = targetEntry->findChild<QObject*>(
+        QStringLiteral("browseLinkedReferencesMenuItem-0"));
     REQUIRE(selectTarget != nullptr);
     REQUIRE(insertReference != nullptr);
     REQUIRE(browseReferences != nullptr);
     REQUIRE(QMetaObject::invokeMethod(selectTarget, "click"));
     CHECK(controller.selectedBlockReferenceTargetId() == targetId);
-    auto* sourceEditor =
-        sourceEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryEditor-1"));
-    auto* sourceContextArea =
-        sourceEntry->findChild<QQuickItem*>(QStringLiteral("outlineEntryContextArea-1"));
+    auto* sourceEditor = sourceEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryEditor-1"));
+    auto* sourceContextArea = sourceEntry->findChild<QQuickItem*>(
+        QStringLiteral("outlineEntryContextArea-1"));
     REQUIRE(sourceEditor != nullptr);
     REQUIRE(sourceContextArea != nullptr);
     CHECK(sourceContextArea->width() >= sourceEditor->width());
-    const auto sourceEditorCenter =
-        sourceEditor->mapToScene(QPointF(sourceEditor->width() / 2, sourceEditor->height() / 2));
+    const auto sourceEditorCenter = sourceEditor->mapToScene(
+        QPointF(sourceEditor->width() / 2, sourceEditor->height() / 2));
 #ifdef Q_OS_MACOS
     REQUIRE(QMetaObject::invokeMethod(sourceEntry, "openContextMenu"));
 #else
-    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, sourceEditorCenter.toPoint());
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier,
+                      sourceEditorCenter.toPoint());
 #endif
-    CHECK(waitUntil(
-        [insertReference]() -> bool { return insertReference->property("visible").toBool(); }));
+    CHECK(waitUntil([insertReference]() -> bool {
+        return insertReference->property("visible").toBool();
+    }));
     REQUIRE(QMetaObject::invokeMethod(insertReference, "click"));
-    CHECK(controller.outlineEntries()
-              ->data(controller.outlineEntries()->index(1, 0), OutlineEntryModel::AuthoredTextRole)
-              .toString()
-              .startsWith(NotebookController::blockReferenceNotation(targetId)));
+    CHECK(
+        controller.outlineEntries()
+            ->data(controller.outlineEntries()->index(1, 0),
+                   OutlineEntryModel::AuthoredTextRole)
+            .toString()
+            .startsWith(NotebookController::blockReferenceNotation(targetId)));
 
     REQUIRE(QMetaObject::invokeMethod(browseReferences, "click"));
-    auto* drawer = root->findChild<QObject*>(QStringLiteral("blockLinkedReferencesDrawer"));
-    auto* referenceList = root->findChild<QQuickItem*>(QStringLiteral("blockLinkedReferenceList"));
+    auto* drawer = root->findChild<QObject*>(
+        QStringLiteral("blockLinkedReferencesDrawer"));
+    auto* referenceList = root->findChild<QQuickItem*>(
+        QStringLiteral("blockLinkedReferenceList"));
     REQUIRE(drawer != nullptr);
     REQUIRE(referenceList != nullptr);
     CHECK(controller.blockLinkedReferenceTargetId() == targetId);
     CHECK(controller.blockLinkedReferenceTotal() == 1);
-    REQUIRE(waitUntil([drawer]() -> bool { return drawer->property("opened").toBool(); }));
+    REQUIRE(waitUntil(
+        [drawer]() -> bool { return drawer->property("opened").toBool(); }));
     CHECK(referenceList->property("count").toInt() == 1);
     CHECK(controller.outlineEntryId(1) == sourceId);
     REQUIRE(QMetaObject::invokeMethod(drawer, "close"));
-    REQUIRE(waitUntil([drawer]() -> bool { return !drawer->property("visible").toBool(); }));
+    REQUIRE(waitUntil(
+        [drawer]() -> bool { return !drawer->property("visible").toBool(); }));
 
     REQUIRE(QMetaObject::invokeMethod(root.get(), "beginTrailingDraft"));
     REQUIRE(waitUntil([root = root.get()]() -> bool {
-        return root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor")) != nullptr;
+        return root->findChild<QQuickItem*>(
+                   QStringLiteral("journalDraftEditor")) != nullptr;
     }));
-    auto* draftEditor = root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor"));
+    auto* draftEditor =
+        root->findChild<QQuickItem*>(QStringLiteral("journalDraftEditor"));
     REQUIRE(draftEditor != nullptr);
-    REQUIRE(waitUntil([draftEditor]() -> bool { return draftEditor->hasActiveFocus(); }));
+    REQUIRE(waitUntil(
+        [draftEditor]() -> bool { return draftEditor->hasActiveFocus(); }));
     REQUIRE(draftEditor->width() > 0);
     REQUIRE(draftEditor->height() > 0);
     draftEditor->setProperty("text", QStringLiteral("draft"));
     draftEditor->setProperty("cursorPosition", 2);
-    const auto draftEditorCenter =
-        draftEditor->mapToScene(QPointF(draftEditor->width() / 2, draftEditor->height() / 2));
+    const auto draftEditorCenter = draftEditor->mapToScene(
+        QPointF(draftEditor->width() / 2, draftEditor->height() / 2));
     REQUIRE(draftEditorCenter.x() >= 0);
     REQUIRE(draftEditorCenter.x() < window->width());
     REQUIRE(draftEditorCenter.y() >= 0);
     REQUIRE(draftEditorCenter.y() < window->height());
-    auto* activeDraft = root->findChild<QObject*>(QStringLiteral("activeJournalDraft"));
+    auto* activeDraft =
+        root->findChild<QObject*>(QStringLiteral("activeJournalDraft"));
     REQUIRE(activeDraft != nullptr);
 #ifdef Q_OS_MACOS
     REQUIRE(QMetaObject::invokeMethod(activeDraft, "openContextMenu"));
 #else
-    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, draftEditorCenter.toPoint());
+    QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier,
+                      draftEditorCenter.toPoint());
 #endif
-    auto* insertDraftReference =
-        root->findChild<QObject*>(QStringLiteral("insertDraftBlockReferenceMenuItem"));
+    auto* insertDraftReference = root->findChild<QObject*>(
+        QStringLiteral("insertDraftBlockReferenceMenuItem"));
     CHECK(insertDraftReference != nullptr);
     if (insertDraftReference != nullptr) {
         CHECK(waitUntil([insertDraftReference]() -> bool {
@@ -1553,12 +1830,15 @@ TEST_CASE("the packaged QML selects inserts and browses Block References") {
         }));
         REQUIRE(QMetaObject::invokeMethod(insertDraftReference, "click"));
         CHECK(draftEditor->property("text").toString() ==
-              QStringLiteral("dr%1aft").arg(NotebookController::blockReferenceNotation(targetId)));
+              QStringLiteral("dr%1aft").arg(
+                  NotebookController::blockReferenceNotation(targetId)));
     }
     CHECK(controller.outlineEntries()->rowCount() == 2);
 }
 
-auto main(int argc, char* argv[]) -> int {
+auto
+main(int argc, char* argv[]) -> int
+{
     QApplication application(argc, argv);
     return Catch::Session().run(argc, argv);
 }

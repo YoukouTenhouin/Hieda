@@ -23,7 +23,8 @@ struct BlockReferenceOccurrence {
 };
 
 [[nodiscard]] auto validPageName(std::string_view name) -> bool;
-[[nodiscard]] auto pageLinks(std::string_view source) -> std::vector<PageLinkOccurrence>;
+[[nodiscard]] auto pageLinks(std::string_view source)
+    -> std::vector<PageLinkOccurrence>;
 [[nodiscard]] auto blockReferences(std::string_view source)
     -> std::vector<BlockReferenceOccurrence>;
 

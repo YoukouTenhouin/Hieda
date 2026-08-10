@@ -11,7 +11,9 @@
 namespace hieda::notebook::platform {
 namespace {
 
-auto makeFileError(int error) -> FileError {
+auto
+makeFileError(int error) -> FileError
+{
     auto kind = FileErrorKind::other;
     if (error == EWOULDBLOCK || error == EAGAIN) {
         kind = FileErrorKind::alreadyLocked;
@@ -31,7 +33,8 @@ class ExclusiveFileLock::Impl final {
   public:
     explicit Impl(int descriptor) : descriptor_(descriptor) {}
 
-    ~Impl() {
+    ~Impl()
+    {
         static_cast<void>(flock(descriptor_, LOCK_UN));
         static_cast<void>(::close(descriptor_));
     }
@@ -40,13 +43,19 @@ class ExclusiveFileLock::Impl final {
     int descriptor_;
 };
 
-ExclusiveFileLock::ExclusiveFileLock(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+ExclusiveFileLock::ExclusiveFileLock(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl))
+{
+}
 ExclusiveFileLock::~ExclusiveFileLock() = default;
 ExclusiveFileLock::ExclusiveFileLock(ExclusiveFileLock&&) noexcept = default;
-auto ExclusiveFileLock::operator=(ExclusiveFileLock&&) noexcept -> ExclusiveFileLock& = default;
+auto ExclusiveFileLock::operator=(ExclusiveFileLock&&) noexcept
+    -> ExclusiveFileLock& = default;
 
-auto acquireExclusiveFileLock(const std::filesystem::path& path, bool create)
-    -> std::variant<ExclusiveFileLock, FileError> {
+auto
+acquireExclusiveFileLock(const std::filesystem::path& path, bool create)
+    -> std::variant<ExclusiveFileLock, FileError>
+{
     auto flags = O_RDWR | O_CLOEXEC;
     if (create) {
         flags |= O_CREAT;
@@ -60,11 +69,15 @@ auto acquireExclusiveFileLock(const std::filesystem::path& path, bool create)
         static_cast<void>(::close(descriptor));
         return makeFileError(error);
     }
-    return ExclusiveFileLock(std::make_unique<ExclusiveFileLock::Impl>(descriptor));
+    return ExclusiveFileLock(
+        std::make_unique<ExclusiveFileLock::Impl>(descriptor));
 }
 
-auto publishNewFile(const std::filesystem::path& temporaryPath,
-                    const std::filesystem::path& destinationPath) -> std::optional<FileError> {
+auto
+publishNewFile(const std::filesystem::path& temporaryPath,
+               const std::filesystem::path& destinationPath)
+    -> std::optional<FileError>
+{
     if (::link(temporaryPath.c_str(), destinationPath.c_str()) != 0) {
         return makeFileError(errno);
     }
@@ -73,8 +86,12 @@ auto publishNewFile(const std::filesystem::path& temporaryPath,
     return std::nullopt;
 }
 
-auto syncParentDirectory(const std::filesystem::path& path) -> std::optional<FileError> {
-    const auto descriptor = ::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+auto
+syncParentDirectory(const std::filesystem::path& path)
+    -> std::optional<FileError>
+{
+    const auto descriptor =
+        ::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (descriptor < 0) {
         return makeFileError(errno);
     }

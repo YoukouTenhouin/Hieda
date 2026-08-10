@@ -47,21 +47,26 @@ class OutlineEntryModel final : public QAbstractListModel {
     };
 
     explicit OutlineEntryModel(QObject* parent = nullptr);
-    [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const -> int override;
-    [[nodiscard]] auto data(const QModelIndex& index, int role) const -> QVariant override;
+    [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const
+        -> int override;
+    [[nodiscard]] auto data(const QModelIndex& index, int role) const
+        -> QVariant override;
     [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;
     void setEntries(std::vector<OutlineEntry> entries);
     void appendEntries(std::vector<OutlineEntry> entries);
     void insertEntry(int row, OutlineEntry entry);
     void updateEntry(const OutlineEntry& entry);
-    void appendLinkedReferencePresentation(const hieda::notebook::BlockId& entryId,
-                                           const QString& presentation, bool hasMore);
+    void
+    appendLinkedReferencePresentation(const hieda::notebook::BlockId& entryId,
+                                      const QString& presentation,
+                                      bool hasMore);
     [[nodiscard]] auto entryId(int row) const -> QString;
     [[nodiscard]] auto entryText(int row) const -> QString;
     [[nodiscard]] auto entryParentId(int row) const -> QString;
     [[nodiscard]] auto entryDepth(int row) const -> int;
     [[nodiscard]] auto subtreeEnd(int row) const -> int;
-    [[nodiscard]] auto rowForId(const hieda::notebook::BlockId& identifier) const -> int;
+    [[nodiscard]] auto
+    rowForId(const hieda::notebook::BlockId& identifier) const -> int;
 
   private:
     std::vector<OutlineEntry> entries_;
@@ -83,20 +88,28 @@ class PageHierarchyModel final : public QAbstractItemModel {
     };
 
     explicit PageHierarchyModel(QObject* parent = nullptr);
-    [[nodiscard]] auto index(int row, int column, const QModelIndex& parent = {}) const
+    [[nodiscard]] auto index(int row, int column,
+                             const QModelIndex& parent = {}) const
         -> QModelIndex override;
-    [[nodiscard]] auto parent(const QModelIndex& child) const -> QModelIndex override;
-    [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const -> int override;
-    [[nodiscard]] auto hasChildren(const QModelIndex& parent = {}) const -> bool override;
-    [[nodiscard]] auto columnCount(const QModelIndex& parent = {}) const -> int override;
-    [[nodiscard]] auto data(const QModelIndex& index, int role) const -> QVariant override;
+    [[nodiscard]] auto parent(const QModelIndex& child) const
+        -> QModelIndex override;
+    [[nodiscard]] auto rowCount(const QModelIndex& parent = {}) const
+        -> int override;
+    [[nodiscard]] auto hasChildren(const QModelIndex& parent = {}) const
+        -> bool override;
+    [[nodiscard]] auto columnCount(const QModelIndex& parent = {}) const
+        -> int override;
+    [[nodiscard]] auto data(const QModelIndex& index, int role) const
+        -> QVariant override;
     [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;
-    [[nodiscard]] auto canFetchMore(const QModelIndex& parent) const -> bool override;
+    [[nodiscard]] auto canFetchMore(const QModelIndex& parent) const
+        -> bool override;
     void fetchMore(const QModelIndex& parent) override;
     void attach(hieda::notebook::NotebookSession* session);
     void clear();
     [[nodiscard]] auto refresh(const QString& currentName) -> bool;
-    [[nodiscard]] Q_INVOKABLE QModelIndex indexForPageName(const QString& pageName) const;
+    [[nodiscard]] Q_INVOKABLE QModelIndex
+    indexForPageName(const QString& pageName) const;
     [[nodiscard]] Q_INVOKABLE static QString pageName(const QModelIndex& index);
 
   private:
@@ -109,7 +122,8 @@ class PageHierarchyModel final : public QAbstractItemModel {
     };
 
     [[nodiscard]] static auto node(const QModelIndex& index) -> Node*;
-    [[nodiscard]] auto children(Node* parent) -> std::vector<std::unique_ptr<Node>>&;
+    [[nodiscard]] auto children(Node* parent)
+        -> std::vector<std::unique_ptr<Node>>&;
     [[nodiscard]] auto children(const Node* parent) const
         -> const std::vector<std::unique_ptr<Node>>&;
     [[nodiscard]] auto loadNextBatch(Node* parent) -> bool;
@@ -131,35 +145,46 @@ class NotebookController final : public QObject {
     Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY stateChanged)
     Q_PROPERTY(QDate journalDate READ journalDate NOTIFY destinationChanged)
     Q_PROPERTY(QAbstractItemModel* outlineEntries READ outlineEntries CONSTANT)
-    Q_PROPERTY(QAbstractItemModel* pagePreviewSources READ pagePreviewSources CONSTANT)
+    Q_PROPERTY(
+        QAbstractItemModel* pagePreviewSources READ pagePreviewSources CONSTANT)
     Q_PROPERTY(qsizetype pagePreviewUnresolvedPageLinkSourceTotal READ
                    pagePreviewUnresolvedPageLinkSourceTotal NOTIFY stateChanged)
-    Q_PROPERTY(bool hasMorePagePreviewUnresolvedPageLinkSources READ
-                   hasMorePagePreviewUnresolvedPageLinkSources NOTIFY stateChanged)
-    Q_PROPERTY(QAbstractItemModel* linkedReferenceSources READ linkedReferenceSources CONSTANT)
     Q_PROPERTY(
-        QAbstractItemModel* blockLinkedReferenceSources READ blockLinkedReferenceSources CONSTANT)
+        bool hasMorePagePreviewUnresolvedPageLinkSources READ
+            hasMorePagePreviewUnresolvedPageLinkSources NOTIFY stateChanged)
+    Q_PROPERTY(QAbstractItemModel* linkedReferenceSources READ
+                   linkedReferenceSources CONSTANT)
+    Q_PROPERTY(QAbstractItemModel* blockLinkedReferenceSources READ
+                   blockLinkedReferenceSources CONSTANT)
     Q_PROPERTY(QAbstractItemModel* pageHierarchy READ pageHierarchy CONSTANT)
     Q_PROPERTY(bool canUndo READ canUndo NOTIFY stateChanged)
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY stateChanged)
     Q_PROPERTY(bool isJournalPage READ isJournalPage NOTIFY destinationChanged)
-    Q_PROPERTY(QString currentPageId READ currentPageId NOTIFY destinationChanged)
-    Q_PROPERTY(QString currentPageName READ currentPageName NOTIFY destinationChanged)
-    Q_PROPERTY(QString currentPageTitle READ currentPageTitle NOTIFY destinationChanged)
-    Q_PROPERTY(bool currentPagePreview READ currentPagePreview NOTIFY destinationChanged)
+    Q_PROPERTY(
+        QString currentPageId READ currentPageId NOTIFY destinationChanged)
+    Q_PROPERTY(
+        QString currentPageName READ currentPageName NOTIFY destinationChanged)
+    Q_PROPERTY(QString currentPageTitle READ currentPageTitle NOTIFY
+                   destinationChanged)
+    Q_PROPERTY(bool currentPagePreview READ currentPagePreview NOTIFY
+                   destinationChanged)
     Q_PROPERTY(QStringList pageChoices READ pageChoices NOTIFY stateChanged)
-    Q_PROPERTY(QString selectedBlockReferenceTargetId READ selectedBlockReferenceTargetId NOTIFY
+    Q_PROPERTY(QString selectedBlockReferenceTargetId READ
+                   selectedBlockReferenceTargetId NOTIFY stateChanged)
+    Q_PROPERTY(QString linkedReferenceTargetId READ linkedReferenceTargetId
+                   NOTIFY stateChanged)
+    Q_PROPERTY(qsizetype linkedReferenceTotal READ linkedReferenceTotal NOTIFY
                    stateChanged)
-    Q_PROPERTY(QString linkedReferenceTargetId READ linkedReferenceTargetId NOTIFY stateChanged)
-    Q_PROPERTY(qsizetype linkedReferenceTotal READ linkedReferenceTotal NOTIFY stateChanged)
-    Q_PROPERTY(bool hasMoreLinkedReferences READ hasMoreLinkedReferences NOTIFY stateChanged)
+    Q_PROPERTY(bool hasMoreLinkedReferences READ hasMoreLinkedReferences NOTIFY
+                   stateChanged)
+    Q_PROPERTY(QString blockLinkedReferenceTargetId READ
+                   blockLinkedReferenceTargetId NOTIFY stateChanged)
+    Q_PROPERTY(qsizetype blockLinkedReferenceTotal READ
+                   blockLinkedReferenceTotal NOTIFY stateChanged)
+    Q_PROPERTY(bool hasMoreBlockLinkedReferences READ
+                   hasMoreBlockLinkedReferences NOTIFY stateChanged)
     Q_PROPERTY(
-        QString blockLinkedReferenceTargetId READ blockLinkedReferenceTargetId NOTIFY stateChanged)
-    Q_PROPERTY(
-        qsizetype blockLinkedReferenceTotal READ blockLinkedReferenceTotal NOTIFY stateChanged)
-    Q_PROPERTY(
-        bool hasMoreBlockLinkedReferences READ hasMoreBlockLinkedReferences NOTIFY stateChanged)
-    Q_PROPERTY(QString identifiedBlockId READ identifiedBlockId NOTIFY stateChanged)
+        QString identifiedBlockId READ identifiedBlockId NOTIFY stateChanged)
 
   public:
     explicit NotebookController(QObject* parent = nullptr);
@@ -171,8 +196,10 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto journalDate() const -> QDate;
     [[nodiscard]] auto outlineEntries() -> QAbstractItemModel*;
     [[nodiscard]] auto pagePreviewSources() -> QAbstractItemModel*;
-    [[nodiscard]] auto pagePreviewUnresolvedPageLinkSourceTotal() const -> qsizetype;
-    [[nodiscard]] auto hasMorePagePreviewUnresolvedPageLinkSources() const -> bool;
+    [[nodiscard]] auto pagePreviewUnresolvedPageLinkSourceTotal() const
+        -> qsizetype;
+    [[nodiscard]] auto hasMorePagePreviewUnresolvedPageLinkSources() const
+        -> bool;
     [[nodiscard]] auto linkedReferenceSources() -> QAbstractItemModel*;
     [[nodiscard]] auto blockLinkedReferenceSources() -> QAbstractItemModel*;
     [[nodiscard]] auto pageHierarchy() -> QAbstractItemModel*;
@@ -192,44 +219,58 @@ class NotebookController final : public QObject {
     [[nodiscard]] auto blockLinkedReferenceTotal() const -> qsizetype;
     [[nodiscard]] auto hasMoreBlockLinkedReferences() const -> bool;
     [[nodiscard]] auto identifiedBlockId() const -> QString;
-    // Qt 6.8 moc emits invalid metadata for invokable methods with trailing return types.
-    // NOLINTBEGIN(modernize-use-trailing-return-type)
+    // Qt 6.8 moc emits invalid metadata for invokable methods with trailing
+    // return types. NOLINTBEGIN(modernize-use-trailing-return-type)
     [[nodiscard]] Q_INVOKABLE QString pageIdAt(qsizetype index) const;
-    [[nodiscard]] Q_INVOKABLE QString pageIdForChoice(const QString& choice) const;
+    [[nodiscard]] Q_INVOKABLE QString
+    pageIdForChoice(const QString& choice) const;
 
     Q_INVOKABLE void createNotebook(const QUrl& url);
     Q_INVOKABLE void openNotebook(const QUrl& url);
     Q_INVOKABLE void closeNotebook();
     Q_INVOKABLE void clearError();
-    Q_INVOKABLE bool createPage(const QString& name, const QString& displayTitle);
+    Q_INVOKABLE bool createPage(const QString& name,
+                                const QString& displayTitle);
     Q_INVOKABLE bool createCurrentPage(const QString& displayTitle);
     Q_INVOKABLE bool deleteCurrentPage();
-    Q_INVOKABLE bool renameCurrentPage(const QString& name, const QString& displayTitle);
+    Q_INVOKABLE bool renameCurrentPage(const QString& name,
+                                       const QString& displayTitle);
     Q_INVOKABLE void navigateToPage(const QString& pageId);
     Q_INVOKABLE void navigateToPageName(const QString& pageName);
     Q_INVOKABLE bool followPageLink(const QString& entryId, int characterOffset,
                                     const QString& editorText);
-    Q_INVOKABLE bool followBlockReference(const QString& entryId, int characterOffset,
+    Q_INVOKABLE bool followBlockReference(const QString& entryId,
+                                          int characterOffset,
                                           const QString& editorText);
-    Q_INVOKABLE bool followSemanticReference(const QString& entryId, int characterOffset,
+    Q_INVOKABLE bool followSemanticReference(const QString& entryId,
+                                             int characterOffset,
                                              const QString& editorText);
-    Q_INVOKABLE bool insertBlockReference(const QString& sourceEntryId, int characterOffset,
-                                          const QString& editorText, const QString& targetId);
+    Q_INVOKABLE bool insertBlockReference(const QString& sourceEntryId,
+                                          int characterOffset,
+                                          const QString& editorText,
+                                          const QString& targetId);
     Q_INVOKABLE bool selectBlockReferenceTarget(const QString& targetId);
-    Q_INVOKABLE bool insertSelectedBlockReference(const QString& sourceEntryId, int characterOffset,
+    Q_INVOKABLE bool insertSelectedBlockReference(const QString& sourceEntryId,
+                                                  int characterOffset,
                                                   const QString& editorText);
     Q_INVOKABLE bool browseLinkedReferences(const QString& targetId);
     Q_INVOKABLE bool loadMoreLinkedReferences();
     Q_INVOKABLE bool loadMoreBlockLinkedReferences();
-    Q_INVOKABLE bool loadMoreLinkedReferenceOccurrences(const QString& sourceEntryId);
-    Q_INVOKABLE bool loadMoreBlockLinkedReferenceOccurrences(const QString& sourceEntryId);
+    Q_INVOKABLE bool
+    loadMoreLinkedReferenceOccurrences(const QString& sourceEntryId);
+    Q_INVOKABLE bool
+    loadMoreBlockLinkedReferenceOccurrences(const QString& sourceEntryId);
     Q_INVOKABLE bool followLinkedReferenceSource(const QString& sourceEntryId);
-    Q_INVOKABLE bool followBlockLinkedReferenceSource(const QString& sourceEntryId);
+    Q_INVOKABLE bool
+    followBlockLinkedReferenceSource(const QString& sourceEntryId);
     Q_INVOKABLE bool followPagePreviewSource(const QString& sourceEntryId);
     Q_INVOKABLE bool loadMorePagePreviewUnresolvedPageLinkSources();
-    Q_INVOKABLE bool loadMorePagePreviewUnresolvedPageLinkOccurrences(const QString& sourceEntryId);
-    [[nodiscard]] Q_INVOKABLE QString linkedReferenceContext(const QString& sourceEntryId) const;
-    [[nodiscard]] Q_INVOKABLE static QString blockReferenceNotation(const QString& targetId);
+    Q_INVOKABLE bool loadMorePagePreviewUnresolvedPageLinkOccurrences(
+        const QString& sourceEntryId);
+    [[nodiscard]] Q_INVOKABLE QString
+    linkedReferenceContext(const QString& sourceEntryId) const;
+    [[nodiscard]] Q_INVOKABLE static QString
+    blockReferenceNotation(const QString& targetId);
     Q_INVOKABLE void navigateToJournalDate(const QDate& date);
     Q_INVOKABLE void navigateToJournalDateText(const QString& isoDate);
     Q_INVOKABLE void navigateToToday();
@@ -240,30 +281,39 @@ class NotebookController final : public QObject {
                                        const QString& afterEntryId = {});
     [[nodiscard]] Q_INVOKABLE QString outlineEntryId(int row) const;
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    [[nodiscard]] Q_INVOKABLE QString committedEntryPresentation(const QString& entryId,
-                                                                 const QString& authoredText) const;
+    [[nodiscard]] Q_INVOKABLE QString committedEntryPresentation(
+        const QString& entryId, const QString& authoredText) const;
     // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-    Q_INVOKABLE bool updateOutlineEntry(const QString& entryId, const QString& authoredText);
-    Q_INVOKABLE QVariantMap splitOutlineEntry(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE bool updateOutlineEntry(const QString& entryId,
+                                        const QString& authoredText);
+    Q_INVOKABLE QVariantMap splitOutlineEntry(const QString& entryId,
+                                              const QString& authoredText,
                                               int cursorPosition);
-    Q_INVOKABLE QVariantMap joinOutlineEntry(const QString& entryId, const QString& authoredText);
-    Q_INVOKABLE QVariantMap indentOutlineEntry(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE QVariantMap joinOutlineEntry(const QString& entryId,
+                                             const QString& authoredText);
+    Q_INVOKABLE QVariantMap indentOutlineEntry(const QString& entryId,
+                                               const QString& authoredText,
                                                int cursorPosition);
-    Q_INVOKABLE QVariantMap outdentOutlineEntry(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE QVariantMap outdentOutlineEntry(const QString& entryId,
+                                                const QString& authoredText,
                                                 int cursorPosition);
-    Q_INVOKABLE QVariantMap moveOutlineEntryUp(const QString& entryId, const QString& authoredText,
+    Q_INVOKABLE QVariantMap moveOutlineEntryUp(const QString& entryId,
+                                               const QString& authoredText,
                                                int cursorPosition);
     Q_INVOKABLE QVariantMap moveOutlineEntryDown(const QString& entryId,
-                                                 const QString& authoredText, int cursorPosition);
+                                                 const QString& authoredText,
+                                                 int cursorPosition);
     Q_INVOKABLE QVariantMap deleteOutlineEntry(const QString& entryId);
-    [[nodiscard]] Q_INVOKABLE QString outlineSelectionText(const QStringList& entryIds) const;
-    [[nodiscard]] Q_INVOKABLE QVariantMap outlineEntrySelection(int anchorRow, int extentRow) const;
+    [[nodiscard]] Q_INVOKABLE QString
+    outlineSelectionText(const QStringList& entryIds) const;
+    [[nodiscard]] Q_INVOKABLE QVariantMap
+    outlineEntrySelection(int anchorRow, int extentRow) const;
     Q_INVOKABLE static void copyTextToClipboard(const QString& text);
     Q_INVOKABLE QVariantMap deleteOutlineSubtrees(const QStringList& entryIds);
-    Q_INVOKABLE QVariantMap undoOutlineEdit(const QString& preferredEntryId = {},
-                                            int cursorPosition = 0);
-    Q_INVOKABLE QVariantMap redoOutlineEdit(const QString& preferredEntryId = {},
-                                            int cursorPosition = 0);
+    Q_INVOKABLE QVariantMap undoOutlineEdit(
+        const QString& preferredEntryId = {}, int cursorPosition = 0);
+    Q_INVOKABLE QVariantMap redoOutlineEdit(
+        const QString& preferredEntryId = {}, int cursorPosition = 0);
     void requestJournalDateRollover(const QDate& date);
     Q_INVOKABLE void completeJournalDateRollover();
     // NOLINTEND(modernize-use-trailing-return-type)
@@ -295,24 +345,29 @@ class NotebookController final : public QObject {
     void loadPagePreview(const QString& pageName);
     void appendPagePreviewUnresolvedPageLinkSourcesBatch(
         const hieda::notebook::UnresolvedPageLinkSourcesBatch& batch);
-    [[nodiscard]] auto currentPageAddress() const -> hieda::notebook::PageAddress;
+    [[nodiscard]] auto currentPageAddress() const
+        -> hieda::notebook::PageAddress;
     void refreshPages();
     void refreshLinkedReferences();
     void refreshBlockLinkedReferences();
     template <typename Batch>
-    void appendIncomingSourcesBatch(const Batch& batch, IncomingSourcesViewState& view,
+    void appendIncomingSourcesBatch(const Batch& batch,
+                                    IncomingSourcesViewState& view,
                                     OutlineEntryModel& model);
-    auto loadMoreLinkedReferenceOccurrencesFor(const hieda::notebook::BlockId& targetId,
-                                               const QString& sourceEntryId,
-                                               OutlineEntryModel& model,
-                                               QHash<QString, std::string>& occurrenceCursors)
-        -> bool;
-    [[nodiscard]] auto navigateToOutlinePage(const hieda::notebook::OutlinePage& page) -> bool;
+    auto loadMoreLinkedReferenceOccurrencesFor(
+        const hieda::notebook::BlockId& targetId, const QString& sourceEntryId,
+        OutlineEntryModel& model,
+        QHash<QString, std::string>& occurrenceCursors) -> bool;
+    [[nodiscard]] auto
+    navigateToOutlinePage(const hieda::notebook::OutlinePage& page) -> bool;
     auto followLinkedReferenceSourceFor(const QString& sourceEntryId,
-                                        const IncomingSourcesViewState& view) -> bool;
+                                        const IncomingSourcesViewState& view)
+        -> bool;
     auto moveOutlineEntry(const QString& entryId, const QString& authoredText,
-                          OutlineEntryMove movement, int cursorPosition) -> QVariantMap;
-    auto applyOutlineHistory(OutlineHistoryDirection direction, const QString& preferredEntryId,
+                          OutlineEntryMove movement, int cursorPosition)
+        -> QVariantMap;
+    auto applyOutlineHistory(OutlineHistoryDirection direction,
+                             const QString& preferredEntryId,
                              int cursorPosition) -> QVariantMap;
     void scheduleMidnightRefresh();
 

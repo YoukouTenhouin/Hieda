@@ -40,7 +40,8 @@ class NotebookSubscription {
     NotebookSubscription(NotebookSubscription&&) noexcept;
     auto operator=(NotebookSubscription&&) noexcept -> NotebookSubscription&;
     NotebookSubscription(const NotebookSubscription&) = delete;
-    auto operator=(const NotebookSubscription&) -> NotebookSubscription& = delete;
+    auto operator=(const NotebookSubscription&)
+        -> NotebookSubscription& = delete;
 
   private:
     friend class NotebookSession;
@@ -204,14 +205,16 @@ struct LinkedReferenceOccurrencesBatch {
     std::size_t totalOccurrenceCount{0};
     std::optional<std::string> continuationCursor;
 
-    auto operator==(const LinkedReferenceOccurrencesBatch&) const -> bool = default;
+    auto operator==(const LinkedReferenceOccurrencesBatch&) const
+        -> bool = default;
 };
 
 struct UnresolvedPageLinkOccurrence {
     std::size_t sourceByteOffset{0};
     std::size_t sourceByteLength{0};
 
-    auto operator==(const UnresolvedPageLinkOccurrence&) const -> bool = default;
+    auto operator==(const UnresolvedPageLinkOccurrence&) const
+        -> bool = default;
 };
 
 struct UnresolvedPageLinkSource {
@@ -229,7 +232,8 @@ struct UnresolvedPageLinkSourcesBatch {
     std::size_t totalSourceCount{0};
     std::optional<std::string> continuationCursor;
 
-    auto operator==(const UnresolvedPageLinkSourcesBatch&) const -> bool = default;
+    auto operator==(const UnresolvedPageLinkSourcesBatch&) const
+        -> bool = default;
 };
 
 struct UnresolvedPageLinkOccurrencesBatch {
@@ -237,7 +241,8 @@ struct UnresolvedPageLinkOccurrencesBatch {
     std::size_t totalOccurrenceCount{0};
     std::optional<std::string> continuationCursor;
 
-    auto operator==(const UnresolvedPageLinkOccurrencesBatch&) const -> bool = default;
+    auto operator==(const UnresolvedPageLinkOccurrencesBatch&) const
+        -> bool = default;
 };
 
 struct EditCapabilities {
@@ -292,25 +297,38 @@ class NotebookException : public std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-template <typename T> class Result {
+template <typename T>
+class Result {
   public:
-    [[nodiscard]] static auto success(T value) -> Result {
+    [[nodiscard]] static auto
+    success(T value) -> Result
+    {
         return Result(std::move(value));
     }
-    [[nodiscard]] static auto failure(NotebookError error) -> Result {
+    [[nodiscard]] static auto
+    failure(NotebookError error) -> Result
+    {
         return Result(std::move(error));
     }
 
-    [[nodiscard]] explicit operator bool() const noexcept {
+    [[nodiscard]] explicit
+    operator bool() const noexcept
+    {
         return std::holds_alternative<T>(value_);
     }
-    [[nodiscard]] auto value() const& -> const T& {
+    [[nodiscard]] auto
+    value() const& -> const T&
+    {
         return std::get<T>(value_);
     }
-    [[nodiscard]] auto value() && -> T {
+    [[nodiscard]] auto
+    value() && -> T
+    {
         return std::get<T>(std::move(value_));
     }
-    [[nodiscard]] auto error() const& -> const NotebookError& {
+    [[nodiscard]] auto
+    error() const& -> const NotebookError&
+    {
         return std::get<NotebookError>(value_);
     }
 
@@ -331,94 +349,129 @@ class NotebookSession {
     NotebookSession(NotebookSession&&) = delete;
     auto operator=(NotebookSession&&) -> NotebookSession& = delete;
 
-    [[nodiscard]] auto create(const std::filesystem::path& path) -> Result<NotebookInfo>;
-    [[nodiscard]] auto open(const std::filesystem::path& path) -> Result<NotebookInfo>;
+    [[nodiscard]] auto create(const std::filesystem::path& path)
+        -> Result<NotebookInfo>;
+    [[nodiscard]] auto open(const std::filesystem::path& path)
+        -> Result<NotebookInfo>;
     void close() noexcept;
     [[nodiscard]] auto isOpen() const noexcept -> bool;
     [[nodiscard]] auto current() const -> std::optional<NotebookInfo>;
     [[nodiscard]] auto pages() const -> Result<std::vector<PageSummary>>;
     [[nodiscard]] auto pageHierarchyNode(std::string name) const
         -> Result<std::optional<PageHierarchyNode>>;
-    [[nodiscard]] auto
-    pageHierarchyChildren(std::optional<std::string> parentName = std::nullopt,
-                          std::optional<std::string> continuationCursor = std::nullopt) const
+    [[nodiscard]] auto pageHierarchyChildren(
+        std::optional<std::string> parentName = std::nullopt,
+        std::optional<std::string> continuationCursor = std::nullopt) const
         -> Result<PageHierarchyBatch>;
-    [[nodiscard]] auto createPage(std::string name, std::string displayTitle) -> Result<Page>;
-    [[nodiscard]] auto deletePage(BlockId pageId) -> Result<Page>;
-    [[nodiscard]] auto renamePage(BlockId pageId, std::string name, std::string displayTitle)
+    [[nodiscard]] auto createPage(std::string name, std::string displayTitle)
         -> Result<Page>;
-    [[nodiscard]] auto pageLinks(BlockId entryId) const -> Result<std::vector<PageLink>>;
-    [[nodiscard]] auto followPageLink(BlockId entryId, std::size_t sourceByteOffset) const
+    [[nodiscard]] auto deletePage(BlockId pageId) -> Result<Page>;
+    [[nodiscard]] auto renamePage(BlockId pageId, std::string name,
+                                  std::string displayTitle) -> Result<Page>;
+    [[nodiscard]] auto pageLinks(BlockId entryId) const
+        -> Result<std::vector<PageLink>>;
+    [[nodiscard]] auto followPageLink(BlockId entryId,
+                                      std::size_t sourceByteOffset) const
         -> Result<PageLinkDestination>;
-    [[nodiscard]] auto insertBlockReference(BlockId sourceEntryId, std::size_t sourceByteOffset,
+    [[nodiscard]] auto insertBlockReference(BlockId sourceEntryId,
+                                            std::size_t sourceByteOffset,
                                             BlockId targetId) -> Result<Entry>;
     [[nodiscard]] auto blockReferences(BlockId entryId) const
         -> Result<std::vector<BlockReference>>;
-    [[nodiscard]] auto followBlockReference(BlockId entryId, std::size_t sourceByteOffset) const
+    [[nodiscard]] auto followBlockReference(BlockId entryId,
+                                            std::size_t sourceByteOffset) const
         -> Result<BlockReferenceDestination>;
-    [[nodiscard]] auto locateBlock(BlockId blockId) const -> Result<BlockReferenceDestination>;
-    [[nodiscard]] auto
-    linkedReferences(BlockId targetId,
-                     std::optional<std::string> continuationCursor = std::nullopt) const
+    [[nodiscard]] auto locateBlock(BlockId blockId) const
+        -> Result<BlockReferenceDestination>;
+    [[nodiscard]] auto linkedReferences(
+        BlockId targetId,
+        std::optional<std::string> continuationCursor = std::nullopt) const
         -> Result<LinkedReferencesBatch>;
-    [[nodiscard]] auto
-    linkedReferenceOccurrences(BlockId targetId, BlockId sourceId,
-                               std::optional<std::string> continuationCursor = std::nullopt) const
+    [[nodiscard]] auto linkedReferenceOccurrences(
+        BlockId targetId, BlockId sourceId,
+        std::optional<std::string> continuationCursor = std::nullopt) const
         -> Result<LinkedReferenceOccurrencesBatch>;
-    [[nodiscard]] auto
-    unresolvedPageLinkSources(std::string name,
-                              std::optional<std::string> continuationCursor = std::nullopt) const
+    [[nodiscard]] auto unresolvedPageLinkSources(
+        std::string name,
+        std::optional<std::string> continuationCursor = std::nullopt) const
         -> Result<UnresolvedPageLinkSourcesBatch>;
     [[nodiscard]] auto unresolvedPageLinkOccurrences(
         std::string name, BlockId sourceId,
         std::optional<std::string> continuationCursor = std::nullopt) const
         -> Result<UnresolvedPageLinkOccurrencesBatch>;
-    [[nodiscard]] auto pagePreview(std::string name) const -> Result<PagePreview>;
-    [[nodiscard]] auto outline(PageAddress address) const -> Result<OutlinePage>;
-    [[nodiscard]] auto insertEntry(PageAddress address, std::optional<BlockId> afterEntry,
-                                   std::string authoredText) -> Result<OutlinePage>;
-    [[nodiscard]] auto updateEntry(BlockId entryId, std::string authoredText) -> Result<Entry>;
+    [[nodiscard]] auto pagePreview(std::string name) const
+        -> Result<PagePreview>;
+    [[nodiscard]] auto outline(PageAddress address) const
+        -> Result<OutlinePage>;
+    [[nodiscard]] auto insertEntry(PageAddress address,
+                                   std::optional<BlockId> afterEntry,
+                                   std::string authoredText)
+        -> Result<OutlinePage>;
+    [[nodiscard]] auto updateEntry(BlockId entryId, std::string authoredText)
+        -> Result<Entry>;
     [[nodiscard]] auto splitEntry(BlockId entryId, std::string authoredText,
-                                  std::size_t cursorByteOffset) -> Result<OutlinePage>;
-    [[nodiscard]] auto joinEntry(BlockId entryId, std::string authoredText) -> Result<OutlinePage>;
-    [[nodiscard]] auto moveEntry(BlockId entryId, EntryMove movement, std::string authoredText)
+                                  std::size_t cursorByteOffset)
+        -> Result<OutlinePage>;
+    [[nodiscard]] auto joinEntry(BlockId entryId, std::string authoredText)
+        -> Result<OutlinePage>;
+    [[nodiscard]] auto moveEntry(BlockId entryId, EntryMove movement,
+                                 std::string authoredText)
         -> Result<OutlinePage>;
     [[nodiscard]] auto moveEntryToPage(BlockId entryId, PageAddress destination,
                                        std::optional<BlockId> afterEntry)
         -> Result<std::vector<OutlinePage>>;
     [[nodiscard]] auto deleteEntry(BlockId entryId) -> Result<OutlinePage>;
-    [[nodiscard]] auto deleteSubtrees(std::vector<BlockId> entryIds) -> Result<OutlinePage>;
+    [[nodiscard]] auto deleteSubtrees(std::vector<BlockId> entryIds)
+        -> Result<OutlinePage>;
     [[nodiscard]] auto editCapabilities() const -> Result<EditCapabilities>;
     [[nodiscard]] auto undoEdit() -> Result<std::vector<OutlinePage>>;
     [[nodiscard]] auto redoEdit() -> Result<std::vector<OutlinePage>>;
-    [[nodiscard]] auto subscribeToChanges(std::function<void()> callback) -> NotebookSubscription;
+    [[nodiscard]] auto subscribeToChanges(std::function<void()> callback)
+        -> NotebookSubscription;
 
   private:
     friend class NotebookSessionTestAccess;
-    [[nodiscard]] auto journalPage(JournalDate date) const -> Result<JournalPage>;
+    [[nodiscard]] auto journalPage(JournalDate date) const
+        -> Result<JournalPage>;
     [[nodiscard]] auto page(BlockId pageId) const -> Result<Page>;
-    [[nodiscard]] auto insertPageEntry(BlockId pageId, std::optional<BlockId> afterEntry,
-                                       std::string authoredText) -> Result<Page>;
-    [[nodiscard]] auto updatePageEntry(BlockId entryId, std::string authoredText) -> Result<Entry>;
-    [[nodiscard]] auto splitPageEntry(BlockId entryId, std::string authoredText,
-                                      std::size_t cursorByteOffset) -> Result<Page>;
-    [[nodiscard]] auto joinPageEntry(BlockId entryId, std::string authoredText) -> Result<Page>;
-    [[nodiscard]] auto movePageEntry(BlockId entryId, EntryMove movement, std::string authoredText)
+    [[nodiscard]] auto insertPageEntry(BlockId pageId,
+                                       std::optional<BlockId> afterEntry,
+                                       std::string authoredText)
         -> Result<Page>;
-    [[nodiscard]] auto deletePageEntry(BlockId entryId) -> Result<Page>;
-    [[nodiscard]] auto deletePageSubtrees(std::vector<BlockId> entryIds) -> Result<Page>;
-    [[nodiscard]] auto insertJournalEntry(JournalDate date, std::optional<BlockId> afterEntry,
-                                          std::string authoredText) -> Result<JournalPage>;
-    [[nodiscard]] auto updateJournalEntry(BlockId entryId, std::string authoredText)
+    [[nodiscard]] auto updatePageEntry(BlockId entryId,
+                                       std::string authoredText)
         -> Result<Entry>;
-    [[nodiscard]] auto splitJournalEntry(BlockId entryId, std::string authoredText,
-                                         std::size_t cursorByteOffset) -> Result<JournalPage>;
-    [[nodiscard]] auto joinJournalEntry(BlockId entryId, std::string authoredText)
+    [[nodiscard]] auto splitPageEntry(BlockId entryId, std::string authoredText,
+                                      std::size_t cursorByteOffset)
+        -> Result<Page>;
+    [[nodiscard]] auto joinPageEntry(BlockId entryId, std::string authoredText)
+        -> Result<Page>;
+    [[nodiscard]] auto movePageEntry(BlockId entryId, EntryMove movement,
+                                     std::string authoredText) -> Result<Page>;
+    [[nodiscard]] auto deletePageEntry(BlockId entryId) -> Result<Page>;
+    [[nodiscard]] auto deletePageSubtrees(std::vector<BlockId> entryIds)
+        -> Result<Page>;
+    [[nodiscard]] auto insertJournalEntry(JournalDate date,
+                                          std::optional<BlockId> afterEntry,
+                                          std::string authoredText)
+        -> Result<JournalPage>;
+    [[nodiscard]] auto updateJournalEntry(BlockId entryId,
+                                          std::string authoredText)
+        -> Result<Entry>;
+    [[nodiscard]] auto splitJournalEntry(BlockId entryId,
+                                         std::string authoredText,
+                                         std::size_t cursorByteOffset)
+        -> Result<JournalPage>;
+    [[nodiscard]] auto joinJournalEntry(BlockId entryId,
+                                        std::string authoredText)
         -> Result<JournalPage>;
     [[nodiscard]] auto moveJournalEntry(BlockId entryId, EntryMove movement,
-                                        std::string authoredText) -> Result<JournalPage>;
-    [[nodiscard]] auto deleteJournalEntry(BlockId entryId) -> Result<JournalPage>;
-    [[nodiscard]] auto deleteJournalSubtrees(std::vector<BlockId> entryIds) -> Result<JournalPage>;
+                                        std::string authoredText)
+        -> Result<JournalPage>;
+    [[nodiscard]] auto deleteJournalEntry(BlockId entryId)
+        -> Result<JournalPage>;
+    [[nodiscard]] auto deleteJournalSubtrees(std::vector<BlockId> entryIds)
+        -> Result<JournalPage>;
     [[nodiscard]] auto entryPageKind(BlockId entryId) const -> Result<PageKind>;
     auto runPageCommand(std::function<Result<Page>()> command) -> Result<Page>;
     class Impl;
