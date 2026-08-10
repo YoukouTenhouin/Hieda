@@ -101,6 +101,9 @@ TEST_CASE("saved Queries render navigable results and editable errors")
     auto* results =
         queryEntry->findChild<QQuickItem*>(QStringLiteral("queryResults-1"));
     REQUIRE(results != nullptr);
+    REQUIRE(waitUntil([results]() -> bool {
+        return results->isVisible() && results->property("count").toInt() == 1;
+    }));
     CHECK(results->isVisible());
     CHECK(results->property("count").toInt() == 1);
     auto* error =
@@ -109,6 +112,15 @@ TEST_CASE("saved Queries render navigable results and editable errors")
     CHECK_FALSE(error->isVisible());
 
     const auto queryId = controller.outlineEntryId(1);
+    auto* disclosure =
+        queryEntry->findChild<QQuickItem*>(QStringLiteral("queryDisclosure-1"));
+    REQUIRE(disclosure != nullptr);
+    controller.setQueryExpanded(queryId, false);
+    REQUIRE(waitUntil([results]() -> bool { return !results->isVisible(); }));
+    controller.setQueryExpanded(queryId, true);
+    controller.setQueryActive(queryId, true);
+    REQUIRE(waitUntil([results]() -> bool { return results->isVisible(); }));
+
     REQUIRE(controller.updateOutlineEntry(
         queryId, QStringLiteral("{{query (where (type unknown))}}")));
     REQUIRE(waitUntil([error]() -> bool { return error->isVisible(); }));

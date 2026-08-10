@@ -46,6 +46,21 @@ class TemporaryDirectory {
     std::filesystem::path path_;
 };
 
+class TimestampOverride {
+  public:
+    explicit TimestampOverride(hieda::notebook::BlockTimestamp timestamp)
+    {
+        hieda::notebook::NotebookSessionTestAccess::setCurrentTimestamp(
+            timestamp);
+    }
+
+    ~TimestampOverride()
+    {
+        hieda::notebook::NotebookSessionTestAccess::setCurrentTimestamp(
+            std::nullopt);
+    }
+};
+
 auto
 lmdbFixturePath(const std::filesystem::path& path) -> std::string
 {
@@ -1328,7 +1343,7 @@ TEST_CASE("unresolved Page Link sources use bounded preview batches")
     CHECK(last.value().occurrences.size() == 1);
 }
 
-TEST_CASE("opening a schema v2 Notebook backfills missing Page Link indexes")
+TEST_CASE("opening a schema v2 Notebook backfills missing derived indexes")
 {
     TemporaryDirectory temporaryDirectory;
     const auto notebookPath =
@@ -1337,10 +1352,17 @@ TEST_CASE("opening a schema v2 Notebook backfills missing Page Link indexes")
     REQUIRE(session.create(notebookPath));
     REQUIRE(session.createPage("target", "Target"));
     const auto source = session.createPage("source", "Source").value();
-    const auto entry =
-        session.insertEntry(source.metadata.id, std::nullopt, "[[target]]")
+    const auto entry = session
+                           .insertEntry(source.metadata.id, std::nullopt,
+                                        "[[target]]\nstatus::open")
+                           .value()
+                           .entries[0];
+    const auto query =
+        session
+            .insertEntry(source.metadata.id, std::nullopt,
+                         "{{query (where (property-equals status \"open\"))}}")
             .value()
-            .entries[0];
+            .entries.back();
     const auto revision =
         session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
 
@@ -1358,6 +1380,10 @@ TEST_CASE("opening a schema v2 Notebook backfills missing Page Link indexes")
     CHECK(links.value()[0]
               .target.value_or(hieda::notebook::PageSummary{})
               .displayTitle == "Target");
+    const auto queryResults = session.evaluateQuery(query.metadata.id);
+    REQUIRE(queryResults);
+    REQUIRE(queryResults.value().rows.size() == 1);
+    CHECK(queryResults.value().rows.front().metadata.id == entry.metadata.id);
 }
 
 TEST_CASE(
@@ -3010,6 +3036,25 @@ TEST_CASE("Query ordering limits and revision-bound batches are deterministic")
     CHECK_FALSE(evaluated.value().continuationCursor);
 
     REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (property-exists order)) "
+                                "(order-by update-time asc)}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    CHECK(resultIds(evaluated) ==
+          std::vector<hieda::notebook::BlockId>{createdIds[1], createdIds[2],
+                                                createdIds[0]});
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (property-exists order))}}"));
+    const auto defaultOrder = session.evaluateQuery(query.metadata.id);
+    REQUIRE(defaultOrder);
+    REQUIRE(defaultOrder.value().rows.size() == 3);
+    CHECK(defaultOrder.value().rows.front().metadata.id == createdIds.front());
+    const auto repeatedDefaultOrder = session.evaluateQuery(query.metadata.id);
+    REQUIRE(repeatedDefaultOrder);
+    CHECK(resultIds(defaultOrder) == resultIds(repeatedDefaultOrder));
+
+    REQUIRE(session.updateEntry(query.metadata.id,
                                 "{{query (where (type entry))}}"));
     for (int index = 0; index < 100; ++index) {
         REQUIRE(session.insertEntry(page.metadata.id, std::nullopt,
@@ -3031,6 +3076,91 @@ TEST_CASE("Query ordering limits and revision-bound batches are deterministic")
     REQUIRE_FALSE(stale);
     CHECK(stale.error().code ==
           hieda::notebook::NotebookErrorCode::staleQueryCursor);
+}
+
+TEST_CASE("Query ordering ties and Named Journal ordering use stable identity")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "query-ties.hieda"));
+    const auto page = session.createPage("queries", "Queries").value();
+    std::vector<hieda::notebook::BlockId> tiedIds;
+    {
+        const TimestampOverride timestamp(
+            hieda::notebook::BlockTimestamp{std::chrono::microseconds{1000}});
+        for (const auto* text : {"tie::one", "tie::two", "tie::three"}) {
+            tiedIds.push_back(
+                session.insertEntry(page.metadata.id, std::nullopt, text)
+                    .value()
+                    .entries.back()
+                    .metadata.id);
+        }
+    }
+    auto stableIds = tiedIds;
+    std::ranges::sort(stableIds,
+                      [](const auto& left, const auto& right) -> bool {
+                          return std::ranges::lexicographical_compare(
+                              left.bytes, right.bytes);
+                      });
+    const auto query = session
+                           .insertEntry(page.metadata.id, std::nullopt,
+                                        "{{query (where (property-exists tie)) "
+                                        "(order-by creation-time desc)}}")
+                           .value()
+                           .entries.back();
+    const auto resultIds =
+        [](const auto& result) -> std::vector<hieda::notebook::BlockId> {
+        std::vector<hieda::notebook::BlockId> ids;
+        for (const auto& row : result.value().rows) {
+            ids.push_back(row.metadata.id);
+        }
+        return ids;
+    };
+
+    auto evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    CHECK(resultIds(evaluated) == stableIds);
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (property-exists tie)) "
+                                "(order-by creation-time asc)}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    CHECK(resultIds(evaluated) == stableIds);
+
+    {
+        const TimestampOverride timestamp(
+            hieda::notebook::BlockTimestamp{std::chrono::microseconds{2000}});
+        for (std::size_t index = 0; index < tiedIds.size(); ++index) {
+            REQUIRE(session.updateEntry(
+                tiedIds[index], "tie::updated " + std::to_string(index)));
+        }
+    }
+    for (const auto* direction : {"asc", "desc"}) {
+        REQUIRE(session.updateEntry(
+            query.metadata.id,
+            "{{query (where (property-exists tie)) (order-by update-time " +
+                std::string(direction) + ")}}"));
+        evaluated = session.evaluateQuery(query.metadata.id);
+        REQUIRE(evaluated);
+        CHECK(resultIds(evaluated) == stableIds);
+    }
+
+    const auto archive = session.createPage("archive", "Archive").value();
+    const auto inbox = session.createPage("inbox", "Inbox").value();
+    auto namedPageIds =
+        std::vector{page.metadata.id, archive.metadata.id, inbox.metadata.id};
+    std::ranges::sort(namedPageIds,
+                      [](const auto& left, const auto& right) -> bool {
+                          return std::ranges::lexicographical_compare(
+                              left.bytes, right.bytes);
+                      });
+    REQUIRE(session.updateEntry(
+        query.metadata.id,
+        "{{query (where (and (type page) (page-context named))) "
+        "(order-by journal-date desc)}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    CHECK(resultIds(evaluated) == namedPageIds);
 }
 
 TEST_CASE("Journal Date ordering keeps Page roots and outline order together")

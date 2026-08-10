@@ -93,7 +93,9 @@ Property lines use `key::value` at the start of a logical line. Keys follow the 
 slash-separated grammar as Page names; values remain exact Unicode strings, including whitespace,
 empty values, and duplicates.
 
-An Entry whose complete committed text begins with `{{query` is a saved Query. Queries use Hieda's
+An Entry whose trimmed committed text begins with `{{query` declares Query intent. A valid Query
+executes a saved live selection; invalid or incomplete intent remains editable and displays a Query
+Error without executing. Queries use Hieda's
 declarative S-expression syntax to filter Blocks by type, Named or Journal Page context, Journal
 Date, exact Authored Text substrings, and Properties. They support nested `and`, `or`, and `not`,
 creation/update/Journal Date ordering, and positive limits. Matching Blocks appear as read-only

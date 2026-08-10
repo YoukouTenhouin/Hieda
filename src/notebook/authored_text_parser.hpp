@@ -23,6 +23,8 @@ struct BlockReferenceOccurrence {
 };
 
 struct Property {
+    std::size_t sourceByteOffset{0};
+    std::size_t sourceByteLength{0};
     std::string key;
     std::string value;
 

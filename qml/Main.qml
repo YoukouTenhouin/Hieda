@@ -1003,12 +1003,32 @@ ApplicationWindow {
                         required property string queryError
                         required property var queryResults
                         required property bool queryHasMore
+                        required property bool queryExpanded
+                        required property bool queryLoading
                         required property int index
                         readonly property bool outlineSelected: window.isOutlineSelected(entryId)
                         readonly property real outlineIndent: depth * window.uiSpacing * 3
                         readonly property var contextMenu: entryMenu
                         readonly property real editorHeight: Math.max(entryEditor.contentHeight, committedPresentation.contentHeight, entryEditor.font.pixelSize * 1.45) + (window.uiSpacing * 0.7)
                         readonly property real queryHeight: queryPanel.visible ? queryPanel.implicitHeight + window.uiSpacing : 0
+                        readonly property bool queryOnScreen: y + height >= outlineList.contentY && y <= outlineList.contentY + outlineList.height
+
+                        function syncQueryActivity() {
+                            notebookController.setQueryActive(entryId,
+                                                              queryHasIntent && queryOnScreen && queryExpanded);
+                        }
+
+                        Component.onCompleted: syncQueryActivity()
+                        Component.onDestruction: notebookController.setQueryActive(entryId, false)
+                        onQueryOnScreenChanged: syncQueryActivity()
+                        onQueryExpandedChanged: syncQueryActivity()
+                        onQueryHasIntentChanged: syncQueryActivity()
+                        onAuthoredTextChanged: {
+                            if (queryHasIntent && queryOnScreen && queryExpanded) {
+                                notebookController.setQueryActive(entryId, false);
+                                notebookController.setQueryActive(entryId, true);
+                            }
+                        }
 
                         function focusEditor(cursorPosition) {
                             window.clearOutlineSelection();
@@ -1441,12 +1461,41 @@ ApplicationWindow {
                             visible: entryRoot.queryHasIntent && !entryEditor.activeFocus && !entryEditor.hasPendingEdit
                             spacing: window.uiSpacing * 0.5
 
+                            RowLayout {
+                                Layout.fillWidth: true
+
+                                ToolButton {
+                                    id: queryDisclosure
+
+                                    objectName: "queryDisclosure-" + entryRoot.index
+                                    text: entryRoot.queryExpanded ? qsTr("Hide Query results") : qsTr("Show Query results")
+                                    icon.name: entryRoot.queryExpanded ? "go-down-symbolic" : "go-next-symbolic"
+                                    display: AbstractButton.TextBesideIcon
+                                    onClicked: notebookController.setQueryExpanded(
+                                                   entryRoot.entryId,
+                                                   !entryRoot.queryExpanded)
+                                }
+
+                                BusyIndicator {
+                                    objectName: "queryLoading-" + entryRoot.index
+                                    running: entryRoot.queryLoading
+                                    visible: running
+                                    implicitWidth: queryDisclosure.implicitHeight
+                                    implicitHeight: implicitWidth
+                                    Accessible.name: qsTr("Loading Query results")
+                                }
+
+                                Item {
+                                    Layout.fillWidth: true
+                                }
+                            }
+
                             Label {
                                 id: queryErrorLabel
 
                                 objectName: "queryError-" + entryRoot.index
                                 Layout.fillWidth: true
-                                visible: entryRoot.queryError.length > 0
+                                visible: entryRoot.queryExpanded && entryRoot.queryError.length > 0
                                 text: entryRoot.queryError
                                 wrapMode: Text.Wrap
                                 color: palette.text
@@ -1460,7 +1509,7 @@ ApplicationWindow {
 
                                 objectName: "queryResults-" + entryRoot.index
                                 Layout.fillWidth: true
-                                visible: entryRoot.queryError.length === 0
+                                visible: entryRoot.queryExpanded && entryRoot.queryError.length === 0
                                 spacing: window.uiSpacing * 0.35
 
                                 Repeater {
@@ -1469,11 +1518,19 @@ ApplicationWindow {
                                     model: entryRoot.queryResults
 
                                     delegate: Button {
+                                        id: resultButton
+
                                         required property var modelData
 
                                         Layout.fillWidth: true
                                         flat: true
                                         text: modelData.presentation
+                                        contentItem: Label {
+                                            text: resultButton.text
+                                            textFormat: Text.StyledText
+                                            wrapMode: Text.Wrap
+                                            color: resultButton.palette.buttonText
+                                        }
                                         Accessible.description: qsTr("Query result in %1").arg(modelData.context)
                                         onClicked: notebookController.followQueryResult(modelData.blockId)
                                     }

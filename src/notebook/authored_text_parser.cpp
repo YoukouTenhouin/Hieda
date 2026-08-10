@@ -196,7 +196,8 @@ properties(std::string_view source) -> std::vector<Property>
         const auto line = source.substr(lineStart, lineEnd - lineStart);
         const auto delimiter = propertyDelimiter(line, 0);
         if (delimiter != std::string_view::npos) {
-            result.push_back({std::string(line.substr(0, delimiter)),
+            result.push_back({lineStart, line.size(),
+                              std::string(line.substr(0, delimiter)),
                               std::string(line.substr(delimiter + 2))});
         }
         if (newline == std::string_view::npos) {
