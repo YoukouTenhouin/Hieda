@@ -30,6 +30,10 @@ commands are:
 
 Run one test with `ctest --test-dir build/dev -R '<test name>' --output-on-failure`. Required packages and supported tool versions are documented in `README.md`.
 
+GitHub CLI commands that require authentication must be run with sandbox escalation. The sandbox
+cannot access the desktop keyring used by `gh`, so an un-escalated `gh auth status` can incorrectly
+report an invalid token even when authentication works in the user's terminal.
+
 ## Coding Style & Naming Conventions
 
 Use the formatter and linter standard for the chosen language, committed with repository-local configuration. Run both before submitting changes. Until language-specific rules are established:
