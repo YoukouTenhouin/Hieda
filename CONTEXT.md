@@ -68,6 +68,10 @@ _Avoid_: Metadata, field
 A Block with an immutable Named or Journal kind that acts as a Containment root for Entries.
 _Avoid_: Document, article
 
+**Page Context**:
+A Page together with every Entry whose Containment root is that Page. A Page Context has the immutable Named or Journal kind of its root.
+_Avoid_: Entry type, Containment subtree
+
 **Named Page**:
 A Page with an exact Page Name and display title that participates in Page Hierarchy.
 _Avoid_: Ordinary Page, document
@@ -117,5 +121,21 @@ An incoming semantic reference derived for the block or page it targets.
 _Avoid_: Backlink, unlinked mention
 
 **Query**:
-A saved, live view that selects blocks using declarative conditions over their content, attributes, containment, and semantic references.
+A live selection of Blocks defined by Query Notation in an ordinary Entry. Query behavior does not change the Entry's Block type or identity, and its containing Entry remains selectable by Queries, including its own.
 _Avoid_: Search, script, database query
+
+**Query Result**:
+An ordered, revision-bound projection of the current Blocks selected by a Query. An Entry result uses its normal committed Authored Text presentation without recursively rendering its own Query Results; Query Results are derived views rather than durable Blocks or Containment children.
+_Avoid_: Child Entry, copied Block, Search Result
+
+**Query Error**:
+A source-located diagnostic for committed Authored Text that declares Query intent but cannot define a valid Query. The text remains editable, while no partial or prior Query executes or supplies Query Results.
+_Avoid_: Storage error, partial Query Result, rejected Authored Text
+
+**Query Notation**:
+An Authored Text Notation construct containing a Hieda-defined S-expression with one filter clause followed by optional ordering and limit clauses. It defines a Query and gives its containing Entry an expandable Query Result area, activates Query behavior only when it is the Entry's sole non-whitespace content, and makes that entire Entry opaque to every other Authored Text Notation parser.
+_Avoid_: Query Block, Query Entry type, executable code
+
+**Query Anchor**:
+A target selector within Query Notation, expressed as `self`, an exact Page Name in double brackets, or a Block UUID in Block Reference spelling. A Page-name or UUID anchor used directly as a Boolean predicate selects Entries containing that exact authored reference notation regardless of resolution; explicit relationship predicates use anchors as endpoints. A Query Anchor creates no Semantic Reference or Linked Reference, and a resolved Page-name anchor follows its Page through rename and otherwise follows Page Name continuity through deletion and recreation.
+_Avoid_: Page Link, Block Reference, Semantic Reference
