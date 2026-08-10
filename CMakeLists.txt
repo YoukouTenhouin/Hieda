@@ -34,7 +34,7 @@ else()
     pkg_check_modules(LMDB REQUIRED IMPORTED_TARGET "lmdb>=0.9.30")
     set(HIEDA_LMDB_TARGET PkgConfig::LMDB)
 endif()
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 QuickDialogs2 Widgets)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Concurrent Core Gui Qml Quick QuickControls2 QuickDialogs2 Widgets)
 qt_standard_project_setup(REQUIRES 6.8)
 include(CTest)
 
@@ -56,6 +56,8 @@ add_library(hieda_notebook
     src/notebook/authored_text_parser.hpp
     src/notebook/notebook_session.cpp
     src/notebook/platform_file.hpp
+    src/notebook/query_parser.cpp
+    src/notebook/query_parser.hpp
     ${HIEDA_PLATFORM_FILE_SOURCE}
 )
 add_library(Hieda::Notebook ALIAS hieda_notebook)
@@ -71,7 +73,7 @@ add_library(hieda_qt_adapter
     src/app/notebook_controller.hpp
 )
 target_include_directories(hieda_qt_adapter PUBLIC src/app)
-target_link_libraries(hieda_qt_adapter PUBLIC Hieda::Notebook Qt6::Core PRIVATE Qt6::Gui)
+target_link_libraries(hieda_qt_adapter PUBLIC Hieda::Notebook Qt6::Core PRIVATE Qt6::Concurrent Qt6::Gui)
 
 qt_add_executable(hieda src/app/main.cpp)
 if(WIN32)

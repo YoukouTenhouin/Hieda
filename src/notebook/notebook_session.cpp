@@ -3,6 +3,7 @@
 #include "authored_text_parser.hpp"
 #include "notebook_session_test_access.hpp"
 #include "platform_file.hpp"
+#include "query_parser.hpp"
 
 #include <lmdb.h>
 
@@ -32,6 +33,8 @@ constexpr std::uint32_t formatVersion = 1;
 constexpr std::uint32_t schemaVersion = 2;
 constexpr std::size_t mapSize = 8ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr std::string_view formatMagic = "HIEDA_NOTEBOOK";
+constexpr std::string_view derivedIndexVersionKey = "derived_index_version";
+constexpr std::uint32_t derivedIndexVersion = 1;
 
 constexpr std::array<std::string_view, 12> databaseNames{
     "metadata",
@@ -432,9 +435,24 @@ generateBlockId() -> BlockId
     return id;
 }
 
+#ifdef HIEDA_TESTING
+auto
+testingTimestampOverride() -> std::optional<BlockTimestamp>&
+{
+    static std::optional<BlockTimestamp> timestamp;
+    return timestamp;
+}
+#endif
+
 auto
 currentTimestamp() -> BlockTimestamp
 {
+#ifdef HIEDA_TESTING
+    const auto testingTimestamp = testingTimestampOverride();
+    if (testingTimestamp) {
+        return testingTimestamp.value_or(BlockTimestamp{});
+    }
+#endif
     return std::chrono::time_point_cast<std::chrono::microseconds>(
         std::chrono::system_clock::now());
 }
@@ -757,6 +775,21 @@ createEnvironment(const std::filesystem::path& path, const Manifest& manifest)
         closeEnvironment();
         return error;
     }
+    std::vector<std::uint8_t> encodedDerivedVersion;
+    appendU32(encodedDerivedVersion, derivedIndexVersion);
+    MDB_val derivedKey{derivedIndexVersionKey.size(),
+                       const_cast<char*>(derivedIndexVersionKey.data())};
+    MDB_val derivedValue{encodedDerivedVersion.size(),
+                         encodedDerivedVersion.data()};
+    result = mdb_put(transaction, metadata, &derivedKey, &derivedValue,
+                     MDB_NOOVERWRITE);
+    if (result != MDB_SUCCESS) {
+        mdb_txn_abort(transaction);
+        auto error =
+            errorFromLmdb(path, result, "commit derived index version");
+        closeEnvironment();
+        return error;
+    }
     result = mdb_txn_commit(transaction);
     transaction = nullptr;
     if (result != MDB_SUCCESS) {
@@ -790,6 +823,8 @@ struct JournalDatabases {
     MDB_dbi pagesByName{0};
     MDB_dbi referencesBySource{0};
     MDB_dbi referencesByTarget{0};
+    MDB_dbi propertiesByBlock{0};
+    MDB_dbi propertyIndex{0};
 };
 
 enum class SemanticReferenceTargetIndexKind : std::uint8_t {
@@ -824,6 +859,47 @@ struct LinkedReferencesCursor {
     encode() const -> std::string
     {
         return std::to_string(revision) + ":" + std::to_string(offset);
+    }
+};
+
+struct QueryCursor {
+    std::string queryId;
+    std::uint64_t revision{0};
+    std::size_t offset{0};
+
+    [[nodiscard]] static auto
+    decode(std::string_view text) -> std::optional<QueryCursor>
+    {
+        const auto first = text.find(':');
+        const auto second = first == std::string_view::npos
+                                ? std::string_view::npos
+                                : text.find(':', first + 1);
+        QueryCursor cursor;
+        if (first == std::string_view::npos ||
+            second == std::string_view::npos) {
+            return std::nullopt;
+        }
+        cursor.queryId = std::string(text.substr(0, first));
+        const auto* const revisionBegin = text.data() + first + 1;
+        const auto* const revisionEnd = text.data() + second;
+        const auto* const offsetBegin = text.data() + second + 1;
+        const auto* const offsetEnd = text.data() + text.size();
+        const auto [parsedRevisionEnd, revisionError] =
+            std::from_chars(revisionBegin, revisionEnd, cursor.revision);
+        const auto [parsedOffsetEnd, offsetError] =
+            std::from_chars(offsetBegin, offsetEnd, cursor.offset);
+        if (revisionError != std::errc{} || parsedRevisionEnd != revisionEnd ||
+            offsetError != std::errc{} || parsedOffsetEnd != offsetEnd) {
+            return std::nullopt;
+        }
+        return cursor;
+    }
+
+    [[nodiscard]] auto
+    encode() const -> std::string
+    {
+        return queryId + ":" + std::to_string(revision) + ":" +
+               std::to_string(offset);
     }
 };
 
@@ -963,11 +1039,11 @@ enum class OutlineEditKind : std::uint8_t {
 
 auto
 openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path,
-                     bool createSemanticReferenceIndexes = false)
+                     bool createDerivedIndexes = false)
     -> Result<JournalDatabases>
 {
     JournalDatabases databases;
-    const std::array<std::pair<const char*, MDB_dbi*>, 9> names{{
+    const std::array<std::pair<const char*, MDB_dbi*>, 11> names{{
         {"metadata", &databases.metadata},
         {"blocks", &databases.blocks},
         {"blocks_by_type", &databases.blocksByType},
@@ -977,13 +1053,15 @@ openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path,
         {"pages_by_title", &databases.pagesByName},
         {"references_by_source", &databases.referencesBySource},
         {"references_by_target", &databases.referencesByTarget},
+        {"properties_by_block", &databases.propertiesByBlock},
+        {"property_index", &databases.propertyIndex},
     }};
     for (std::size_t index = 0; index < names.size(); ++index) {
         const auto& [name, database] = names[index];
-        const auto flags =
-            createSemanticReferenceIndexes && index >= names.size() - 2
-                ? static_cast<unsigned int>(MDB_CREATE)
-                : 0U;
+        const auto derived = index >= 7;
+        const auto flags = createDerivedIndexes && derived
+                               ? static_cast<unsigned int>(MDB_CREATE)
+                               : 0U;
         const auto result = mdb_dbi_open(transaction, name, flags, database);
         if (result != MDB_SUCCESS) {
             return Result<JournalDatabases>::failure(
@@ -1010,6 +1088,72 @@ readBlock(MDB_txn* transaction, MDB_dbi database,
             errorFromLmdb(path, result, "read Block"));
     }
     return decodeBlock(value, blockIdentifier, path);
+}
+
+auto
+readProperties(MDB_txn* transaction, MDB_dbi database,
+               const BlockId& blockIdentifier,
+               const std::filesystem::path& path)
+    -> Result<std::vector<authored_text::Property>>
+{
+    auto key = blockKey(blockIdentifier);
+    MDB_val value{};
+    const auto result = mdb_get(transaction, database, &key, &value);
+    if (result == MDB_NOTFOUND) {
+        return Result<std::vector<authored_text::Property>>::success({});
+    }
+    if (result != MDB_SUCCESS) {
+        return Result<std::vector<authored_text::Property>>::failure(
+            errorFromLmdb(path, result, "read Properties"));
+    }
+    const auto* bytes = static_cast<const std::uint8_t*>(value.mv_data);
+    if (value.mv_size < 6 || readU16(bytes) != 1) {
+        return Result<std::vector<authored_text::Property>>::failure(
+            makeError(NotebookErrorCode::invalidNotebook, path,
+                      "Property index is invalid"));
+    }
+    const auto count = readU32(bytes + 2);
+    std::size_t offset = 6;
+    std::vector<authored_text::Property> properties;
+    properties.reserve(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        if (value.mv_size - offset < 16) {
+            return Result<std::vector<authored_text::Property>>::failure(
+                makeError(NotebookErrorCode::invalidNotebook, path,
+                          "Property index is truncated"));
+        }
+        const auto sourceOffset = readU32(bytes + offset);
+        const auto sourceLength = readU32(bytes + offset + 4);
+        const auto keyLength = readU32(bytes + offset + 8);
+        offset += 12;
+        if (value.mv_size - offset < static_cast<std::size_t>(keyLength) + 4) {
+            return Result<std::vector<authored_text::Property>>::failure(
+                makeError(NotebookErrorCode::invalidNotebook, path,
+                          "Property key is truncated"));
+        }
+        std::string propertyKey(reinterpret_cast<const char*>(bytes + offset),
+                                keyLength);
+        offset += keyLength;
+        const auto valueLength = readU32(bytes + offset);
+        offset += 4;
+        if (value.mv_size - offset < valueLength) {
+            return Result<std::vector<authored_text::Property>>::failure(
+                makeError(NotebookErrorCode::invalidNotebook, path,
+                          "Property value is truncated"));
+        }
+        properties.push_back(
+            {sourceOffset, sourceLength, std::move(propertyKey),
+             std::string(reinterpret_cast<const char*>(bytes + offset),
+                         valueLength)});
+        offset += valueLength;
+    }
+    if (offset != value.mv_size) {
+        return Result<std::vector<authored_text::Property>>::failure(
+            makeError(NotebookErrorCode::invalidNotebook, path,
+                      "Property index has trailing bytes"));
+    }
+    return Result<std::vector<authored_text::Property>>::success(
+        std::move(properties));
 }
 
 auto
@@ -1111,6 +1255,12 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
     if (result == MDB_SUCCESS) {
         result = mdb_drop(transaction, databases.referencesByTarget, 0);
     }
+    if (result == MDB_SUCCESS) {
+        result = mdb_drop(transaction, databases.propertiesByBlock, 0);
+    }
+    if (result == MDB_SUCCESS) {
+        result = mdb_drop(transaction, databases.propertyIndex, 0);
+    }
     if (result != MDB_SUCCESS) {
         return errorFromLmdb(path, result, "clear Page Link indexes");
     }
@@ -1136,6 +1286,60 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
         if (!source) {
             mdb_cursor_close(cursor);
             return source.error();
+        }
+        const auto properties =
+            authored_text::properties(source.value().authoredText);
+        if (!properties.empty()) {
+            std::vector<std::uint8_t> encoded;
+            appendU16(encoded, 1);
+            appendU32(encoded, static_cast<std::uint32_t>(properties.size()));
+            for (const auto& property : properties) {
+                appendU32(encoded, static_cast<std::uint32_t>(
+                                       property.sourceByteOffset));
+                appendU32(encoded, static_cast<std::uint32_t>(
+                                       property.sourceByteLength));
+                appendU32(encoded,
+                          static_cast<std::uint32_t>(property.key.size()));
+                encoded.insert(encoded.end(), property.key.begin(),
+                               property.key.end());
+                appendU32(encoded,
+                          static_cast<std::uint32_t>(property.value.size()));
+                encoded.insert(encoded.end(), property.value.begin(),
+                               property.value.end());
+
+                std::vector<std::uint8_t> indexKey;
+                appendU32(indexKey,
+                          static_cast<std::uint32_t>(property.key.size()));
+                indexKey.insert(indexKey.end(), property.key.begin(),
+                                property.key.end());
+                appendU32(indexKey,
+                          static_cast<std::uint32_t>(property.value.size()));
+                indexKey.insert(indexKey.end(), property.value.begin(),
+                                property.value.end());
+                const auto* sourceBytes = reinterpret_cast<const std::uint8_t*>(
+                    sourceId.bytes.data());
+                indexKey.insert(indexKey.end(), sourceBytes,
+                                sourceBytes + sourceId.bytes.size());
+                appendU32(indexKey, static_cast<std::uint32_t>(
+                                        property.sourceByteOffset));
+                MDB_val propertyKey{indexKey.size(), indexKey.data()};
+                MDB_val empty{0, nullptr};
+                const auto put = mdb_put(transaction, databases.propertyIndex,
+                                         &propertyKey, &empty, 0);
+                if (put != MDB_SUCCESS) {
+                    mdb_cursor_close(cursor);
+                    return errorFromLmdb(path, put,
+                                         "write Property reverse index");
+                }
+            }
+            auto propertyBlockKey = blockKey(sourceId);
+            MDB_val propertyValue{encoded.size(), encoded.data()};
+            const auto put = mdb_put(transaction, databases.propertiesByBlock,
+                                     &propertyBlockKey, &propertyValue, 0);
+            if (put != MDB_SUCCESS) {
+                mdb_cursor_close(cursor);
+                return errorFromLmdb(path, put, "write Property source index");
+            }
         }
         const auto links =
             authored_text::pageLinks(source.value().authoredText);
@@ -1301,10 +1505,20 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
             mdb_cursor_get(sourceCursor, &sourceKey, &sourceValue, MDB_NEXT);
     }
     mdb_cursor_close(sourceCursor);
-    return result == MDB_NOTFOUND
+    if (result != MDB_NOTFOUND) {
+        return errorFromLmdb(path, result, "scan Page Link reverse sources");
+    }
+    std::vector<std::uint8_t> encodedVersion;
+    appendU32(encodedVersion, derivedIndexVersion);
+    MDB_val versionKey{derivedIndexVersionKey.size(),
+                       const_cast<char*>(derivedIndexVersionKey.data())};
+    MDB_val versionValue{encodedVersion.size(), encodedVersion.data()};
+    result =
+        mdb_put(transaction, databases.metadata, &versionKey, &versionValue, 0);
+    return result == MDB_SUCCESS
                ? std::nullopt
                : std::optional<NotebookError>{errorFromLmdb(
-                     path, result, "scan Page Link reverse sources")};
+                     path, result, "write derived index version")};
 }
 
 auto
@@ -1361,10 +1575,8 @@ class NotebookSession::Impl {
     void
     closeUnlocked() noexcept
     {
-        if (environment != nullptr) {
-            mdb_env_close(environment);
-            environment = nullptr;
-        }
+        environment = nullptr;
+        environmentOwner.reset();
         lockFile.reset();
         dataLockFile.reset();
         info.reset();
@@ -1445,16 +1657,35 @@ class NotebookSession::Impl {
         }
 
         auto manifest = decodeManifest(value, path);
-        bool pageLinkIndexesMissing = false;
+        bool derivedIndexesMissing = false;
         if (manifest) {
             for (const auto* name :
-                 {"references_by_source", "references_by_target"}) {
+                 {"references_by_source", "references_by_target",
+                  "properties_by_block", "property_index"}) {
                 MDB_dbi database = 0;
                 result = mdb_dbi_open(transaction, name, 0, &database);
                 if (result == MDB_NOTFOUND) {
-                    pageLinkIndexesMissing = true;
+                    derivedIndexesMissing = true;
                 } else if (result != MDB_SUCCESS) {
                     break;
+                }
+            }
+            MDB_val versionKey{
+                derivedIndexVersionKey.size(),
+                const_cast<char*>(derivedIndexVersionKey.data())};
+            MDB_val versionValue{};
+            if (result == MDB_SUCCESS) {
+                result =
+                    mdb_get(transaction, metadata, &versionKey, &versionValue);
+                if (result == MDB_NOTFOUND) {
+                    derivedIndexesMissing = true;
+                    result = MDB_SUCCESS;
+                } else if (result == MDB_SUCCESS &&
+                           (versionValue.mv_size != 4 ||
+                            readU32(static_cast<const std::uint8_t*>(
+                                versionValue.mv_data)) !=
+                                derivedIndexVersion)) {
+                    derivedIndexesMissing = true;
                 }
             }
         }
@@ -1466,9 +1697,9 @@ class NotebookSession::Impl {
         if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
             mdb_env_close(openedEnvironment);
             return Result<NotebookInfo>::failure(
-                errorFromLmdb(path, result, "inspect Page Link indexes"));
+                errorFromLmdb(path, result, "inspect derived indexes"));
         }
-        if (pageLinkIndexesMissing) {
+        if (derivedIndexesMissing) {
             transaction = nullptr;
             result = mdb_txn_begin(openedEnvironment, nullptr, 0, &transaction);
             if (result == MDB_SUCCESS) {
@@ -1493,11 +1724,13 @@ class NotebookSession::Impl {
                 }
                 mdb_env_close(openedEnvironment);
                 return Result<NotebookInfo>::failure(
-                    errorFromLmdb(path, result, "backfill Page Link indexes"));
+                    errorFromLmdb(path, result, "backfill derived indexes"));
             }
         }
 
-        environment = openedEnvironment;
+        environmentOwner =
+            std::shared_ptr<MDB_env>(openedEnvironment, mdb_env_close);
+        environment = environmentOwner.get();
         info = NotebookInfo{manifest.value().id, path, schemaVersion,
                             manifest.value().revision};
         return Result<NotebookInfo>::success(*info);
@@ -5596,6 +5829,7 @@ class NotebookSession::Impl {
     }
 
     mutable std::mutex mutex;
+    std::shared_ptr<MDB_env> environmentOwner;
     MDB_env* environment{nullptr};
     std::optional<platform::ExclusiveFileLock> lockFile;
     std::optional<platform::ExclusiveFileLock> dataLockFile;
@@ -5619,6 +5853,13 @@ NotebookSessionTestAccess::rejectNextCommit(NotebookSession& session)
     std::scoped_lock lock(session.impl_->mutex);
     session.impl_->commitAdapter =
         std::make_unique<RejectNextJournalCommitAdapter>();
+}
+
+void
+NotebookSessionTestAccess::setCurrentTimestamp(
+    std::optional<BlockTimestamp> timestamp)
+{
+    testingTimestampOverride() = timestamp;
 }
 #endif
 
@@ -6261,6 +6502,326 @@ NotebookSession::unresolvedPageLinkOccurrences(
     }
     return Result<UnresolvedPageLinkOccurrencesBatch>::success(
         {std::move(batch), total, std::move(nextCursor)});
+}
+
+auto
+NotebookSession::evaluateQuery(
+    BlockId queryEntryId, std::optional<std::string> continuationCursor) const
+    -> Result<QueryResultsBatch>
+{
+    std::unique_lock lock(impl_->mutex);
+    if (!impl_->info) {
+        return Result<QueryResultsBatch>::failure(makeError(
+            NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    const auto path = impl_->info->path;
+    const auto revision = impl_->info->revision;
+    const auto environment = impl_->environmentOwner;
+    auto offset = std::size_t{0};
+    if (continuationCursor) {
+        const auto cursor = QueryCursor::decode(*continuationCursor);
+        if (!cursor || cursor->queryId != queryEntryId.toString() ||
+            cursor->revision != revision) {
+            return Result<QueryResultsBatch>::failure(
+                makeError(NotebookErrorCode::staleQueryCursor, path,
+                          "the Query cursor is stale or invalid"));
+        }
+        offset = cursor->offset;
+    }
+    MDB_txn* transaction = nullptr;
+    auto result =
+        mdb_txn_begin(environment.get(), nullptr, MDB_RDONLY, &transaction);
+    lock.unlock();
+    if (result != MDB_SUCCESS) {
+        return Result<QueryResultsBatch>::failure(
+            errorFromLmdb(path, result, "begin Query read"));
+    }
+    const auto abort = [&transaction]() -> void {
+        if (transaction != nullptr) {
+            mdb_txn_abort(transaction);
+            transaction = nullptr;
+        }
+    };
+    auto databases = openJournalDatabases(transaction, path);
+    if (!databases) {
+        abort();
+        return Result<QueryResultsBatch>::failure(databases.error());
+    }
+    auto queryEntry =
+        readBlock(transaction, databases.value().blocks, queryEntryId, path);
+    if (!queryEntry) {
+        abort();
+        return Result<QueryResultsBatch>::failure(queryEntry.error());
+    }
+    if (queryEntry.value().type != BlockType::entry) {
+        abort();
+        return Result<QueryResultsBatch>::failure(
+            makeError(NotebookErrorCode::blockNotFound, path,
+                      "the Query source must be an Entry"));
+    }
+
+    const auto parsed = query_language::parse(queryEntry.value().authoredText);
+    QueryResultsBatch batch;
+    batch.hasQueryIntent = parsed.hasIntent;
+    batch.error = parsed.error;
+    if (!parsed.query) {
+        abort();
+        return Result<QueryResultsBatch>::success(std::move(batch));
+    }
+
+    const auto rootPage = [&](const BlockId& entryId) -> Result<BlockRecord> {
+        auto current = entryId;
+        while (true) {
+            auto parent =
+                impl_->parentOf(transaction, databases.value(), current);
+            if (!parent) {
+                return Result<BlockRecord>::failure(parent.error());
+            }
+            auto block = readBlock(transaction, databases.value().blocks,
+                                   parent.value().parent, path);
+            if (!block) {
+                return block;
+            }
+            if (block.value().type == BlockType::page) {
+                return block;
+            }
+            current = block.value().metadata.id;
+        }
+    };
+
+    std::unordered_map<std::string, std::size_t> journalOutlineOrder;
+    MDB_cursor* cursor = nullptr;
+    result =
+        mdb_cursor_open(transaction, databases.value().blocksByType, &cursor);
+    if (result != MDB_SUCCESS) {
+        abort();
+        return Result<QueryResultsBatch>::failure(
+            errorFromLmdb(path, result, "open Query Block scan"));
+    }
+    auto start = typeIndexKey(BlockType::page, BlockId{});
+    MDB_val key{start.size(), start.data()};
+    MDB_val value{};
+    result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+    while (result == MDB_SUCCESS && key.mv_size == start.size()) {
+        const auto storedType =
+            static_cast<const std::uint8_t*>(key.mv_data)[0];
+        if (storedType < static_cast<std::uint8_t>(BlockType::page) ||
+            storedType > static_cast<std::uint8_t>(BlockType::entry)) {
+            break;
+        }
+        BlockId identifier;
+        std::memcpy(identifier.bytes.data(),
+                    static_cast<const std::uint8_t*>(key.mv_data) + 1,
+                    identifier.bytes.size());
+        auto block =
+            readBlock(transaction, databases.value().blocks, identifier, path);
+        if (!block) {
+            mdb_cursor_close(cursor);
+            abort();
+            return Result<QueryResultsBatch>::failure(block.error());
+        }
+        auto page = block.value().type == BlockType::page
+                        ? Result<BlockRecord>::success(block.value())
+                        : rootPage(identifier);
+        if (!page) {
+            mdb_cursor_close(cursor);
+            abort();
+            return Result<QueryResultsBatch>::failure(page.error());
+        }
+        if (block.value().type == BlockType::page &&
+            block.value().pageKind == PageKind::journal) {
+            auto outline = impl_->loadOutline(transaction, databases.value(),
+                                              block.value());
+            if (!outline) {
+                mdb_cursor_close(cursor);
+                abort();
+                return Result<QueryResultsBatch>::failure(outline.error());
+            }
+            journalOutlineOrder.emplace(block.value().metadata.id.toString(),
+                                        0);
+            for (std::size_t index = 0; index < outline.value().entries.size();
+                 ++index) {
+                journalOutlineOrder.emplace(
+                    outline.value().entries[index].metadata.id.toString(),
+                    index + 1);
+            }
+        }
+        const auto publicType = block.value().type == BlockType::page
+                                    ? QueryResultBlockType::page
+                                    : QueryResultBlockType::entry;
+        auto properties =
+            Result<std::vector<authored_text::Property>>::success({});
+        if (block.value().type == BlockType::entry) {
+            properties =
+                readProperties(transaction, databases.value().propertiesByBlock,
+                               identifier, path);
+            if (!properties) {
+                mdb_cursor_close(cursor);
+                abort();
+                return Result<QueryResultsBatch>::failure(properties.error());
+            }
+        }
+        const auto matchesPredicate =
+            [&](auto&& self,
+                const query_language::Predicate& predicate) -> bool {
+            using query_language::PredicateKind;
+            if (predicate.kind == PredicateKind::all) {
+                return true;
+            }
+            if (predicate.kind == PredicateKind::conjunction) {
+                return std::ranges::all_of(predicate.operands,
+                                           [&](const auto& operand) -> bool {
+                                               return self(self, operand);
+                                           });
+            }
+            if (predicate.kind == PredicateKind::disjunction) {
+                return std::ranges::any_of(predicate.operands,
+                                           [&](const auto& operand) -> bool {
+                                               return self(self, operand);
+                                           });
+            }
+            if (predicate.kind == PredicateKind::negation) {
+                return !self(self, predicate.operands.front());
+            }
+            if (predicate.kind == PredicateKind::blockType) {
+                return publicType == predicate.blockType;
+            }
+            if (predicate.kind == PredicateKind::pageContext) {
+                return page.value().pageKind == predicate.pageKind;
+            }
+            if (predicate.kind == PredicateKind::journalDate) {
+                if (!page.value().journalDate) {
+                    return false;
+                }
+                const auto dateKey = [](JournalDate date)
+                    -> std::tuple<std::int32_t, std::uint8_t, std::uint8_t> {
+                    return std::tuple{date.year, date.month, date.day};
+                };
+                const auto candidate = dateKey(*page.value().journalDate);
+                const auto expected = dateKey(predicate.journalDate);
+                switch (predicate.dateComparison) {
+                case query_language::JournalDateComparison::equal:
+                    return candidate == expected;
+                case query_language::JournalDateComparison::less:
+                    return candidate < expected;
+                case query_language::JournalDateComparison::lessOrEqual:
+                    return candidate <= expected;
+                case query_language::JournalDateComparison::greater:
+                    return candidate > expected;
+                case query_language::JournalDateComparison::greaterOrEqual:
+                    return candidate >= expected;
+                }
+            }
+            if (predicate.kind == PredicateKind::textContains) {
+                return block.value().type == BlockType::entry &&
+                       block.value().authoredText.find(predicate.value) !=
+                           std::string::npos;
+            }
+            if (block.value().type != BlockType::entry) {
+                return false;
+            }
+            if (predicate.kind == PredicateKind::propertyExists) {
+                return std::ranges::any_of(
+                    properties.value(), [&](const auto& property) -> bool {
+                        return property.key == predicate.propertyKey;
+                    });
+            }
+            if (predicate.kind == PredicateKind::propertyEquals) {
+                return std::ranges::any_of(
+                    properties.value(), [&](const auto& property) -> bool {
+                        return property.key == predicate.propertyKey &&
+                               property.value == predicate.value;
+                    });
+            }
+            return false;
+        };
+        const auto matches =
+            matchesPredicate(matchesPredicate, parsed.query->where);
+        if (matches) {
+            batch.rows.push_back(
+                {publicType, block.value().metadata, page.value().metadata.id,
+                 page.value().pageKind.value_or(PageKind::named),
+                 page.value().journalDate, page.value().pageName,
+                 page.value().displayTitle, block.value().authoredText});
+        }
+        result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+    }
+    mdb_cursor_close(cursor);
+    if (result != MDB_NOTFOUND && result != MDB_SUCCESS) {
+        abort();
+        return Result<QueryResultsBatch>::failure(
+            errorFromLmdb(path, result, "scan Query Blocks"));
+    }
+    const auto sortKey =
+        parsed.query->sortKey.value_or(query_language::SortKey::updateTime);
+    const auto descending =
+        parsed.query->sortKey ? parsed.query->descending : true;
+    std::ranges::sort(
+        batch.rows, [&](const auto& left, const auto& right) -> bool {
+            const auto identifierLess = [&]() -> bool {
+                return std::ranges::lexicographical_compare(
+                    left.metadata.id.bytes, right.metadata.id.bytes);
+            };
+            if (sortKey == query_language::SortKey::journalDate) {
+                const auto leftJournal = left.journalDate.has_value();
+                const auto rightJournal = right.journalDate.has_value();
+                if (leftJournal != rightJournal) {
+                    return leftJournal;
+                }
+                if (!leftJournal) {
+                    return identifierLess();
+                }
+                const auto dateKey = [](JournalDate date)
+                    -> std::tuple<std::int32_t, std::uint8_t, std::uint8_t> {
+                    return std::tuple{date.year, date.month, date.day};
+                };
+                const auto leftDate = dateKey(*left.journalDate);
+                const auto rightDate = dateKey(*right.journalDate);
+                if (leftDate != rightDate) {
+                    return descending ? leftDate > rightDate
+                                      : leftDate < rightDate;
+                }
+                const auto leftOrder =
+                    journalOutlineOrder.at(left.metadata.id.toString());
+                const auto rightOrder =
+                    journalOutlineOrder.at(right.metadata.id.toString());
+                return leftOrder < rightOrder;
+            }
+            const auto leftTime =
+                sortKey == query_language::SortKey::creationTime
+                    ? left.metadata.createdAt
+                    : left.metadata.updatedAt;
+            const auto rightTime =
+                sortKey == query_language::SortKey::creationTime
+                    ? right.metadata.createdAt
+                    : right.metadata.updatedAt;
+            if (leftTime == rightTime) {
+                return identifierLess();
+            }
+            return descending ? leftTime > rightTime : leftTime < rightTime;
+        });
+    auto logicalSize = batch.rows.size();
+    if (parsed.query->limit && *parsed.query->limit < logicalSize) {
+        logicalSize = static_cast<std::size_t>(*parsed.query->limit);
+    }
+    if (offset > logicalSize) {
+        abort();
+        return Result<QueryResultsBatch>::failure(
+            makeError(NotebookErrorCode::staleQueryCursor, path,
+                      "the Query cursor is outside the current result set"));
+    }
+    constexpr auto queryBatchSize = std::size_t{100};
+    const auto end = offset + std::min(queryBatchSize, logicalSize - offset);
+    std::vector<QueryResultRow> rows(
+        batch.rows.begin() + static_cast<std::ptrdiff_t>(offset),
+        batch.rows.begin() + static_cast<std::ptrdiff_t>(end));
+    batch.rows = std::move(rows);
+    if (end < logicalSize) {
+        batch.continuationCursor =
+            QueryCursor{queryEntryId.toString(), revision, end}.encode();
+    }
+    abort();
+    return Result<QueryResultsBatch>::success(std::move(batch));
 }
 
 // NOLINTNEXTLINE(performance-unnecessary-value-param)
