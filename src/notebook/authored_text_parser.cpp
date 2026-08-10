@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "authored_text_parser.hpp"
+#include "query_parser.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -136,6 +137,9 @@ void
 scan(std::string_view source, std::vector<PageLinkOccurrence>* pageLinks,
      std::vector<BlockReferenceOccurrence>* blockReferences)
 {
+    if (query_language::hasQueryIntent(source)) {
+        return;
+    }
     for (std::size_t lineStart = 0; lineStart <= source.size();) {
         const auto newline = source.find('\n', lineStart);
         const auto lineEnd =
@@ -176,6 +180,32 @@ blockReferences(std::string_view source)
     std::vector<BlockReferenceOccurrence> references;
     scan(source, nullptr, &references);
     return references;
+}
+
+auto
+properties(std::string_view source) -> std::vector<Property>
+{
+    std::vector<Property> result;
+    if (query_language::hasQueryIntent(source)) {
+        return result;
+    }
+    for (std::size_t lineStart = 0; lineStart <= source.size();) {
+        const auto newline = source.find('\n', lineStart);
+        const auto lineEnd =
+            newline == std::string_view::npos ? source.size() : newline;
+        const auto line = source.substr(lineStart, lineEnd - lineStart);
+        const auto delimiter = propertyDelimiter(line, 0);
+        if (delimiter != std::string_view::npos) {
+            result.push_back({lineStart, line.size(),
+                              std::string(line.substr(0, delimiter)),
+                              std::string(line.substr(delimiter + 2))});
+        }
+        if (newline == std::string_view::npos) {
+            break;
+        }
+        lineStart = newline + 1;
+    }
+    return result;
 }
 
 } // namespace hieda::notebook::authored_text

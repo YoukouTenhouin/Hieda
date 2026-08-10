@@ -8,6 +8,7 @@ namespace hieda::notebook {
 class NotebookSessionTestAccess {
   public:
     static void rejectNextCommit(NotebookSession& session);
+    static void setCurrentTimestamp(std::optional<BlockTimestamp> timestamp);
 };
 
 } // namespace hieda::notebook
