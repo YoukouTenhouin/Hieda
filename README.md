@@ -26,9 +26,15 @@ tools and QML modules are available to the build.
 ```sh
 make build
 make test
+make format
+make format-check
+make install-hooks
 make lint
 make package
 ```
+
+Run `make install-hooks` once after cloning to enable the repository's pre-commit hook. The hook
+rejects commits containing C or C++ files that do not match `.clang-format`.
 
 Run one test by name with:
 
