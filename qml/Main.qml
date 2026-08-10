@@ -999,11 +999,16 @@ ApplicationWindow {
                         required property bool canMoveUp
                         required property bool canMoveDown
                         required property bool canDelete
+                        required property bool queryHasIntent
+                        required property string queryError
+                        required property var queryResults
+                        required property bool queryHasMore
                         required property int index
                         readonly property bool outlineSelected: window.isOutlineSelected(entryId)
                         readonly property real outlineIndent: depth * window.uiSpacing * 3
                         readonly property var contextMenu: entryMenu
                         readonly property real editorHeight: Math.max(entryEditor.contentHeight, committedPresentation.contentHeight, entryEditor.font.pixelSize * 1.45) + (window.uiSpacing * 0.7)
+                        readonly property real queryHeight: queryPanel.visible ? queryPanel.implicitHeight + window.uiSpacing : 0
 
                         function focusEditor(cursorPosition) {
                             window.clearOutlineSelection();
@@ -1060,7 +1065,7 @@ ApplicationWindow {
                         }
 
                         width: outlineList.width
-                        height: editorHeight + inlineDraft.height
+                        height: editorHeight + queryHeight + inlineDraft.height
 
                         Rectangle {
                             x: entryRoot.outlineIndent
@@ -1426,6 +1431,63 @@ ApplicationWindow {
 
                         }
 
+                        ColumnLayout {
+                            id: queryPanel
+
+                            objectName: "queryPanel-" + entryRoot.index
+                            x: entryRoot.outlineIndent + Math.round(entryEditor.font.pixelSize * 1.25) + window.uiSpacing
+                            y: entryRoot.editorHeight
+                            width: parent.width - x
+                            visible: entryRoot.queryHasIntent && !entryEditor.activeFocus && !entryEditor.hasPendingEdit
+                            spacing: window.uiSpacing * 0.5
+
+                            Label {
+                                id: queryErrorLabel
+
+                                objectName: "queryError-" + entryRoot.index
+                                Layout.fillWidth: true
+                                visible: entryRoot.queryError.length > 0
+                                text: entryRoot.queryError
+                                wrapMode: Text.Wrap
+                                color: palette.text
+                                Accessible.name: qsTr("Query error: %1").arg(text)
+                            }
+
+                            ColumnLayout {
+                                id: queryResultColumn
+
+                                readonly property int count: queryResultRepeater.count
+
+                                objectName: "queryResults-" + entryRoot.index
+                                Layout.fillWidth: true
+                                visible: entryRoot.queryError.length === 0
+                                spacing: window.uiSpacing * 0.35
+
+                                Repeater {
+                                    id: queryResultRepeater
+
+                                    model: entryRoot.queryResults
+
+                                    delegate: Button {
+                                        required property var modelData
+
+                                        Layout.fillWidth: true
+                                        flat: true
+                                        text: modelData.presentation
+                                        Accessible.description: qsTr("Query result in %1").arg(modelData.context)
+                                        onClicked: notebookController.followQueryResult(modelData.blockId)
+                                    }
+                                }
+
+                                Button {
+                                    Layout.alignment: Qt.AlignLeft
+                                    visible: entryRoot.queryHasMore
+                                    text: qsTr("Load more Query results")
+                                    onClicked: notebookController.loadMoreQueryResults(entryRoot.entryId)
+                                }
+                            }
+                        }
+
                         MouseArea {
                             objectName: "outlineEntryContextArea-" + entryRoot.index
                             x: entryRoot.outlineIndent
@@ -1446,7 +1508,7 @@ ApplicationWindow {
                             id: inlineDraft
 
                             anchors.top: parent.top
-                            anchors.topMargin: entryRoot.editorHeight
+                            anchors.topMargin: entryRoot.editorHeight + entryRoot.queryHeight
                             x: entryRoot.outlineIndent
                             width: parent.width - x
                             insertionAfterId: entryRoot.entryId

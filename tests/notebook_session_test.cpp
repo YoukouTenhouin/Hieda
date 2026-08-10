@@ -2689,3 +2689,532 @@ TEST_CASE("an Entry subtree moves atomically between Named and Journal Pages")
     CHECK(archived.entries[1].metadata.id == child.metadata.id);
     CHECK(archived.entries[1].parentEntry == parent.metadata.id);
 }
+
+TEST_CASE("a saved Query selects Entry Blocks and survives reopening")
+{
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "queries.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    const auto page = session.createPage("queries", "Queries").value();
+    REQUIRE(session.insertEntry(page.metadata.id, std::nullopt, "ordinary"));
+    const std::string querySource = "{{query (where (type entry))}}";
+    const auto inserted =
+        session.insertEntry(page.metadata.id, std::nullopt, querySource)
+            .value();
+    const auto queryId = inserted.entries.back().metadata.id;
+
+    const auto evaluated = session.evaluateQuery(queryId);
+
+    REQUIRE(evaluated);
+    CHECK(evaluated.value().hasQueryIntent);
+    CHECK_FALSE(evaluated.value().error);
+    REQUIRE(evaluated.value().rows.size() == 2);
+    CHECK(std::ranges::all_of(
+        evaluated.value().rows, [](const auto& row) -> bool {
+            return row.type == hieda::notebook::QueryResultBlockType::entry;
+        }));
+    CHECK_FALSE(evaluated.value().continuationCursor);
+
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    const auto reopened = session.evaluateQuery(queryId);
+    REQUIRE(reopened);
+    CHECK(reopened.value().rows == evaluated.value().rows);
+}
+
+TEST_CASE("Queries distinguish Block type from containing Page context")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "query-context.hieda"));
+    const auto named = session.createPage("work", "Work").value();
+    REQUIRE(session.insertEntry(named.metadata.id, std::nullopt, "named"));
+    const auto query = session
+                           .insertEntry(named.metadata.id, std::nullopt,
+                                        "{{query (where (type page))}}")
+                           .value()
+                           .entries.back();
+    const hieda::notebook::JournalDate date{2026, 8, 10};
+    const auto journal =
+        session.insertEntry(date, std::nullopt, "journal").value();
+
+    auto evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 2);
+    CHECK(std::ranges::all_of(
+        evaluated.value().rows, [](const auto& row) -> bool {
+            return row.type == hieda::notebook::QueryResultBlockType::page;
+        }));
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (page-context named))}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 3);
+    CHECK(std::ranges::all_of(
+        evaluated.value().rows, [](const auto& row) -> bool {
+            return row.pageKind == hieda::notebook::PageKind::named;
+        }));
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (page-context journal))}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 2);
+    CHECK(std::ranges::all_of(
+        evaluated.value().rows, [&](const auto& row) -> bool {
+            return row.pageKind == hieda::notebook::PageKind::journal &&
+                   row.journalDate == date;
+        }));
+    CHECK(std::ranges::any_of(
+        evaluated.value().rows, [&](const auto& row) -> bool {
+            return row.metadata.id == journal.metadata.value().id;
+        }));
+}
+
+TEST_CASE("Journal Date Query predicates apply to the complete Page Context")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "query-dates.hieda"));
+    const auto named = session.createPage("queries", "Queries").value();
+    const auto query =
+        session
+            .insertEntry(named.metadata.id, std::nullopt,
+                         "{{query (where (journal-date = 2026-08-10))}}")
+            .value()
+            .entries.back();
+    for (const auto date : {hieda::notebook::JournalDate{2026, 8, 9},
+                            hieda::notebook::JournalDate{2026, 8, 10},
+                            hieda::notebook::JournalDate{2026, 8, 11}}) {
+        REQUIRE(session.insertEntry(date, std::nullopt, "dated"));
+    }
+    const auto evaluate = [&](const std::string& comparison)
+        -> std::vector<hieda::notebook::QueryResultRow> {
+        REQUIRE(session.updateEntry(query.metadata.id,
+                                    "{{query (where (journal-date " +
+                                        comparison + " 2026-08-10))}}"));
+        const auto result = session.evaluateQuery(query.metadata.id);
+        REQUIRE(result);
+        CHECK_FALSE(result.value().error);
+        return result.value().rows;
+    };
+
+    const auto equal = evaluate("=");
+    REQUIRE(equal.size() == 2);
+    CHECK(std::ranges::all_of(equal, [](const auto& row) -> bool {
+        return row.journalDate == hieda::notebook::JournalDate{2026, 8, 10};
+    }));
+    CHECK(evaluate("<").size() == 2);
+    CHECK(evaluate("<=").size() == 4);
+    CHECK(evaluate(">").size() == 2);
+    CHECK(evaluate(">=").size() == 4);
+}
+
+TEST_CASE("text-contains Queries use literal exact Authored Text")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "query-text.hieda"));
+    const auto page = session.createPage("queries", "Queries").value();
+    const auto first = session
+                           .insertEntry(page.metadata.id, std::nullopt,
+                                        "status::open\nCafé planning")
+                           .value()
+                           .entries.back();
+    REQUIRE(session.insertEntry(page.metadata.id, std::nullopt,
+                                "status::closed\ncafé planning"));
+    const auto query =
+        session
+            .insertEntry(page.metadata.id, std::nullopt,
+                         "{{query (where (text-contains \"Café\"))}}")
+            .value()
+            .entries.back();
+
+    const auto evaluated = session.evaluateQuery(query.metadata.id);
+
+    REQUIRE(evaluated);
+    CHECK_FALSE(evaluated.value().error);
+    REQUIRE(evaluated.value().rows.size() == 2);
+    CHECK(std::ranges::any_of(evaluated.value().rows,
+                              [&](const auto& row) -> bool {
+                                  return row.metadata.id == first.metadata.id;
+                              }));
+    CHECK(std::ranges::any_of(evaluated.value().rows,
+                              [&](const auto& row) -> bool {
+                                  return row.metadata.id == query.metadata.id;
+                              }));
+
+    REQUIRE(session.updateEntry(
+        query.metadata.id,
+        "{{query (where (text-contains \"status::open\"))}}"));
+    CHECK(session.evaluateQuery(query.metadata.id).value().rows.size() == 2);
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (text-contains \"\"))}}"));
+    const auto invalid = session.evaluateQuery(query.metadata.id);
+    REQUIRE(invalid);
+    CHECK(invalid.value().error);
+    CHECK(invalid.value().rows.empty());
+}
+
+TEST_CASE("Property Queries preserve duplicate exact authored values")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(
+        session.create(temporaryDirectory.path() / "query-properties.hieda"));
+    const auto page = session.createPage("queries", "Queries").value();
+    const auto duplicate =
+        session
+            .insertEntry(page.metadata.id, std::nullopt,
+                         "status::open\nstatus::closed\nowner::")
+            .value()
+            .entries.back();
+    REQUIRE(session.insertEntry(page.metadata.id, std::nullopt,
+                                "status::Open\n\\owner::escaped"));
+    const auto query =
+        session
+            .insertEntry(page.metadata.id, std::nullopt,
+                         "{{query (where (property-exists status))}}")
+            .value()
+            .entries.back();
+
+    auto evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    CHECK_FALSE(evaluated.value().error);
+    CHECK(evaluated.value().rows.size() == 2);
+
+    REQUIRE(session.updateEntry(
+        query.metadata.id,
+        "{{query (where (property-equals status \"closed\"))}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 1);
+    CHECK(evaluated.value().rows.front().metadata.id == duplicate.metadata.id);
+
+    REQUIRE(session.updateEntry(
+        query.metadata.id, "{{query (where (property-equals owner \"\"))}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 1);
+    CHECK(evaluated.value().rows.front().metadata.id == duplicate.metadata.id);
+}
+
+TEST_CASE("Query predicates compose with strict and or and not rules")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(
+        session.create(temporaryDirectory.path() / "query-composition.hieda"));
+    const auto page = session.createPage("queries", "Queries").value();
+    const auto open =
+        session.insertEntry(page.metadata.id, std::nullopt, "status::open")
+            .value()
+            .entries.back();
+    REQUIRE(
+        session.insertEntry(page.metadata.id, std::nullopt, "status::closed"));
+    const auto query = session
+                           .insertEntry(page.metadata.id, std::nullopt,
+                                        "{{query (where (and (type entry) "
+                                        "(property-equals status \"open\")))}}")
+                           .value()
+                           .entries.back();
+
+    auto evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 1);
+    CHECK(evaluated.value().rows.front().metadata.id == open.metadata.id);
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (or (type page) "
+                                "(property-equals status \"closed\")))}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    CHECK(evaluated.value().rows.size() == 2);
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (and (type entry) "
+                                "(not (property-exists status))))}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 1);
+    CHECK(evaluated.value().rows.front().metadata.id == query.metadata.id);
+
+    REQUIRE(session.updateEntry(query.metadata.id, "{{query (where (all))}}"));
+    CHECK(session.evaluateQuery(query.metadata.id).value().rows.size() == 4);
+
+    for (const auto* invalid :
+         {"{{query (where (and (all)))}}", "{{query (where (or (all)))}}",
+          "{{query (where (not (all) (all)))}}"}) {
+        REQUIRE(session.updateEntry(query.metadata.id, invalid));
+        const auto result = session.evaluateQuery(query.metadata.id);
+        REQUIRE(result);
+        CHECK(result.value().error);
+        CHECK(result.value().rows.empty());
+    }
+}
+
+TEST_CASE("Query ordering limits and revision-bound batches are deterministic")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "query-order.hieda"));
+    const auto page = session.createPage("queries", "Queries").value();
+    std::vector<hieda::notebook::BlockId> createdIds;
+    for (const auto* text : {"order::first", "order::second", "order::third"}) {
+        createdIds.push_back(
+            session.insertEntry(page.metadata.id, std::nullopt, text)
+                .value()
+                .entries.back()
+                .metadata.id);
+    }
+    const auto query =
+        session
+            .insertEntry(page.metadata.id, std::nullopt,
+                         "{{query (where (property-exists order)) "
+                         "(order-by creation-time asc)}}")
+            .value()
+            .entries.back();
+    const auto resultIds =
+        [&](const auto& result) -> std::vector<hieda::notebook::BlockId> {
+        std::vector<hieda::notebook::BlockId> ids;
+        for (const auto& row : result.value().rows) {
+            ids.push_back(row.metadata.id);
+        }
+        return ids;
+    };
+
+    auto evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    CHECK(resultIds(evaluated) == createdIds);
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (property-exists order)) "
+                                "(order-by creation-time desc)}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    auto reverseIds = createdIds;
+    std::ranges::reverse(reverseIds);
+    CHECK(resultIds(evaluated) == reverseIds);
+
+    REQUIRE(session.updateEntry(createdIds.front(), "order::first updated"));
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (property-exists order)) "
+                                "(order-by update-time desc) (limit 2)}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 2);
+    CHECK(evaluated.value().rows.front().metadata.id == createdIds.front());
+    CHECK_FALSE(evaluated.value().continuationCursor);
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (type entry))}}"));
+    for (int index = 0; index < 100; ++index) {
+        REQUIRE(session.insertEntry(page.metadata.id, std::nullopt,
+                                    "bulk " + std::to_string(index)));
+    }
+    const auto firstBatch = session.evaluateQuery(query.metadata.id);
+    REQUIRE(firstBatch);
+    CHECK(firstBatch.value().rows.size() == 100);
+    REQUIRE(firstBatch.value().continuationCursor);
+    const auto secondBatch = session.evaluateQuery(
+        query.metadata.id, firstBatch.value().continuationCursor);
+    REQUIRE(secondBatch);
+    CHECK(secondBatch.value().rows.size() == 4);
+    CHECK_FALSE(secondBatch.value().continuationCursor);
+
+    const auto staleCursor = firstBatch.value().continuationCursor;
+    REQUIRE(session.updateEntry(createdIds.back(), "order::changed"));
+    const auto stale = session.evaluateQuery(query.metadata.id, staleCursor);
+    REQUIRE_FALSE(stale);
+    CHECK(stale.error().code ==
+          hieda::notebook::NotebookErrorCode::staleQueryCursor);
+}
+
+TEST_CASE("Journal Date ordering keeps Page roots and outline order together")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(
+        session.create(temporaryDirectory.path() / "query-date-order.hieda"));
+    const auto named = session.createPage("queries", "Queries").value();
+    const auto query = session
+                           .insertEntry(named.metadata.id, std::nullopt,
+                                        "{{query (where (all)) "
+                                        "(order-by journal-date desc)}}")
+                           .value()
+                           .entries.back();
+    const hieda::notebook::JournalDate earlier{2026, 8, 10};
+    const hieda::notebook::JournalDate later{2026, 8, 11};
+    const auto earlierPage =
+        session.insertEntry(earlier, std::nullopt, "earlier").value();
+    auto laterPage = session.insertEntry(later, std::nullopt, "parent").value();
+    const auto parent = laterPage.entries.front();
+    laterPage = session.insertEntry(later, parent.metadata.id, "child").value();
+    const auto child = laterPage.entries.back();
+    laterPage =
+        session
+            .moveEntry(child.metadata.id, hieda::notebook::EntryMove::indent,
+                       child.authoredText)
+            .value();
+    REQUIRE(session.updateEntry(earlierPage.entries.front().metadata.id,
+                                "earlier updated last"));
+
+    auto evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 7);
+    CHECK(evaluated.value().rows[0].journalDate == later);
+    CHECK(evaluated.value().rows[0].type ==
+          hieda::notebook::QueryResultBlockType::page);
+    CHECK(evaluated.value().rows[1].metadata.id == parent.metadata.id);
+    CHECK(evaluated.value().rows[2].metadata.id == child.metadata.id);
+    CHECK(evaluated.value().rows[3].journalDate == earlier);
+    CHECK(evaluated.value().rows[3].type ==
+          hieda::notebook::QueryResultBlockType::page);
+    CHECK(evaluated.value().rows[4].metadata.id ==
+          earlierPage.entries.front().metadata.id);
+    CHECK(evaluated.value().rows[5].pageKind ==
+          hieda::notebook::PageKind::named);
+    CHECK(evaluated.value().rows[6].pageKind ==
+          hieda::notebook::PageKind::named);
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (page-context journal)) "
+                                "(order-by journal-date asc)}}"));
+    evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE(evaluated.value().rows.size() == 5);
+    CHECK(evaluated.value().rows[0].journalDate == earlier);
+    CHECK(evaluated.value().rows[0].type ==
+          hieda::notebook::QueryResultBlockType::page);
+    CHECK(evaluated.value().rows[2].journalDate == later);
+    CHECK(evaluated.value().rows[2].type ==
+          hieda::notebook::QueryResultBlockType::page);
+    CHECK(evaluated.value().rows[3].metadata.id == parent.metadata.id);
+    CHECK(evaluated.value().rows[4].metadata.id == child.metadata.id);
+}
+
+TEST_CASE("invalid Query intent is editable diagnosed and never partially run")
+{
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath = temporaryDirectory.path() / "query-errors.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    const auto target = session.createPage("target", "Target").value();
+    const auto page = session.createPage("queries", "Queries").value();
+    REQUIRE(session.insertEntry(page.metadata.id, std::nullopt, "ordinary"));
+    const auto query = session
+                           .insertEntry(page.metadata.id, std::nullopt,
+                                        "{{query (where (type entry))}}")
+                           .value()
+                           .entries.back();
+    REQUIRE(session.evaluateQuery(query.metadata.id).value().rows.size() == 2);
+
+    const std::vector<std::string> invalidSources{
+        "{{query",
+        "{{query (where (type entry)) (where (all))}}",
+        "{{query (where (unknown value))}}",
+        R"({{query (where (text-contains "bad\t"))}})",
+        "{{query (where (text-contains \"raw\nnewline\"))}}",
+        "{{query (where (journal-date = 2026-02-30))}}",
+        "{{query (where (all)) (limit 0)}}",
+        "{{query (where (all)) (limit 18446744073709551616)}}",
+        "{{query (where (all)) (limit 1) (order-by update-time asc)}}",
+        "{{query (where (all)) extra)}}",
+    };
+    for (const auto& source : invalidSources) {
+        REQUIRE(session.updateEntry(query.metadata.id, source));
+        const auto result = session.evaluateQuery(query.metadata.id);
+        REQUIRE(result);
+        CHECK(result.value().hasQueryIntent);
+        const auto* error =
+            result.value().error ? &result.value().error.value() : nullptr;
+        REQUIRE(error != nullptr);
+        CHECK_FALSE(error->message.empty());
+        CHECK(error->sourceByteOffset <= source.size());
+        CHECK(result.value().rows.empty());
+    }
+
+    const std::string opaque =
+        "{{query (where (unknown [[target]] "
+        "[[block:550e8400-e29b-41d4-a716-446655440000]]))}}";
+    REQUIRE(session.updateEntry(query.metadata.id, opaque));
+    CHECK(session.pageLinks(query.metadata.id).value().empty());
+    CHECK(session.blockReferences(query.metadata.id).value().empty());
+    CHECK(session.linkedReferences(target.metadata.id).value().sources.empty());
+
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    const auto reopened = session.evaluateQuery(query.metadata.id);
+    REQUIRE(reopened);
+    CHECK(reopened.value().error);
+    CHECK(
+        session.outline(page.metadata.id).value().entries.back().authoredText ==
+        opaque);
+
+    REQUIRE(session.updateEntry(query.metadata.id, "ordinary {{query text"));
+    const auto ordinary = session.evaluateQuery(query.metadata.id);
+    REQUIRE(ordinary);
+    CHECK_FALSE(ordinary.value().hasQueryIntent);
+    CHECK_FALSE(ordinary.value().error);
+    CHECK(ordinary.value().rows.empty());
+}
+
+TEST_CASE("Query results reflect committed edits moves undo and redo")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "query-live.hieda"));
+    const auto source = session.createPage("source", "Source").value();
+    const auto destination =
+        session.createPage("destination", "Destination").value();
+    const auto candidate =
+        session.insertEntry(source.metadata.id, std::nullopt, "status::closed")
+            .value()
+            .entries.back();
+    const auto query =
+        session
+            .insertEntry(source.metadata.id, std::nullopt,
+                         "{{query (where (property-equals status \"open\"))}}")
+            .value()
+            .entries.back();
+
+    CHECK(session.evaluateQuery(query.metadata.id).value().rows.empty());
+    REQUIRE(session.updateEntry(candidate.metadata.id, "status::open"));
+    REQUIRE(session.evaluateQuery(query.metadata.id).value().rows.size() == 1);
+    CHECK(session.evaluateQuery(query.metadata.id)
+              .value()
+              .rows.front()
+              .metadata.id == candidate.metadata.id);
+
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where (page-context named))}}"));
+    const auto beforeMove = session.evaluateQuery(query.metadata.id).value();
+    REQUIRE(session.moveEntryToPage(candidate.metadata.id,
+                                    destination.metadata.id, std::nullopt));
+    const auto afterMove = session.evaluateQuery(query.metadata.id).value();
+    REQUIRE(afterMove.rows.size() == beforeMove.rows.size());
+    const auto moved =
+        std::ranges::find_if(afterMove.rows, [&](const auto& row) -> bool {
+            return row.metadata.id == candidate.metadata.id;
+        });
+    REQUIRE(moved != afterMove.rows.end());
+    CHECK(moved->contextPageId == destination.metadata.id);
+
+    REQUIRE(session.undoEdit());
+    const auto undone = session.evaluateQuery(query.metadata.id).value();
+    const auto restored =
+        std::ranges::find_if(undone.rows, [&](const auto& row) -> bool {
+            return row.metadata.id == candidate.metadata.id;
+        });
+    REQUIRE(restored != undone.rows.end());
+    CHECK(restored->contextPageId == source.metadata.id);
+    REQUIRE(session.redoEdit());
+    const auto redone = session.evaluateQuery(query.metadata.id).value();
+    CHECK(std::ranges::any_of(redone.rows, [&](const auto& row) -> bool {
+        return row.metadata.id == candidate.metadata.id &&
+               row.contextPageId == destination.metadata.id;
+    }));
+}

@@ -801,3 +801,51 @@ TEST_CASE("the Qt adapter exposes and applies Journal undo and redo")
               .toString() == QStringLiteral("changed"));
     CHECK_FALSE(controller.canRedo());
 }
+
+TEST_CASE("the Qt adapter exposes live Query results errors and navigation")
+{
+    TemporaryDirectory temporaryDirectory;
+    NotebookController controller;
+    controller.createNotebook(
+        localFileUrl(temporaryDirectory.path() / "query-adapter.hieda"));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("status::closed")) ==
+            0);
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral(
+                "{{query (where (property-equals status \"open\"))}}")) == 1);
+    auto* model = controller.outlineEntries();
+    const auto candidateId = controller.outlineEntryId(0);
+    const auto queryId = controller.outlineEntryId(1);
+    auto queryIndex = model->index(1, 0);
+
+    CHECK(model->data(queryIndex, OutlineEntryModel::QueryHasIntentRole)
+              .toBool());
+    CHECK(model->data(queryIndex, OutlineEntryModel::QueryErrorRole)
+              .toString()
+              .isEmpty());
+    CHECK(model->data(queryIndex, OutlineEntryModel::QueryResultsRole)
+              .toList()
+              .isEmpty());
+
+    REQUIRE(controller.updateOutlineEntry(candidateId,
+                                          QStringLiteral("status::open")));
+    queryIndex = model->index(1, 0);
+    const auto rows =
+        model->data(queryIndex, OutlineEntryModel::QueryResultsRole).toList();
+    REQUIRE(rows.size() == 1);
+    CHECK(rows.front().toMap().value(QStringLiteral("blockId")).toString() ==
+          candidateId);
+    CHECK_FALSE(
+        model->data(queryIndex, OutlineEntryModel::QueryHasMoreRole).toBool());
+    CHECK(controller.followQueryResult(candidateId));
+    CHECK(controller.identifiedBlockId() == candidateId);
+
+    REQUIRE(controller.updateOutlineEntry(
+        queryId, QStringLiteral("{{query (where (type unknown))}}")));
+    queryIndex = model->index(1, 0);
+    CHECK_FALSE(model->data(queryIndex, OutlineEntryModel::QueryErrorRole)
+                    .toString()
+                    .isEmpty());
+    CHECK(model->data(queryIndex, OutlineEntryModel::QueryResultsRole)
+              .toList()
+              .isEmpty());
+}

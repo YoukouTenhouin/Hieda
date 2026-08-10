@@ -3,6 +3,7 @@
 #include "authored_text_parser.hpp"
 #include "notebook_session_test_access.hpp"
 #include "platform_file.hpp"
+#include "query_parser.hpp"
 
 #include <lmdb.h>
 
@@ -824,6 +825,47 @@ struct LinkedReferencesCursor {
     encode() const -> std::string
     {
         return std::to_string(revision) + ":" + std::to_string(offset);
+    }
+};
+
+struct QueryCursor {
+    std::string queryId;
+    std::uint64_t revision{0};
+    std::size_t offset{0};
+
+    [[nodiscard]] static auto
+    decode(std::string_view text) -> std::optional<QueryCursor>
+    {
+        const auto first = text.find(':');
+        const auto second = first == std::string_view::npos
+                                ? std::string_view::npos
+                                : text.find(':', first + 1);
+        QueryCursor cursor;
+        if (first == std::string_view::npos ||
+            second == std::string_view::npos) {
+            return std::nullopt;
+        }
+        cursor.queryId = std::string(text.substr(0, first));
+        const auto revisionBegin = text.data() + first + 1;
+        const auto revisionEnd = text.data() + second;
+        const auto offsetBegin = text.data() + second + 1;
+        const auto offsetEnd = text.data() + text.size();
+        const auto [parsedRevisionEnd, revisionError] =
+            std::from_chars(revisionBegin, revisionEnd, cursor.revision);
+        const auto [parsedOffsetEnd, offsetError] =
+            std::from_chars(offsetBegin, offsetEnd, cursor.offset);
+        if (revisionError != std::errc{} || parsedRevisionEnd != revisionEnd ||
+            offsetError != std::errc{} || parsedOffsetEnd != offsetEnd) {
+            return std::nullopt;
+        }
+        return cursor;
+    }
+
+    [[nodiscard]] auto
+    encode() const -> std::string
+    {
+        return queryId + ":" + std::to_string(revision) + ":" +
+               std::to_string(offset);
     }
 };
 
@@ -6261,6 +6303,315 @@ NotebookSession::unresolvedPageLinkOccurrences(
     }
     return Result<UnresolvedPageLinkOccurrencesBatch>::success(
         {std::move(batch), total, std::move(nextCursor)});
+}
+
+auto
+NotebookSession::evaluateQuery(
+    BlockId queryEntryId, std::optional<std::string> continuationCursor) const
+    -> Result<QueryResultsBatch>
+{
+    std::scoped_lock lock(impl_->mutex);
+    if (!impl_->info) {
+        return Result<QueryResultsBatch>::failure(makeError(
+            NotebookErrorCode::notebookNotOpen, {}, "a Notebook must be open"));
+    }
+    const auto path = impl_->info->path;
+    auto offset = std::size_t{0};
+    if (continuationCursor) {
+        const auto cursor = QueryCursor::decode(*continuationCursor);
+        if (!cursor || cursor->queryId != queryEntryId.toString() ||
+            cursor->revision != impl_->info->revision) {
+            return Result<QueryResultsBatch>::failure(
+                makeError(NotebookErrorCode::staleQueryCursor, path,
+                          "the Query cursor is stale or invalid"));
+        }
+        offset = cursor->offset;
+    }
+
+    MDB_txn* transaction = nullptr;
+    auto result =
+        mdb_txn_begin(impl_->environment, nullptr, MDB_RDONLY, &transaction);
+    if (result != MDB_SUCCESS) {
+        return Result<QueryResultsBatch>::failure(
+            errorFromLmdb(path, result, "begin Query read"));
+    }
+    const auto abort = [&transaction]() -> void {
+        if (transaction != nullptr) {
+            mdb_txn_abort(transaction);
+            transaction = nullptr;
+        }
+    };
+    auto databases = openJournalDatabases(transaction, path);
+    if (!databases) {
+        abort();
+        return Result<QueryResultsBatch>::failure(databases.error());
+    }
+    auto queryEntry =
+        readBlock(transaction, databases.value().blocks, queryEntryId, path);
+    if (!queryEntry) {
+        abort();
+        return Result<QueryResultsBatch>::failure(queryEntry.error());
+    }
+    if (queryEntry.value().type != BlockType::entry) {
+        abort();
+        return Result<QueryResultsBatch>::failure(
+            makeError(NotebookErrorCode::blockNotFound, path,
+                      "the Query source must be an Entry"));
+    }
+
+    const auto parsed = query_language::parse(queryEntry.value().authoredText);
+    QueryResultsBatch batch;
+    batch.hasQueryIntent = parsed.hasIntent;
+    batch.error = parsed.error;
+    if (!parsed.query) {
+        abort();
+        return Result<QueryResultsBatch>::success(std::move(batch));
+    }
+
+    const auto rootPage = [&](const BlockId& entryId) -> Result<BlockRecord> {
+        auto current = entryId;
+        while (true) {
+            auto parent =
+                impl_->parentOf(transaction, databases.value(), current);
+            if (!parent) {
+                return Result<BlockRecord>::failure(parent.error());
+            }
+            auto block = readBlock(transaction, databases.value().blocks,
+                                   parent.value().parent, path);
+            if (!block) {
+                return block;
+            }
+            if (block.value().type == BlockType::page) {
+                return block;
+            }
+            current = block.value().metadata.id;
+        }
+    };
+
+    std::unordered_map<std::string, std::size_t> journalOutlineOrder;
+    MDB_cursor* cursor = nullptr;
+    result =
+        mdb_cursor_open(transaction, databases.value().blocksByType, &cursor);
+    if (result != MDB_SUCCESS) {
+        abort();
+        return Result<QueryResultsBatch>::failure(
+            errorFromLmdb(path, result, "open Query Block scan"));
+    }
+    auto start = typeIndexKey(BlockType::page, BlockId{});
+    MDB_val key{start.size(), start.data()};
+    MDB_val value{};
+    result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+    while (result == MDB_SUCCESS && key.mv_size == start.size()) {
+        const auto storedType =
+            static_cast<const std::uint8_t*>(key.mv_data)[0];
+        if (storedType < static_cast<std::uint8_t>(BlockType::page) ||
+            storedType > static_cast<std::uint8_t>(BlockType::entry)) {
+            break;
+        }
+        BlockId identifier;
+        std::memcpy(identifier.bytes.data(),
+                    static_cast<const std::uint8_t*>(key.mv_data) + 1,
+                    identifier.bytes.size());
+        auto block =
+            readBlock(transaction, databases.value().blocks, identifier, path);
+        if (!block) {
+            mdb_cursor_close(cursor);
+            abort();
+            return Result<QueryResultsBatch>::failure(block.error());
+        }
+        auto page = block.value().type == BlockType::page
+                        ? Result<BlockRecord>::success(block.value())
+                        : rootPage(identifier);
+        if (!page) {
+            mdb_cursor_close(cursor);
+            abort();
+            return Result<QueryResultsBatch>::failure(page.error());
+        }
+        if (block.value().type == BlockType::page &&
+            block.value().pageKind == PageKind::journal) {
+            auto outline = impl_->loadOutline(transaction, databases.value(),
+                                              block.value());
+            if (!outline) {
+                mdb_cursor_close(cursor);
+                abort();
+                return Result<QueryResultsBatch>::failure(outline.error());
+            }
+            journalOutlineOrder.emplace(block.value().metadata.id.toString(),
+                                        0);
+            for (std::size_t index = 0; index < outline.value().entries.size();
+                 ++index) {
+                journalOutlineOrder.emplace(
+                    outline.value().entries[index].metadata.id.toString(),
+                    index + 1);
+            }
+        }
+        const auto publicType = block.value().type == BlockType::page
+                                    ? QueryResultBlockType::page
+                                    : QueryResultBlockType::entry;
+        const auto matchesPredicate =
+            [&](auto&& self,
+                const query_language::Predicate& predicate) -> bool {
+            using query_language::PredicateKind;
+            if (predicate.kind == PredicateKind::all) {
+                return true;
+            }
+            if (predicate.kind == PredicateKind::conjunction) {
+                return std::ranges::all_of(predicate.operands,
+                                           [&](const auto& operand) -> bool {
+                                               return self(self, operand);
+                                           });
+            }
+            if (predicate.kind == PredicateKind::disjunction) {
+                return std::ranges::any_of(predicate.operands,
+                                           [&](const auto& operand) -> bool {
+                                               return self(self, operand);
+                                           });
+            }
+            if (predicate.kind == PredicateKind::negation) {
+                return !self(self, predicate.operands.front());
+            }
+            if (predicate.kind == PredicateKind::blockType) {
+                return publicType == predicate.blockType;
+            }
+            if (predicate.kind == PredicateKind::pageContext) {
+                return page.value().pageKind == predicate.pageKind;
+            }
+            if (predicate.kind == PredicateKind::journalDate) {
+                if (!page.value().journalDate) {
+                    return false;
+                }
+                const auto dateKey = [](JournalDate date)
+                    -> std::tuple<std::int32_t, std::uint8_t, std::uint8_t> {
+                    return std::tuple{date.year, date.month, date.day};
+                };
+                const auto candidate = dateKey(*page.value().journalDate);
+                const auto expected = dateKey(predicate.journalDate);
+                switch (predicate.dateComparison) {
+                case query_language::JournalDateComparison::equal:
+                    return candidate == expected;
+                case query_language::JournalDateComparison::less:
+                    return candidate < expected;
+                case query_language::JournalDateComparison::lessOrEqual:
+                    return candidate <= expected;
+                case query_language::JournalDateComparison::greater:
+                    return candidate > expected;
+                case query_language::JournalDateComparison::greaterOrEqual:
+                    return candidate >= expected;
+                }
+            }
+            if (predicate.kind == PredicateKind::textContains) {
+                return block.value().type == BlockType::entry &&
+                       block.value().authoredText.find(predicate.value) !=
+                           std::string::npos;
+            }
+            if (block.value().type != BlockType::entry) {
+                return false;
+            }
+            const auto properties =
+                authored_text::properties(block.value().authoredText);
+            if (predicate.kind == PredicateKind::propertyExists) {
+                return std::ranges::any_of(
+                    properties, [&](const auto& property) -> bool {
+                        return property.key == predicate.propertyKey;
+                    });
+            }
+            if (predicate.kind == PredicateKind::propertyEquals) {
+                return std::ranges::any_of(
+                    properties, [&](const auto& property) -> bool {
+                        return property.key == predicate.propertyKey &&
+                               property.value == predicate.value;
+                    });
+            }
+            return false;
+        };
+        const auto matches =
+            matchesPredicate(matchesPredicate, parsed.query->where);
+        if (matches) {
+            batch.rows.push_back(
+                {publicType, block.value().metadata, page.value().metadata.id,
+                 page.value().pageKind.value_or(PageKind::named),
+                 page.value().journalDate, page.value().pageName,
+                 page.value().displayTitle, block.value().authoredText});
+        }
+        result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+    }
+    mdb_cursor_close(cursor);
+    if (result != MDB_NOTFOUND && result != MDB_SUCCESS) {
+        abort();
+        return Result<QueryResultsBatch>::failure(
+            errorFromLmdb(path, result, "scan Query Blocks"));
+    }
+    const auto sortKey =
+        parsed.query->sortKey.value_or(query_language::SortKey::updateTime);
+    const auto descending =
+        parsed.query->sortKey ? parsed.query->descending : true;
+    std::ranges::sort(
+        batch.rows, [&](const auto& left, const auto& right) -> bool {
+            const auto identifierLess = [&]() -> bool {
+                return std::ranges::lexicographical_compare(
+                    left.metadata.id.bytes, right.metadata.id.bytes);
+            };
+            if (sortKey == query_language::SortKey::journalDate) {
+                const auto leftJournal = left.journalDate.has_value();
+                const auto rightJournal = right.journalDate.has_value();
+                if (leftJournal != rightJournal) {
+                    return leftJournal;
+                }
+                if (!leftJournal) {
+                    return identifierLess();
+                }
+                const auto dateKey = [](JournalDate date)
+                    -> std::tuple<std::int32_t, std::uint8_t, std::uint8_t> {
+                    return std::tuple{date.year, date.month, date.day};
+                };
+                const auto leftDate = dateKey(*left.journalDate);
+                const auto rightDate = dateKey(*right.journalDate);
+                if (leftDate != rightDate) {
+                    return descending ? leftDate > rightDate
+                                      : leftDate < rightDate;
+                }
+                const auto leftOrder =
+                    journalOutlineOrder.at(left.metadata.id.toString());
+                const auto rightOrder =
+                    journalOutlineOrder.at(right.metadata.id.toString());
+                return leftOrder < rightOrder;
+            }
+            const auto leftTime =
+                sortKey == query_language::SortKey::creationTime
+                    ? left.metadata.createdAt
+                    : left.metadata.updatedAt;
+            const auto rightTime =
+                sortKey == query_language::SortKey::creationTime
+                    ? right.metadata.createdAt
+                    : right.metadata.updatedAt;
+            if (leftTime == rightTime) {
+                return identifierLess();
+            }
+            return descending ? leftTime > rightTime : leftTime < rightTime;
+        });
+    auto logicalSize = batch.rows.size();
+    if (parsed.query->limit && *parsed.query->limit < logicalSize) {
+        logicalSize = static_cast<std::size_t>(*parsed.query->limit);
+    }
+    if (offset > logicalSize) {
+        abort();
+        return Result<QueryResultsBatch>::failure(
+            makeError(NotebookErrorCode::staleQueryCursor, path,
+                      "the Query cursor is outside the current result set"));
+    }
+    constexpr auto queryBatchSize = std::size_t{100};
+    const auto end = offset + std::min(queryBatchSize, logicalSize - offset);
+    std::vector<QueryResultRow> rows(
+        batch.rows.begin() + static_cast<std::ptrdiff_t>(offset),
+        batch.rows.begin() + static_cast<std::ptrdiff_t>(end));
+    batch.rows = std::move(rows);
+    if (end < logicalSize) {
+        batch.continuationCursor =
+            QueryCursor{queryEntryId.toString(), impl_->info->revision, end}
+                .encode();
+    }
+    abort();
+    return Result<QueryResultsBatch>::success(std::move(batch));
 }
 
 // NOLINTNEXTLINE(performance-unnecessary-value-param)

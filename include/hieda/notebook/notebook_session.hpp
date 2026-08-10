@@ -245,6 +245,39 @@ struct UnresolvedPageLinkOccurrencesBatch {
         -> bool = default;
 };
 
+enum class QueryResultBlockType : std::uint8_t { page, entry };
+
+struct QueryError {
+    std::size_t sourceByteOffset{0};
+    std::size_t sourceByteLength{0};
+    std::string message;
+    std::optional<std::string> expected;
+
+    auto operator==(const QueryError&) const -> bool = default;
+};
+
+struct QueryResultRow {
+    QueryResultBlockType type{QueryResultBlockType::entry};
+    BlockMetadata metadata;
+    BlockId contextPageId;
+    PageKind pageKind{PageKind::named};
+    std::optional<JournalDate> journalDate;
+    std::string pageName;
+    std::string displayTitle;
+    std::string authoredText;
+
+    auto operator==(const QueryResultRow&) const -> bool = default;
+};
+
+struct QueryResultsBatch {
+    bool hasQueryIntent{false};
+    std::optional<QueryError> error;
+    std::vector<QueryResultRow> rows;
+    std::optional<std::string> continuationCursor;
+
+    auto operator==(const QueryResultsBatch&) const -> bool = default;
+};
+
 struct EditCapabilities {
     bool canUndo{false};
     bool canRedo{false};
@@ -284,6 +317,7 @@ enum class NotebookErrorCode : std::uint8_t {
     pageLinkNotFound,
     blockReferenceNotFound,
     staleLinkedReferencesCursor,
+    staleQueryCursor,
 };
 
 struct NotebookError {
@@ -399,6 +433,10 @@ class NotebookSession {
         std::string name, BlockId sourceId,
         std::optional<std::string> continuationCursor = std::nullopt) const
         -> Result<UnresolvedPageLinkOccurrencesBatch>;
+    [[nodiscard]] auto evaluateQuery(
+        BlockId queryEntryId,
+        std::optional<std::string> continuationCursor = std::nullopt) const
+        -> Result<QueryResultsBatch>;
     [[nodiscard]] auto pagePreview(std::string name) const
         -> Result<PagePreview>;
     [[nodiscard]] auto outline(PageAddress address) const

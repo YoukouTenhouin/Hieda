@@ -205,6 +205,18 @@ OutlineEntryModel::data(const QModelIndex& index, int role) const -> QVariant
     if (role == LinkedReferenceHasMoreOccurrencesRole) {
         return entry.linkedReferenceHasMoreOccurrences;
     }
+    if (role == QueryHasIntentRole) {
+        return entry.queryHasIntent;
+    }
+    if (role == QueryErrorRole) {
+        return entry.queryError;
+    }
+    if (role == QueryResultsRole) {
+        return entry.queryResults;
+    }
+    if (role == QueryHasMoreRole) {
+        return entry.queryHasMore;
+    }
     const auto parent = entry.parentEntry;
     const auto hasChildren =
         std::ranges::any_of(entries_, [&](const auto& candidate) -> bool {
@@ -264,7 +276,11 @@ OutlineEntryModel::roleNames() const -> QHash<int, QByteArray>
         {LinkedReferencePresentationRole, "linkedReferencePresentation"},
         {LinkedReferenceOccurrenceCountRole, "linkedReferenceOccurrenceCount"},
         {LinkedReferenceHasMoreOccurrencesRole,
-         "linkedReferenceHasMoreOccurrences"}};
+         "linkedReferenceHasMoreOccurrences"},
+        {QueryHasIntentRole, "queryHasIntent"},
+        {QueryErrorRole, "queryError"},
+        {QueryResultsRole, "queryResults"},
+        {QueryHasMoreRole, "queryHasMore"}};
 }
 
 void
@@ -316,10 +332,43 @@ OutlineEntryModel::updateEntry(const OutlineEntry& entry)
     if (found == entries_.end()) {
         return;
     }
-    *found = entry;
+    auto updated = entry;
+    updated.queryHasIntent = found->queryHasIntent;
+    updated.queryError = found->queryError;
+    updated.queryResults = found->queryResults;
+    updated.queryHasMore = found->queryHasMore;
+    *found = std::move(updated);
     const auto row = static_cast<int>(std::distance(entries_.begin(), found));
     const auto changed = index(row);
     emit dataChanged(changed, changed, {AuthoredTextRole});
+}
+
+void
+OutlineEntryModel::setQueryResults(const hieda::notebook::BlockId& entryId,
+                                   bool hasIntent, QString error,
+                                   QVariantList results, bool hasMore,
+                                   bool append)
+{
+    const auto found =
+        std::ranges::find_if(entries_, [&](const auto& current) -> bool {
+            return current.metadata.id == entryId;
+        });
+    if (found == entries_.end()) {
+        return;
+    }
+    found->queryHasIntent = hasIntent;
+    found->queryError = std::move(error);
+    if (append) {
+        found->queryResults.append(results);
+    } else {
+        found->queryResults = std::move(results);
+    }
+    found->queryHasMore = hasMore;
+    const auto row = static_cast<int>(std::distance(entries_.begin(), found));
+    const auto changed = index(row);
+    emit dataChanged(changed, changed,
+                     {QueryHasIntentRole, QueryErrorRole, QueryResultsRole,
+                      QueryHasMoreRole});
 }
 
 void
@@ -777,6 +826,7 @@ NotebookController::NotebookController(QObject* parent)
     subscription_ = session_.subscribeToChanges([this]() -> void {
         refreshLinkedReferences();
         refreshBlockLinkedReferences();
+        refreshQueries();
     });
     midnightTimer_.setSingleShot(true);
     connect(&midnightTimer_, &QTimer::timeout, this, [this]() -> void {
@@ -1008,6 +1058,7 @@ NotebookController::closeNotebook()
     pagePreviewUnresolvedPageLinkSourceTotal_ = 0;
     pagePreviewUnresolvedPageLinkSourcesCursor_.reset();
     pagePreviewUnresolvedPageLinkOccurrenceCursors_.clear();
+    queryCursors_.clear();
     pageChoices_.clear();
     pageIds_.clear();
     selectedBlockReferenceTargetId_.reset();
@@ -1082,6 +1133,7 @@ NotebookController::insertOutlineEntry(const QString& authoredText,
         const auto insertedRow =
             static_cast<int>(std::distance(entries.begin(), inserted));
         outlineEntries_.insertEntry(insertedRow, *inserted);
+        refreshQueries();
         error_.clear();
         emit stateChanged();
         emit destinationChanged();
@@ -1170,6 +1222,7 @@ NotebookController::splitOutlineEntry(const QString& entryId,
         }
         auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
+        refreshQueries();
         auto insertedRow = -1;
         for (int current = 0; current < outlineEntries_.rowCount(); ++current) {
             const auto candidate = outlineEntries_.entryId(current);
@@ -1223,6 +1276,7 @@ NotebookController::joinOutlineEntry(const QString& entryId,
         }
         auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
+        refreshQueries();
         const auto targetRow =
             targetId ? outlineEntries_.rowForId(*targetId) : -1;
         error_.clear();
@@ -1262,6 +1316,7 @@ NotebookController::moveOutlineEntry(const QString& entryId,
         }
         auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
+        refreshQueries();
         const auto row = outlineEntries_.rowForId(*id);
         error_.clear();
         emit stateChanged();
@@ -1332,6 +1387,7 @@ NotebookController::deleteOutlineEntry(const QString& entryId) -> QVariantMap
         }
         auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
+        refreshQueries();
         const auto focusRow = std::min(oldRow, outlineEntries_.rowCount() - 1);
         const auto cursor =
             focusRow >= 0 ? static_cast<int>(std::min<qsizetype>(
@@ -1468,6 +1524,7 @@ NotebookController::deleteOutlineSubtrees(const QStringList& entryIds)
         }
         auto entries = asOutlineEntries(result.value().entries);
         outlineEntries_.setEntries(std::move(entries));
+        refreshQueries();
         auto focusRow = -1;
         auto cursor = 0;
         if (outlineEntries_.rowCount() > 0) {
@@ -1607,6 +1664,7 @@ NotebookController::applyOutlineHistory(OutlineHistoryDirection direction,
                          std::max(0, static_cast<int>(oldEntries.size()) - 1));
         }
         outlineEntries_.setEntries(entries);
+        refreshQueries();
         refreshPages();
         auto cursor = 0;
         if (focusRow >= 0) {
@@ -2227,6 +2285,9 @@ NotebookController::reject(const hieda::notebook::NotebookError& error)
         error_ =
             tr("Linked References changed; reload them from the beginning.");
         break;
+    case NotebookErrorCode::staleQueryCursor:
+        error_ = tr("Query results changed; reload them from the beginning.");
+        break;
     }
     emit stateChanged();
 }
@@ -2257,6 +2318,7 @@ NotebookController::loadJournalDate(const QDate& date)
         currentPageName_.clear();
         currentPageTitle_.clear();
         outlineEntries_.setEntries(asOutlineEntries(result.value().entries));
+        refreshQueries();
         pagePreviewSources_.setEntries({});
         pageLinkedReferences_.targetId =
             result.value().metadata
@@ -2288,6 +2350,7 @@ NotebookController::loadPage(const hieda::notebook::BlockId& pageId)
         currentPageName_ = QString::fromUtf8(result.value().name);
         currentPageTitle_ = QString::fromUtf8(result.value().displayTitle);
         outlineEntries_.setEntries(asOutlineEntries(result.value().entries));
+        refreshQueries();
         pagePreviewSources_.setEntries({});
         pageLinkedReferences_.targetId = pageId;
         refreshLinkedReferences();
@@ -2438,6 +2501,124 @@ NotebookController::currentPageAddress() const -> hieda::notebook::PageAddress
     return currentPageId_
                ? hieda::notebook::PageAddress{*currentPageId_}
                : hieda::notebook::PageAddress{domainJournalDate(journalDate_)};
+}
+
+void
+NotebookController::applyQueryBatch(
+    const hieda::notebook::BlockId& queryEntryId,
+    const hieda::notebook::QueryResultsBatch& batch, bool append)
+{
+    QVariantList rows;
+    rows.reserve(static_cast<qsizetype>(batch.rows.size()));
+    for (const auto& row : batch.rows) {
+        QString presentation;
+        if (row.type == hieda::notebook::QueryResultBlockType::page) {
+            if (row.pageKind == hieda::notebook::PageKind::journal &&
+                row.journalDate) {
+                presentation =
+                    QDate(row.journalDate->year, row.journalDate->month,
+                          row.journalDate->day)
+                        .toString(Qt::ISODate);
+            } else {
+                presentation = QStringLiteral("%1 — %2").arg(
+                    QString::fromUtf8(row.displayTitle),
+                    QString::fromUtf8(row.pageName));
+            }
+        } else {
+            presentation = QString::fromUtf8(
+                row.authoredText.data(),
+                static_cast<qsizetype>(row.authoredText.size()));
+        }
+        QString context;
+        if (row.pageKind == hieda::notebook::PageKind::journal &&
+            row.journalDate) {
+            context = QDate(row.journalDate->year, row.journalDate->month,
+                            row.journalDate->day)
+                          .toString(Qt::ISODate);
+        } else {
+            context = QString::fromUtf8(row.displayTitle);
+        }
+        rows.push_back(QVariantMap{
+            {QStringLiteral("blockId"), displayId(row.metadata.id)},
+            {QStringLiteral("presentation"), presentation},
+            {QStringLiteral("context"), context},
+            {QStringLiteral("isPage"),
+             row.type == hieda::notebook::QueryResultBlockType::page},
+        });
+    }
+    QString error;
+    if (batch.error) {
+        error = tr("%1 (byte %2)")
+                    .arg(QString::fromUtf8(batch.error->message),
+                         QString::number(batch.error->sourceByteOffset));
+    }
+    const auto idText = displayId(queryEntryId);
+    if (batch.continuationCursor) {
+        queryCursors_.insert(idText, *batch.continuationCursor);
+    } else {
+        queryCursors_.remove(idText);
+    }
+    outlineEntries_.setQueryResults(
+        queryEntryId, batch.hasQueryIntent, std::move(error), std::move(rows),
+        batch.continuationCursor.has_value(), append);
+}
+
+void
+NotebookController::refreshQueries()
+{
+    queryCursors_.clear();
+    for (int row = 0; row < outlineEntries_.rowCount(); ++row) {
+        const auto id = blockId(outlineEntries_.entryId(row));
+        if (!id) {
+            continue;
+        }
+        const auto result = session_.evaluateQuery(*id);
+        if (result) {
+            applyQueryBatch(*id, result.value(), false);
+        }
+    }
+}
+
+auto
+NotebookController::loadMoreQueryResults(const QString& queryEntryId) -> bool
+{
+    const auto id = blockId(queryEntryId);
+    const auto cursor = queryCursors_.find(queryEntryId);
+    if (!id || cursor == queryCursors_.end()) {
+        return false;
+    }
+    const auto result = session_.evaluateQuery(*id, cursor.value());
+    if (!result && result.error().code ==
+                       hieda::notebook::NotebookErrorCode::staleQueryCursor) {
+        refreshQueries();
+        return true;
+    }
+    if (!result) {
+        reject(result.error());
+        return false;
+    }
+    applyQueryBatch(*id, result.value(), true);
+    return true;
+}
+
+auto
+NotebookController::followQueryResult(const QString& blockIdText) -> bool
+{
+    const auto id = blockId(blockIdText);
+    if (!id) {
+        return false;
+    }
+    const auto destination = session_.locateBlock(*id);
+    if (!destination) {
+        reject(destination.error());
+        return false;
+    }
+    if (!navigateToOutlinePage(destination.value().structuralPage)) {
+        return false;
+    }
+    identifiedBlockId_ = *id;
+    emit stateChanged();
+    return true;
 }
 
 void

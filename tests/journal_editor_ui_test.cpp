@@ -68,6 +68,55 @@ collectQmlWarnings(QQmlEngine& engine, QStringList& messages)
 
 } // namespace
 
+TEST_CASE("saved Queries render navigable results and editable errors")
+{
+    QTemporaryDir temporaryDirectory;
+    REQUIRE(temporaryDirectory.isValid());
+    NotebookController controller;
+    controller.createNotebook(QUrl::fromLocalFile(
+        temporaryDirectory.filePath(QStringLiteral("query-ui.hieda"))));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("status::open")) == 0);
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral(
+                "{{query (where (property-equals status \"open\"))}}")) == 1);
+
+    QQmlEngine engine;
+    QStringList qmlWarnings;
+    collectQmlWarnings(engine, qmlWarnings);
+    engine.rootContext()->setContextProperty(
+        QStringLiteral("notebookController"), &controller);
+    QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(
+                                         HIEDA_SOURCE_DIR "/qml/Main.qml")));
+    std::unique_ptr<QObject> root(component.create());
+    INFO(component.errorString().toStdString());
+    REQUIRE(root != nullptr);
+    auto* outlineList =
+        root->findChild<QQuickItem*>(QStringLiteral("outlineList"));
+    REQUIRE(outlineList != nullptr);
+    QVariant entryValue;
+    REQUIRE(QMetaObject::invokeMethod(outlineList, "entryItemAt",
+                                      Q_RETURN_ARG(QVariant, entryValue),
+                                      Q_ARG(QVariant, 1)));
+    auto* queryEntry = qobject_cast<QQuickItem*>(entryValue.value<QObject*>());
+    REQUIRE(queryEntry != nullptr);
+    auto* results =
+        queryEntry->findChild<QQuickItem*>(QStringLiteral("queryResults-1"));
+    REQUIRE(results != nullptr);
+    CHECK(results->isVisible());
+    CHECK(results->property("count").toInt() == 1);
+    auto* error =
+        queryEntry->findChild<QQuickItem*>(QStringLiteral("queryError-1"));
+    REQUIRE(error != nullptr);
+    CHECK_FALSE(error->isVisible());
+
+    const auto queryId = controller.outlineEntryId(1);
+    REQUIRE(controller.updateOutlineEntry(
+        queryId, QStringLiteral("{{query (where (type unknown))}}")));
+    REQUIRE(waitUntil([error]() -> bool { return error->isVisible(); }));
+    CHECK_FALSE(error->property("text").toString().isEmpty());
+    CHECK(results->property("count").toInt() == 0);
+    CHECK(qmlWarnings.isEmpty());
+}
+
 TEST_CASE("the Page sidebar presents ordinary Pages and Journal navigation")
 {
     QAccessible::setActive(true);

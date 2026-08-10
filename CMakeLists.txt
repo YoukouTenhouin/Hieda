@@ -56,6 +56,8 @@ add_library(hieda_notebook
     src/notebook/authored_text_parser.hpp
     src/notebook/notebook_session.cpp
     src/notebook/platform_file.hpp
+    src/notebook/query_parser.cpp
+    src/notebook/query_parser.hpp
     ${HIEDA_PLATFORM_FILE_SOURCE}
 )
 add_library(Hieda::Notebook ALIAS hieda_notebook)
