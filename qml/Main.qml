@@ -1476,12 +1476,10 @@ ApplicationWindow {
                                                    !entryRoot.queryExpanded)
                                 }
 
-                                BusyIndicator {
+                                Label {
                                     objectName: "queryLoading-" + entryRoot.index
-                                    running: entryRoot.queryLoading
-                                    visible: running
-                                    implicitWidth: queryDisclosure.implicitHeight
-                                    implicitHeight: implicitWidth
+                                    visible: entryRoot.queryLoading
+                                    text: qsTr("Loading…")
                                     Accessible.name: qsTr("Loading Query results")
                                 }
 
@@ -1517,22 +1515,28 @@ ApplicationWindow {
 
                                     model: entryRoot.queryResults
 
-                                    delegate: Button {
-                                        id: resultButton
+                                    delegate: Label {
+                                        id: resultLabel
 
                                         required property var modelData
 
                                         Layout.fillWidth: true
-                                        flat: true
                                         text: modelData.presentation
-                                        contentItem: Label {
-                                            text: resultButton.text
-                                            textFormat: Text.StyledText
-                                            wrapMode: Text.Wrap
-                                            color: resultButton.palette.buttonText
-                                        }
+                                        textFormat: Text.StyledText
+                                        wrapMode: Text.Wrap
+                                        color: palette.text
+                                        activeFocusOnTab: true
+                                        Accessible.role: Accessible.Button
+                                        Accessible.name: text
                                         Accessible.description: qsTr("Query result in %1").arg(modelData.context)
-                                        onClicked: notebookController.followQueryResult(modelData.blockId)
+                                        Accessible.onPressAction: notebookController.followQueryResult(modelData.blockId)
+                                        Keys.onReturnPressed: notebookController.followQueryResult(modelData.blockId)
+                                        Keys.onEnterPressed: notebookController.followQueryResult(modelData.blockId)
+                                        Keys.onSpacePressed: notebookController.followQueryResult(modelData.blockId)
+
+                                        TapHandler {
+                                            onTapped: notebookController.followQueryResult(resultLabel.modelData.blockId)
+                                        }
                                     }
                                 }
 
