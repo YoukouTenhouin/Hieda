@@ -5,12 +5,15 @@
 
 #include <QAbstractListModel>
 #include <QDate>
+#include <QFutureWatcher>
 #include <QHash>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
 #include <QUrl>
+#include <QVariantList>
 #include <QVariantMap>
 
 struct OutlineEntry {
@@ -22,6 +25,12 @@ struct OutlineEntry {
     QString linkedReferencePresentation;
     qsizetype linkedReferenceOccurrenceCount{0};
     bool linkedReferenceHasMoreOccurrences{false};
+    bool queryHasIntent{false};
+    QString queryError;
+    QVariantList queryResults;
+    bool queryHasMore{false};
+    bool queryExpanded{true};
+    bool queryLoading{false};
 };
 
 class OutlineEntryModel final : public QAbstractListModel {
@@ -44,6 +53,12 @@ class OutlineEntryModel final : public QAbstractListModel {
         LinkedReferencePresentationRole,
         LinkedReferenceOccurrenceCountRole,
         LinkedReferenceHasMoreOccurrencesRole,
+        QueryHasIntentRole,
+        QueryErrorRole,
+        QueryResultsRole,
+        QueryHasMoreRole,
+        QueryExpandedRole,
+        QueryLoadingRole,
     };
 
     explicit OutlineEntryModel(QObject* parent = nullptr);
@@ -52,7 +67,8 @@ class OutlineEntryModel final : public QAbstractListModel {
     [[nodiscard]] auto data(const QModelIndex& index, int role) const
         -> QVariant override;
     [[nodiscard]] auto roleNames() const -> QHash<int, QByteArray> override;
-    void setEntries(std::vector<OutlineEntry> entries);
+    void setEntries(std::vector<OutlineEntry> entries,
+                    const QHash<QString, bool>& queryExpansion = {});
     void appendEntries(std::vector<OutlineEntry> entries);
     void insertEntry(int row, OutlineEntry entry);
     void updateEntry(const OutlineEntry& entry);
@@ -60,6 +76,12 @@ class OutlineEntryModel final : public QAbstractListModel {
     appendLinkedReferencePresentation(const hieda::notebook::BlockId& entryId,
                                       const QString& presentation,
                                       bool hasMore);
+    void setQueryResults(const hieda::notebook::BlockId& entryId,
+                         bool hasIntent, QString error, QVariantList results,
+                         bool hasMore, bool append);
+    void setQueryExpanded(const hieda::notebook::BlockId& entryId,
+                          bool expanded);
+    void setQueryLoading(const hieda::notebook::BlockId& entryId, bool loading);
     [[nodiscard]] auto entryId(int row) const -> QString;
     [[nodiscard]] auto entryText(int row) const -> QString;
     [[nodiscard]] auto entryParentId(int row) const -> QString;
@@ -188,6 +210,7 @@ class NotebookController final : public QObject {
 
   public:
     explicit NotebookController(QObject* parent = nullptr);
+    ~NotebookController() override;
 
     [[nodiscard]] auto hasOpenNotebook() const -> bool;
     [[nodiscard]] auto notebookPath() const -> QString;
@@ -264,6 +287,11 @@ class NotebookController final : public QObject {
     Q_INVOKABLE bool
     followBlockLinkedReferenceSource(const QString& sourceEntryId);
     Q_INVOKABLE bool followPagePreviewSource(const QString& sourceEntryId);
+    Q_INVOKABLE bool loadMoreQueryResults(const QString& queryEntryId);
+    Q_INVOKABLE void setQueryActive(const QString& queryEntryId, bool active);
+    Q_INVOKABLE void setQueryExpanded(const QString& queryEntryId,
+                                      bool expanded);
+    Q_INVOKABLE bool followQueryResult(const QString& blockId);
     Q_INVOKABLE bool loadMorePagePreviewUnresolvedPageLinkSources();
     Q_INVOKABLE bool loadMorePagePreviewUnresolvedPageLinkOccurrences(
         const QString& sourceEntryId);
@@ -336,6 +364,18 @@ class NotebookController final : public QObject {
         QHash<QString, QString> contexts;
         QHash<QString, std::string> occurrenceCursors;
     };
+    struct QueryTaskRequest {
+        hieda::notebook::BlockId entryId;
+        QString entryIdText;
+        std::optional<std::string> cursor;
+        bool append{false};
+        quint64 generation{0};
+    };
+    struct QueryTaskResult {
+        QueryTaskRequest request;
+        std::optional<hieda::notebook::QueryResultsBatch> batch;
+        std::optional<hieda::notebook::NotebookError> error;
+    };
 
     void accept(const hieda::notebook::NotebookInfo& info);
     void reject(const hieda::notebook::NotebookError& error);
@@ -350,6 +390,13 @@ class NotebookController final : public QObject {
     void refreshPages();
     void refreshLinkedReferences();
     void refreshBlockLinkedReferences();
+    void refreshQueries();
+    void scheduleQuery(QueryTaskRequest request);
+    void startNextQuery();
+    void finishCloseNotebook();
+    void applyQueryBatch(const hieda::notebook::BlockId& queryEntryId,
+                         const hieda::notebook::QueryResultsBatch& batch,
+                         bool append);
     template <typename Batch>
     void appendIncomingSourcesBatch(const Batch& batch,
                                     IncomingSourcesViewState& view,
@@ -385,6 +432,12 @@ class NotebookController final : public QObject {
     qsizetype pagePreviewUnresolvedPageLinkSourceTotal_{0};
     std::optional<std::string> pagePreviewUnresolvedPageLinkSourcesCursor_;
     QHash<QString, std::string> pagePreviewUnresolvedPageLinkOccurrenceCursors_;
+    QHash<QString, std::string> queryCursors_;
+    QHash<QString, bool> queryExpansion_;
+    QHash<QString, quint64> queryGenerations_;
+    QHash<QString, QueryTaskRequest> pendingQueries_;
+    QSet<QString> activeQueries_;
+    bool closeRequested_{false};
     QStringList pageChoices_;
     std::vector<hieda::notebook::BlockId> pageIds_;
     std::optional<hieda::notebook::BlockId> selectedBlockReferenceTargetId_;
@@ -396,5 +449,6 @@ class NotebookController final : public QObject {
     OutlineEntryModel linkedReferenceSources_;
     OutlineEntryModel blockLinkedReferenceSources_;
     PageHierarchyModel pageHierarchy_;
+    QFutureWatcher<QueryTaskResult> queryWatcher_;
     QTimer midnightTimer_;
 };
