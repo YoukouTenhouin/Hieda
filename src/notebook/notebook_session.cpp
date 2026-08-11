@@ -6618,21 +6618,31 @@ NotebookSession::evaluateQuery(
         return Result<QueryResultsBatch>::success(std::move(batch));
     }
 
-    const auto rootPage = [&](const BlockId& entryId) -> Result<BlockRecord> {
+    struct QueryLocation {
+        BlockRecord page;
+        std::optional<BlockId> directParentId;
+    };
+    const auto entryLocation =
+        [&](const BlockId& entryId) -> Result<QueryLocation> {
         auto current = entryId;
+        std::optional<BlockId> directParentId;
         while (true) {
             auto parent =
                 impl_->parentOf(transaction, databases.value(), current);
             if (!parent) {
-                return Result<BlockRecord>::failure(parent.error());
+                return Result<QueryLocation>::failure(parent.error());
+            }
+            if (!directParentId) {
+                directParentId = parent.value().parent;
             }
             auto block = readBlock(transaction, databases.value().blocks,
                                    parent.value().parent, path);
             if (!block) {
-                return block;
+                return Result<QueryLocation>::failure(block.error());
             }
             if (block.value().type == BlockType::page) {
-                return block;
+                return Result<QueryLocation>::success(
+                    {block.value(), *directParentId});
             }
             current = block.value().metadata.id;
         }
@@ -6670,13 +6680,14 @@ NotebookSession::evaluateQuery(
             abort();
             return Result<QueryResultsBatch>::failure(block.error());
         }
-        auto page = block.value().type == BlockType::page
-                        ? Result<BlockRecord>::success(block.value())
-                        : rootPage(identifier);
-        if (!page) {
+        auto location =
+            block.value().type == BlockType::page
+                ? Result<QueryLocation>::success({block.value(), std::nullopt})
+                : entryLocation(identifier);
+        if (!location) {
             mdb_cursor_close(cursor);
             abort();
-            return Result<QueryResultsBatch>::failure(page.error());
+            return Result<QueryResultsBatch>::failure(location.error());
         }
         if (block.value().type == BlockType::page &&
             block.value().pageKind == PageKind::journal) {
@@ -6698,14 +6709,7 @@ NotebookSession::evaluateQuery(
         std::optional<BlockId> parentId;
         std::vector<query_evaluation::PropertyValue> propertyValues;
         if (block.value().type == BlockType::entry) {
-            auto parent =
-                impl_->parentOf(transaction, databases.value(), identifier);
-            if (!parent) {
-                mdb_cursor_close(cursor);
-                abort();
-                return Result<QueryResultsBatch>::failure(parent.error());
-            }
-            parentId = parent.value().parent;
+            parentId = location.value().directParentId;
             auto properties =
                 readProperties(transaction, databases.value().propertiesByBlock,
                                identifier, path);
@@ -6723,14 +6727,15 @@ NotebookSession::evaluateQuery(
                                     ? QueryResultBlockType::page
                                     : QueryResultBlockType::entry;
         const auto outlineOrder =
-            page.value().pageKind == PageKind::journal
+            location.value().page.pageKind == PageKind::journal
                 ? journalOutlineOrder.at(identifier.toString())
                 : 0;
         candidates.push_back(
-            {{publicType, block.value().metadata, page.value().metadata.id,
-              page.value().pageKind.value_or(PageKind::named),
-              page.value().journalDate, page.value().pageName,
-              page.value().displayTitle, block.value().authoredText},
+            {{publicType, block.value().metadata,
+              location.value().page.metadata.id,
+              location.value().page.pageKind.value_or(PageKind::named),
+              location.value().page.journalDate, location.value().page.pageName,
+              location.value().page.displayTitle, block.value().authoredText},
              parentId,
              std::move(propertyValues),
              outlineOrder});

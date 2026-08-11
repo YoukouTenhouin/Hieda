@@ -6,6 +6,7 @@
 #include <map>
 #include <ranges>
 #include <tuple>
+#include <utility>
 
 namespace hieda::notebook::query_evaluation {
 namespace {
@@ -99,11 +100,10 @@ class Evaluator {
         if (predicate.kind == PredicateKind::authoredPageLink) {
             const auto* pageAnchor = pageNameAnchor(predicate);
             return pageAnchor != nullptr &&
-                   std::ranges::any_of(
-                       authored_text::pageLinks(candidate.row.authoredText),
-                       [&](const auto& link) -> bool {
-                           return link.pageName == pageAnchor->name;
-                       });
+                   std::ranges::any_of(pageLinkNames(candidate),
+                                       [&](const auto& name) -> bool {
+                                           return name == pageAnchor->name;
+                                       });
         }
         if (predicate.kind == PredicateKind::authoredBlockReference) {
             const auto* blockId = blockAnchor(predicate);
@@ -255,6 +255,46 @@ class Evaluator {
     }
 
     [[nodiscard]] auto
+    pageLinkNames(const Candidate& source) const
+        -> const std::vector<std::string>&
+    {
+        auto found = pageLinkNamesBySource_.find(source.row.metadata.id);
+        if (found != pageLinkNamesBySource_.end()) {
+            return found->second;
+        }
+        auto occurrences = authored_text::pageLinks(source.row.authoredText);
+        std::vector<std::string> names;
+        names.reserve(occurrences.size());
+        for (auto& occurrence : occurrences) {
+            names.push_back(std::move(occurrence.pageName));
+        }
+        return pageLinkNamesBySource_
+            .emplace(source.row.metadata.id, std::move(names))
+            .first->second;
+    }
+
+    [[nodiscard]] auto
+    blockReferenceTargets(const Candidate& source) const
+        -> const std::vector<BlockId>&
+    {
+        auto found =
+            blockReferenceTargetsBySource_.find(source.row.metadata.id);
+        if (found != blockReferenceTargetsBySource_.end()) {
+            return found->second;
+        }
+        auto occurrences =
+            authored_text::blockReferences(source.row.authoredText);
+        std::vector<BlockId> targets;
+        targets.reserve(occurrences.size());
+        for (const auto& occurrence : occurrences) {
+            targets.push_back(occurrence.targetId);
+        }
+        return blockReferenceTargetsBySource_
+            .emplace(source.row.metadata.id, std::move(targets))
+            .first->second;
+    }
+
+    [[nodiscard]] auto
     entryPageLinksTo(const Candidate& source, const BlockId& targetId) const
         -> bool
     {
@@ -262,24 +302,22 @@ class Evaluator {
             return false;
         }
         return std::ranges::any_of(
-            authored_text::pageLinks(source.row.authoredText),
-            [&](const auto& link) -> bool {
-                const auto target = pagesByName_.find(link.pageName);
+            pageLinkNames(source), [&](const auto& pageName) -> bool {
+                const auto target = pagesByName_.find(pageName);
                 return target != pagesByName_.end() &&
                        target->second->row.metadata.id == targetId;
             });
     }
 
-    [[nodiscard]] static auto
-    entryBlockReferences(const Candidate& source, const BlockId& targetId)
+    [[nodiscard]] auto
+    entryBlockReferences(const Candidate& source, const BlockId& targetId) const
         -> bool
     {
         return isEntry(source) &&
-               std::ranges::any_of(
-                   authored_text::blockReferences(source.row.authoredText),
-                   [&](const auto& reference) -> bool {
-                       return reference.targetId == targetId;
-                   });
+               std::ranges::any_of(blockReferenceTargets(source),
+                                   [&](const auto& referencedId) -> bool {
+                                       return referencedId == targetId;
+                                   });
     }
 
     [[nodiscard]] auto
@@ -309,6 +347,10 @@ class Evaluator {
     const std::vector<Candidate>& candidates_;
     std::map<BlockId, const Candidate*, BlockIdLess> byId_;
     std::map<std::string, const Candidate*> pagesByName_;
+    mutable std::map<BlockId, std::vector<std::string>, BlockIdLess>
+        pageLinkNamesBySource_;
+    mutable std::map<BlockId, std::vector<BlockId>, BlockIdLess>
+        blockReferenceTargetsBySource_;
 };
 
 } // namespace
