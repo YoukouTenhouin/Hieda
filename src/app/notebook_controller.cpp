@@ -898,6 +898,7 @@ NotebookController::NotebookController(QObject* parent)
     connect(&queryWatcher_, &QFutureWatcher<QueryTaskResult>::finished, this,
             [this]() -> void {
                 auto result = queryWatcher_.result();
+                queryTaskRunning_ = false;
                 if (closeRequested_) {
                     finishCloseNotebook();
                     return;
@@ -1152,7 +1153,7 @@ NotebookController::closeNotebook()
          iterator != queryGenerations_.end(); ++iterator) {
         ++iterator.value();
     }
-    if (queryWatcher_.isRunning()) {
+    if (queryTaskRunning_) {
         closeRequested_ = true;
         return;
     }
@@ -2701,12 +2702,13 @@ NotebookController::scheduleQuery(QueryTaskRequest request)
 void
 NotebookController::startNextQuery()
 {
-    if (queryWatcher_.isRunning() || pendingQueries_.isEmpty()) {
+    if (queryTaskRunning_ || pendingQueries_.isEmpty()) {
         return;
     }
     auto iterator = pendingQueries_.begin();
     auto request = std::move(iterator.value());
     pendingQueries_.erase(iterator);
+    queryTaskRunning_ = true;
     queryWatcher_.setFuture(
         QtConcurrent::run([this, request]() -> QueryTaskResult {
             QueryTaskResult taskResult{request};
