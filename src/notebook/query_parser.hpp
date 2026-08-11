@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace hieda::notebook::query_language {
@@ -32,7 +33,21 @@ enum class PredicateKind : std::uint8_t {
     linkedBy,
     blockReferencedBy,
 };
-enum class AnchorKind : std::uint8_t { self, pageName, blockId };
+struct SelfAnchor {
+    auto operator==(const SelfAnchor&) const -> bool = default;
+};
+struct PageNameAnchor {
+    std::string name;
+
+    auto operator==(const PageNameAnchor&) const -> bool = default;
+};
+struct QueryAnchor {
+    std::variant<SelfAnchor, PageNameAnchor, BlockId> target;
+    std::size_t sourceByteOffset{0};
+    std::size_t sourceByteLength{0};
+
+    auto operator==(const QueryAnchor&) const -> bool = default;
+};
 enum class JournalDateComparison : std::uint8_t {
     equal,
     less,
@@ -49,11 +64,7 @@ struct Predicate {
     JournalDate journalDate;
     std::string value;
     std::string propertyKey;
-    AnchorKind anchorKind{AnchorKind::self};
-    std::string anchorPageName;
-    BlockId anchorBlockId;
-    std::size_t anchorSourceByteOffset{0};
-    std::size_t anchorSourceByteLength{0};
+    std::optional<QueryAnchor> anchor;
     std::vector<Predicate> operands;
 };
 

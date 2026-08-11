@@ -277,7 +277,8 @@ class Parser {
         } else if (name == "in-page-subtree") {
             predicate.kind = PredicateKind::inPageSubtree;
             if (!parseAnchorAtom(separatedAtom(), predicate, false) ||
-                predicate.anchorKind != AnchorKind::pageName) {
+                !std::holds_alternative<PageNameAnchor>(
+                    predicate.anchor->target)) {
                 return fail("in-page-subtree requires a Page-name anchor.",
                             "[[exact/page_name]]");
             }
@@ -295,7 +296,7 @@ class Parser {
         if (!parseAnchorAtom(anchor, predicate, false)) {
             return false;
         }
-        if (predicate.anchorKind == AnchorKind::blockId) {
+        if (std::holds_alternative<BlockId>(predicate.anchor->target)) {
             predicate.kind = PredicateKind::authoredBlockReference;
         } else {
             predicate.kind = PredicateKind::authoredPageLink;
@@ -307,26 +308,25 @@ class Parser {
     parseAnchorAtom(std::string_view anchor, Predicate& predicate,
                     bool allowSelf) -> bool
     {
-        predicate.anchorSourceByteOffset =
-            position_ - static_cast<std::size_t>(anchor.size());
-        predicate.anchorSourceByteLength = anchor.size();
+        predicate.anchor = QueryAnchor{
+            SelfAnchor{}, position_ - static_cast<std::size_t>(anchor.size()),
+            anchor.size()};
         if (anchor == "self") {
             if (!allowSelf) {
                 return fail("self is not valid in this Query position.",
                             "Page or Block anchor");
             }
-            predicate.anchorKind = AnchorKind::self;
             return true;
         }
         constexpr std::string_view blockPrefix = "[[block:";
         if (anchor.starts_with(blockPrefix) && anchor.ends_with("]]")) {
-            predicate.anchorKind = AnchorKind::blockId;
-            if (!parseUuid(anchor.substr(blockPrefix.size(), 36),
-                           predicate.anchorBlockId) ||
+            BlockId blockId;
+            if (!parseUuid(anchor.substr(blockPrefix.size(), 36), blockId) ||
                 anchor.size() != blockPrefix.size() + 38) {
                 return fail("The Block Reference Query Anchor is invalid.",
                             "[[block:UUID]]");
             }
+            predicate.anchor->target = blockId;
             return true;
         }
         if (anchor.starts_with("[[") && anchor.ends_with("]]")) {
@@ -335,8 +335,7 @@ class Parser {
                 return fail("The Page Query Anchor is invalid.",
                             "[[exact/page_name]]");
             }
-            predicate.anchorKind = AnchorKind::pageName;
-            predicate.anchorPageName = std::string(pageName);
+            predicate.anchor->target = PageNameAnchor{std::string(pageName)};
             return true;
         }
         return fail("The Query Anchor is invalid.", "Page or Block anchor");
@@ -545,10 +544,13 @@ rewritePageAnchors(std::string_view source, PageAnchorRename rename)
     }
     std::vector<std::pair<std::size_t, std::size_t>> replacements;
     const auto collect = [&](auto&& self, const Predicate& predicate) -> void {
-        if (predicate.anchorKind == AnchorKind::pageName &&
-            predicate.anchorPageName == rename.oldName) {
-            replacements.emplace_back(predicate.anchorSourceByteOffset,
-                                      predicate.anchorSourceByteLength);
+        const auto* pageAnchor =
+            predicate.anchor
+                ? std::get_if<PageNameAnchor>(&predicate.anchor->target)
+                : nullptr;
+        if (pageAnchor != nullptr && pageAnchor->name == rename.oldName) {
+            replacements.emplace_back(predicate.anchor->sourceByteOffset,
+                                      predicate.anchor->sourceByteLength);
         }
         for (const auto& operand : predicate.operands) {
             self(self, operand);
