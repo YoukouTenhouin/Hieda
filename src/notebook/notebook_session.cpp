@@ -3796,6 +3796,54 @@ class NotebookSession::Impl {
                 return fail(errorFromLmdb(path, result,
                                           "scan Page Link rewrite sources"));
             }
+            result = mdb_cursor_open(transaction,
+                                     databases.value().blocksByType, &cursor);
+            if (result != MDB_SUCCESS) {
+                return fail(errorFromLmdb(path, result,
+                                          "open Query Anchor rewrite scan"));
+            }
+            auto entryPrefix = typeIndexKey(BlockType::entry, BlockId{});
+            MDB_val entryKey{entryPrefix.size(), entryPrefix.data()};
+            MDB_val entryValue{};
+            result =
+                mdb_cursor_get(cursor, &entryKey, &entryValue, MDB_SET_RANGE);
+            while (result == MDB_SUCCESS &&
+                   entryKey.mv_size == entryPrefix.size() &&
+                   static_cast<const std::uint8_t*>(entryKey.mv_data)[0] ==
+                       static_cast<std::uint8_t>(BlockType::entry)) {
+                BlockId sourceId;
+                std::memcpy(sourceId.bytes.data(),
+                            static_cast<const std::uint8_t*>(entryKey.mv_data) +
+                                1,
+                            sourceId.bytes.size());
+                auto source = readBlock(transaction, databases.value().blocks,
+                                        sourceId, path);
+                if (!source) {
+                    mdb_cursor_close(cursor);
+                    return fail(source.error());
+                }
+                auto rewritten = query_language::rewritePageAnchors(
+                    source.value().authoredText, oldName, name);
+                if (rewritten != source.value().authoredText) {
+                    if (!validAuthoredText(rewritten)) {
+                        mdb_cursor_close(cursor);
+                        return fail(makeError(
+                            NotebookErrorCode::invalidAuthoredText, path,
+                            "Query Anchor rewrite exceeds Authored Text "
+                            "limits"));
+                    }
+                    textChanges.push_back({sourceId,
+                                           source.value().authoredText,
+                                           std::move(rewritten)});
+                }
+                result =
+                    mdb_cursor_get(cursor, &entryKey, &entryValue, MDB_NEXT);
+            }
+            mdb_cursor_close(cursor);
+            if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+                return fail(errorFromLmdb(path, result,
+                                          "scan Query Anchor rewrite sources"));
+            }
             for (const auto& change : textChanges) {
                 auto source = readBlock(transaction, databases.value().blocks,
                                         change.sourceId, path);
@@ -6661,6 +6709,130 @@ NotebookSession::evaluateQuery(
                 return Result<QueryResultsBatch>::failure(properties.error());
             }
         }
+        std::optional<NotebookError> predicateError;
+        const auto readCurrentBlock =
+            [&](const BlockId& blockId) -> std::optional<BlockRecord> {
+            auto anchored =
+                readBlock(transaction, databases.value().blocks, blockId, path);
+            if (anchored) {
+                return std::move(anchored).value();
+            }
+            if (anchored.error().code != NotebookErrorCode::blockNotFound) {
+                predicateError = anchored.error();
+            }
+            return std::nullopt;
+        };
+        const auto resolveAnchor =
+            [&](const query_language::Predicate& predicate)
+            -> std::optional<BlockRecord> {
+            using query_language::AnchorKind;
+            if (predicate.anchorKind == AnchorKind::self) {
+                return queryEntry.value();
+            }
+            if (predicate.anchorKind == AnchorKind::blockId) {
+                return readCurrentBlock(predicate.anchorBlockId);
+            }
+            MDB_val pageNameKey{
+                predicate.anchorPageName.size(),
+                const_cast<char*>(predicate.anchorPageName.data())};
+            MDB_val pageIdValue{};
+            const auto lookup =
+                mdb_get(transaction, databases.value().pagesByName,
+                        &pageNameKey, &pageIdValue);
+            if (lookup == MDB_NOTFOUND) {
+                return std::nullopt;
+            }
+            if (lookup != MDB_SUCCESS ||
+                pageIdValue.mv_size != BlockId{}.bytes.size()) {
+                predicateError =
+                    lookup == MDB_SUCCESS
+                        ? makeError(NotebookErrorCode::invalidNotebook, path,
+                                    "Page name index contains an invalid "
+                                    "identity")
+                        : errorFromLmdb(path, lookup,
+                                        "resolve Query Page anchor");
+                return std::nullopt;
+            }
+            BlockId pageId;
+            std::memcpy(pageId.bytes.data(), pageIdValue.mv_data,
+                        pageId.bytes.size());
+            return readCurrentBlock(pageId);
+        };
+        const auto immediateParent =
+            [&](const BlockRecord& child) -> std::optional<BlockId> {
+            if (child.type == BlockType::page) {
+                return std::nullopt;
+            }
+            auto parent = impl_->parentOf(transaction, databases.value(),
+                                          child.metadata.id);
+            if (!parent) {
+                predicateError = parent.error();
+                return std::nullopt;
+            }
+            return parent.value().parent;
+        };
+        const auto hasAncestor = [&](const BlockRecord& descendant,
+                                     const BlockId& ancestorId) -> bool {
+            auto current = descendant;
+            while (current.type == BlockType::entry) {
+                const auto parentId = immediateParent(current);
+                if (!parentId) {
+                    return false;
+                }
+                if (*parentId == ancestorId) {
+                    return true;
+                }
+                const auto parent = readCurrentBlock(*parentId);
+                if (!parent) {
+                    return false;
+                }
+                current = *parent;
+            }
+            return false;
+        };
+        const auto entryPageLinksTo = [&](const BlockRecord& source,
+                                          const BlockId& targetId) -> bool {
+            if (source.type != BlockType::entry) {
+                return false;
+            }
+            for (const auto& link :
+                 authored_text::pageLinks(source.authoredText)) {
+                MDB_val nameKey{link.pageName.size(),
+                                const_cast<char*>(link.pageName.data())};
+                MDB_val targetValue{};
+                const auto lookup =
+                    mdb_get(transaction, databases.value().pagesByName,
+                            &nameKey, &targetValue);
+                if (lookup == MDB_SUCCESS &&
+                    targetValue.mv_size == targetId.bytes.size() &&
+                    std::memcmp(targetValue.mv_data, targetId.bytes.data(),
+                                targetId.bytes.size()) == 0) {
+                    return true;
+                }
+                if (lookup != MDB_SUCCESS && lookup != MDB_NOTFOUND) {
+                    predicateError = errorFromLmdb(
+                        path, lookup, "resolve Query Page Link predicate");
+                    return false;
+                }
+                if (lookup == MDB_SUCCESS &&
+                    targetValue.mv_size != targetId.bytes.size()) {
+                    predicateError = makeError(
+                        NotebookErrorCode::invalidNotebook, path,
+                        "Page name index contains an invalid identity");
+                    return false;
+                }
+            }
+            return false;
+        };
+        const auto entryBlockReferences = [&](const BlockRecord& source,
+                                              const BlockId& targetId) -> bool {
+            return source.type == BlockType::entry &&
+                   std::ranges::any_of(
+                       authored_text::blockReferences(source.authoredText),
+                       [&](const auto& reference) -> bool {
+                           return reference.targetId == targetId;
+                       });
+        };
         const auto matchesPredicate =
             [&](auto&& self,
                 const query_language::Predicate& predicate) -> bool {
@@ -6717,8 +6889,76 @@ NotebookSession::evaluateQuery(
                        block.value().authoredText.find(predicate.value) !=
                            std::string::npos;
             }
+            if (predicate.kind == PredicateKind::inPageSubtree) {
+                if (page.value().pageKind != PageKind::named) {
+                    return false;
+                }
+                const auto& candidateName = page.value().pageName;
+                return candidateName == predicate.anchorPageName ||
+                       (candidateName.starts_with(predicate.anchorPageName) &&
+                        candidateName.size() >
+                            predicate.anchorPageName.size() &&
+                        candidateName[predicate.anchorPageName.size()] == '/');
+            }
+            if (predicate.kind == PredicateKind::childOf ||
+                predicate.kind == PredicateKind::descendantOf ||
+                predicate.kind == PredicateKind::parentOf ||
+                predicate.kind == PredicateKind::ancestorOf) {
+                const auto anchored = resolveAnchor(predicate);
+                if (!anchored) {
+                    return false;
+                }
+                if (predicate.kind == PredicateKind::childOf) {
+                    const auto parentId = immediateParent(block.value());
+                    return parentId && *parentId == anchored->metadata.id;
+                }
+                if (predicate.kind == PredicateKind::descendantOf) {
+                    return hasAncestor(block.value(), anchored->metadata.id);
+                }
+                if (predicate.kind == PredicateKind::parentOf) {
+                    const auto parentId = immediateParent(*anchored);
+                    return parentId && *parentId == identifier;
+                }
+                return hasAncestor(*anchored, identifier);
+            }
+            if (predicate.kind == PredicateKind::pageLinksTo ||
+                predicate.kind == PredicateKind::blockReferences ||
+                predicate.kind == PredicateKind::linkedBy ||
+                predicate.kind == PredicateKind::blockReferencedBy) {
+                const auto anchored = resolveAnchor(predicate);
+                if (!anchored) {
+                    return false;
+                }
+                if (predicate.kind == PredicateKind::pageLinksTo) {
+                    return anchored->type == BlockType::page &&
+                           entryPageLinksTo(block.value(),
+                                            anchored->metadata.id);
+                }
+                if (predicate.kind == PredicateKind::blockReferences) {
+                    return entryBlockReferences(block.value(),
+                                                anchored->metadata.id);
+                }
+                if (predicate.kind == PredicateKind::linkedBy) {
+                    return entryPageLinksTo(*anchored, identifier);
+                }
+                return entryBlockReferences(*anchored, identifier);
+            }
             if (block.value().type != BlockType::entry) {
                 return false;
+            }
+            if (predicate.kind == PredicateKind::authoredPageLink) {
+                return std::ranges::any_of(
+                    authored_text::pageLinks(block.value().authoredText),
+                    [&](const auto& link) -> bool {
+                        return link.pageName == predicate.anchorPageName;
+                    });
+            }
+            if (predicate.kind == PredicateKind::authoredBlockReference) {
+                return std::ranges::any_of(
+                    authored_text::blockReferences(block.value().authoredText),
+                    [&](const auto& reference) -> bool {
+                        return reference.targetId == predicate.anchorBlockId;
+                    });
             }
             if (predicate.kind == PredicateKind::propertyExists) {
                 return std::ranges::any_of(
@@ -6737,6 +6977,12 @@ NotebookSession::evaluateQuery(
         };
         const auto matches =
             matchesPredicate(matchesPredicate, parsed.query->where);
+        if (predicateError) {
+            mdb_cursor_close(cursor);
+            abort();
+            return Result<QueryResultsBatch>::failure(
+                std::move(*predicateError));
+        }
         if (matches) {
             batch.rows.push_back(
                 {publicType, block.value().metadata, page.value().metadata.id,

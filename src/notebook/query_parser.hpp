@@ -20,7 +20,19 @@ enum class PredicateKind : std::uint8_t {
     conjunction,
     disjunction,
     negation,
+    authoredPageLink,
+    authoredBlockReference,
+    childOf,
+    descendantOf,
+    parentOf,
+    ancestorOf,
+    inPageSubtree,
+    pageLinksTo,
+    blockReferences,
+    linkedBy,
+    blockReferencedBy,
 };
+enum class AnchorKind : std::uint8_t { self, pageName, blockId };
 enum class JournalDateComparison : std::uint8_t {
     equal,
     less,
@@ -37,6 +49,11 @@ struct Predicate {
     JournalDate journalDate;
     std::string value;
     std::string propertyKey;
+    AnchorKind anchorKind{AnchorKind::self};
+    std::string anchorPageName;
+    BlockId anchorBlockId;
+    std::size_t anchorSourceByteOffset{0};
+    std::size_t anchorSourceByteLength{0};
     std::vector<Predicate> operands;
 };
 
@@ -61,5 +78,8 @@ struct ParseResult {
 
 [[nodiscard]] auto hasQueryIntent(std::string_view source) -> bool;
 [[nodiscard]] auto parse(std::string_view source) -> ParseResult;
+[[nodiscard]] auto rewritePageAnchors(std::string_view source,
+                                      std::string_view oldName,
+                                      std::string_view newName) -> std::string;
 
 } // namespace hieda::notebook::query_language

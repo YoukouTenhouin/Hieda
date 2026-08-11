@@ -3253,6 +3253,13 @@ TEST_CASE("invalid Query intent is editable diagnosed and never partially run")
         "{{query (where (all)) (limit 18446744073709551616)}}",
         "{{query (where (all)) (limit 1) (order-by update-time asc)}}",
         "{{query (where (all)) extra)}}",
+        "{{query (where self)}}",
+        "{{query (where (child-of [[Bad Name]]))}}",
+        "{{query (where (page-links-to))}}",
+        "{{query (where (in-page-subtree self))}}",
+        "{{query (where (in-page-subtree "
+        "[[block:550e8400-e29b-41d4-a716-446655440000]]))}}",
+        "{{query (where [[block:not-a-uuid]])}}",
     };
     for (const auto& source : invalidSources) {
         REQUIRE(session.updateEntry(query.metadata.id, source));
@@ -3347,4 +3354,275 @@ TEST_CASE("Query results reflect committed edits moves undo and redo")
         return row.metadata.id == candidate.metadata.id &&
                row.contextPageId == destination.metadata.id;
     }));
+}
+TEST_CASE("Containment Query predicates distinguish direct and transitive "
+          "relationships")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    const auto notebookPath =
+        temporaryDirectory.path() / "query-containment.hieda";
+    REQUIRE(session.create(notebookPath));
+    const auto page = session.createPage("outline", "Outline").value();
+    auto outline =
+        session.insertEntry(page.metadata.id, std::nullopt, "parent").value();
+    const auto parent = outline.entries.back();
+    outline = session.insertEntry(page.metadata.id, parent.metadata.id, "child")
+                  .value();
+    const auto child = outline.entries.back();
+    REQUIRE(session.moveEntry(child.metadata.id,
+                              hieda::notebook::EntryMove::indent, "child"));
+    outline =
+        session.insertEntry(page.metadata.id, child.metadata.id, "grandchild")
+            .value();
+    const auto grandchild = outline.entries.back();
+    REQUIRE(session.moveEntry(grandchild.metadata.id,
+                              hieda::notebook::EntryMove::indent,
+                              "grandchild"));
+    const auto queryPage = session.createPage("queries", "Queries").value();
+    const auto query =
+        session
+            .insertEntry(queryPage.metadata.id, std::nullopt,
+                         "{{query (where (child-of [[block:" +
+                             parent.metadata.id.toString() + "]])))}}")
+            .value()
+            .entries.back();
+
+    const auto matches = [&](std::string predicate) {
+        REQUIRE(session.updateEntry(query.metadata.id,
+                                    "{{query (where " + predicate + ")}}"));
+        const auto evaluated = session.evaluateQuery(query.metadata.id);
+        REQUIRE(evaluated);
+        REQUIRE_FALSE(evaluated.value().error);
+        std::vector<hieda::notebook::BlockId> identifiers;
+        for (const auto& row : evaluated.value().rows) {
+            identifiers.push_back(row.metadata.id);
+        }
+        std::ranges::sort(identifiers, {}, [](const auto& identifier) {
+            return identifier.toString();
+        });
+        return identifiers;
+    };
+    const auto sorted = [](std::vector<hieda::notebook::BlockId> identifiers) {
+        std::ranges::sort(identifiers, {}, [](const auto& identifier) {
+            return identifier.toString();
+        });
+        return identifiers;
+    };
+    const auto anchor = [](hieda::notebook::BlockId id) {
+        return "[[block:" + id.toString() + "]]";
+    };
+
+    CHECK(matches("(child-of " + anchor(parent.metadata.id) + ")") ==
+          sorted({child.metadata.id}));
+    CHECK(matches("(descendant-of " + anchor(parent.metadata.id) + ")") ==
+          sorted({child.metadata.id, grandchild.metadata.id}));
+    CHECK(matches("(parent-of " + anchor(child.metadata.id) + ")") ==
+          sorted({parent.metadata.id}));
+    CHECK(matches("(ancestor-of " + anchor(grandchild.metadata.id) + ")") ==
+          sorted({page.metadata.id, parent.metadata.id, child.metadata.id}));
+    CHECK(matches("(parent-of self)") == sorted({queryPage.metadata.id}));
+
+    REQUIRE(session.moveEntry(grandchild.metadata.id,
+                              hieda::notebook::EntryMove::outdent,
+                              "grandchild"));
+    CHECK(matches("(child-of " + anchor(child.metadata.id) + ")").empty());
+
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    CHECK(matches("(ancestor-of " + anchor(grandchild.metadata.id) + ")") ==
+          sorted({page.metadata.id, parent.metadata.id}));
+}
+
+TEST_CASE("in-page-subtree Queries use inclusive slash-bounded Page Hierarchy")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() /
+                           "query-page-hierarchy.hieda"));
+    const auto projects = session.createPage("projects", "Projects").value();
+    const auto hieda = session.createPage("projects/hieda", "Hieda").value();
+    const auto specification =
+        session.createPage("projects/hieda/spec", "Spec").value();
+    const auto similar =
+        session.createPage("projectiles", "Projectiles").value();
+    const auto entry =
+        session.insertEntry(hieda.metadata.id, std::nullopt, "work")
+            .value()
+            .entries.back();
+    const auto queryPage = session.createPage("queries", "Queries").value();
+    const auto query =
+        session
+            .insertEntry(queryPage.metadata.id, std::nullopt,
+                         "{{query (where (in-page-subtree [[projects]]))}}")
+            .value()
+            .entries.back();
+
+    const auto evaluated = session.evaluateQuery(query.metadata.id);
+    REQUIRE(evaluated);
+    REQUIRE_FALSE(evaluated.value().error);
+    const auto contains = [&](hieda::notebook::BlockId identifier) {
+        return std::ranges::any_of(
+            evaluated.value().rows,
+            [&](const auto& row) { return row.metadata.id == identifier; });
+    };
+    CHECK(contains(projects.metadata.id));
+    CHECK(contains(hieda.metadata.id));
+    CHECK(contains(specification.metadata.id));
+    CHECK(contains(entry.metadata.id));
+    CHECK_FALSE(contains(similar.metadata.id));
+    CHECK(evaluated.value().rows.size() == 4);
+
+    const auto future =
+        session.createPage("future/child", "Future Child").value();
+    REQUIRE(session.updateEntry(
+        query.metadata.id, "{{query (where (in-page-subtree [[future]]))}}"));
+    const auto previewRoot = session.evaluateQuery(query.metadata.id);
+    REQUIRE(previewRoot);
+    REQUIRE(previewRoot.value().rows.size() == 1);
+    CHECK(previewRoot.value().rows.front().metadata.id == future.metadata.id);
+}
+
+TEST_CASE("Semantic Reference Queries distinguish literal outgoing and "
+          "incoming relationships")
+{
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath =
+        temporaryDirectory.path() / "query-semantic-references.hieda";
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(notebookPath));
+    const auto targetPage = session.createPage("target", "Target").value();
+    const auto contentPage = session.createPage("content", "Content").value();
+    const auto targetEntry =
+        session
+            .insertEntry(contentPage.metadata.id, std::nullopt, "target entry")
+            .value()
+            .entries.back();
+    const auto sourceText =
+        "[[target]] [[block:" + targetEntry.metadata.id.toString() + "]]";
+    const auto source = session
+                            .insertEntry(contentPage.metadata.id,
+                                         targetEntry.metadata.id, sourceText)
+                            .value()
+                            .entries.back();
+    REQUIRE(session.updateEntry(
+        targetEntry.metadata.id,
+        "cycle [[block:" + source.metadata.id.toString() + "]]"));
+    const auto queryPage = session.createPage("queries", "Queries").value();
+    const auto query = session
+                           .insertEntry(queryPage.metadata.id, std::nullopt,
+                                        "{{query (where [[target]])}}")
+                           .value()
+                           .entries.back();
+
+    const auto matches = [&](std::string predicate) {
+        REQUIRE(session.updateEntry(query.metadata.id,
+                                    "{{query (where " + predicate + ")}}"));
+        const auto result = session.evaluateQuery(query.metadata.id);
+        REQUIRE(result);
+        REQUIRE_FALSE(result.value().error);
+        std::vector<hieda::notebook::BlockId> identifiers;
+        for (const auto& row : result.value().rows) {
+            identifiers.push_back(row.metadata.id);
+        }
+        return identifiers;
+    };
+    const auto anchor = [](hieda::notebook::BlockId identifier) {
+        return "[[block:" + identifier.toString() + "]]";
+    };
+
+    CHECK(matches("[[target]]") == std::vector{source.metadata.id});
+    CHECK(matches(anchor(targetEntry.metadata.id)) ==
+          std::vector{source.metadata.id});
+    CHECK(matches("(and (page-links-to [[target]]) (block-references " +
+                  anchor(targetEntry.metadata.id) + "))") ==
+          std::vector{source.metadata.id});
+    CHECK(matches("(page-links-to " + anchor(targetPage.metadata.id) + ")") ==
+          std::vector{source.metadata.id});
+    CHECK(matches("(linked-by " + anchor(source.metadata.id) + ")") ==
+          std::vector{targetPage.metadata.id});
+    CHECK(matches("(block-referenced-by " + anchor(source.metadata.id) + ")") ==
+          std::vector{targetEntry.metadata.id});
+    CHECK(matches("(block-referenced-by " + anchor(targetEntry.metadata.id) +
+                  ")") == std::vector{source.metadata.id});
+
+    CHECK(matches("(and (page-links-to [[target]]) (block-references " +
+                  anchor(targetEntry.metadata.id) + "))") ==
+          std::vector{source.metadata.id});
+    REQUIRE(session.updateEntry(source.metadata.id, "references removed"));
+    CHECK(session.evaluateQuery(query.metadata.id).value().rows.empty());
+    REQUIRE(session.updateEntry(source.metadata.id, sourceText));
+    const auto restoredReferences = session.evaluateQuery(query.metadata.id);
+    REQUIRE(restoredReferences);
+    REQUIRE(restoredReferences.value().rows.size() == 1);
+    CHECK(restoredReferences.value().rows.front().metadata.id ==
+          source.metadata.id);
+
+    REQUIRE(session.updateEntry(
+        query.metadata.id, "{{query (where (page-links-to [[target]]))}}"));
+    const auto queryUpdatedAt =
+        session.locateBlock(query.metadata.id).value().target.updatedAt;
+    REQUIRE(session.renamePage(targetPage.metadata.id, "renamed", "Renamed"));
+    const auto renamed = session.evaluateQuery(query.metadata.id);
+    REQUIRE(renamed);
+    REQUIRE_FALSE(renamed.value().error);
+    REQUIRE(renamed.value().rows.size() == 1);
+    CHECK(renamed.value().rows.front().metadata.id == source.metadata.id);
+    const auto queryAfterRename = session.locateBlock(query.metadata.id);
+    REQUIRE(queryAfterRename);
+    CHECK(queryAfterRename.value().target.updatedAt == queryUpdatedAt);
+    const auto queryOutline = session.outline(queryPage.metadata.id).value();
+    const auto savedQuery =
+        std::ranges::find(queryOutline.entries, query.metadata.id,
+                          [](const auto& entry) { return entry.metadata.id; });
+    REQUIRE(savedQuery != queryOutline.entries.end());
+    CHECK(savedQuery->authoredText ==
+          "{{query (where (page-links-to [[renamed]]))}}");
+
+    REQUIRE(session.deletePage(targetPage.metadata.id));
+    CHECK(session.evaluateQuery(query.metadata.id).value().rows.empty());
+    REQUIRE(session.undoEdit());
+    const auto restoredPageLink = session.evaluateQuery(query.metadata.id);
+    REQUIRE(restoredPageLink);
+    REQUIRE(restoredPageLink.value().rows.size() == 1);
+    CHECK(restoredPageLink.value().rows.front().metadata.id ==
+          source.metadata.id);
+
+    REQUIRE(session.deletePage(targetPage.metadata.id));
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where [[renamed]])}}"));
+    const auto unresolvedLiteral = session.evaluateQuery(query.metadata.id);
+    REQUIRE(unresolvedLiteral);
+    REQUIRE(unresolvedLiteral.value().rows.size() == 1);
+    CHECK(unresolvedLiteral.value().rows.front().metadata.id ==
+          source.metadata.id);
+    REQUIRE(session.undoEdit());
+    REQUIRE(session.undoEdit());
+
+    CHECK(matches("(block-references " + anchor(targetEntry.metadata.id) +
+                  ")") == std::vector{source.metadata.id});
+    REQUIRE(session.deleteEntry(targetEntry.metadata.id));
+    CHECK(session.evaluateQuery(query.metadata.id).value().rows.empty());
+    REQUIRE(session.undoEdit());
+    const auto restoredBlock = session.evaluateQuery(query.metadata.id);
+    REQUIRE(restoredBlock);
+    REQUIRE(restoredBlock.value().rows.size() == 1);
+    CHECK(restoredBlock.value().rows.front().metadata.id == source.metadata.id);
+
+    REQUIRE(session.deleteEntry(targetEntry.metadata.id));
+    REQUIRE(session.updateEntry(query.metadata.id,
+                                "{{query (where " +
+                                    anchor(targetEntry.metadata.id) + ")}}"));
+    const auto missingLiteral = session.evaluateQuery(query.metadata.id);
+    REQUIRE(missingLiteral);
+    REQUIRE(missingLiteral.value().rows.size() == 1);
+    CHECK(missingLiteral.value().rows.front().metadata.id ==
+          source.metadata.id);
+    REQUIRE(session.undoEdit());
+    REQUIRE(session.undoEdit());
+
+    session.close();
+    REQUIRE(session.open(notebookPath));
+    CHECK(matches("(linked-by " + anchor(source.metadata.id) + ")") ==
+          std::vector{targetPage.metadata.id});
 }
