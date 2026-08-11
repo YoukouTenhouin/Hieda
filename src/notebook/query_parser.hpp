@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace hieda::notebook::query_language {
@@ -20,6 +21,32 @@ enum class PredicateKind : std::uint8_t {
     conjunction,
     disjunction,
     negation,
+    authoredPageLink,
+    authoredBlockReference,
+    childOf,
+    descendantOf,
+    parentOf,
+    ancestorOf,
+    inPageSubtree,
+    pageLinksTo,
+    blockReferences,
+    linkedBy,
+    blockReferencedBy,
+};
+struct SelfAnchor {
+    auto operator==(const SelfAnchor&) const -> bool = default;
+};
+struct PageNameAnchor {
+    std::string name;
+
+    auto operator==(const PageNameAnchor&) const -> bool = default;
+};
+struct QueryAnchor {
+    std::variant<SelfAnchor, PageNameAnchor, BlockId> target;
+    std::size_t sourceByteOffset{0};
+    std::size_t sourceByteLength{0};
+
+    auto operator==(const QueryAnchor&) const -> bool = default;
 };
 enum class JournalDateComparison : std::uint8_t {
     equal,
@@ -37,6 +64,7 @@ struct Predicate {
     JournalDate journalDate;
     std::string value;
     std::string propertyKey;
+    std::optional<QueryAnchor> anchor;
     std::vector<Predicate> operands;
 };
 
@@ -59,7 +87,14 @@ struct ParseResult {
     std::optional<QueryError> error;
 };
 
+struct PageAnchorRename {
+    std::string_view oldName;
+    std::string_view newName;
+};
+
 [[nodiscard]] auto hasQueryIntent(std::string_view source) -> bool;
 [[nodiscard]] auto parse(std::string_view source) -> ParseResult;
+[[nodiscard]] auto rewritePageAnchors(std::string_view source,
+                                      PageAnchorRename rename) -> std::string;
 
 } // namespace hieda::notebook::query_language

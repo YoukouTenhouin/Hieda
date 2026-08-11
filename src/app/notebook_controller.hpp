@@ -450,5 +450,6 @@ class NotebookController final : public QObject {
     OutlineEntryModel blockLinkedReferenceSources_;
     PageHierarchyModel pageHierarchy_;
     QFutureWatcher<QueryTaskResult> queryWatcher_;
+    bool queryTaskRunning_{false};
     QTimer midnightTimer_;
 };

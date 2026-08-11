@@ -4,6 +4,7 @@
 
 #include <charconv>
 #include <chrono>
+#include <ranges>
 #include <string>
 
 namespace hieda::notebook::query_language {
@@ -135,6 +136,9 @@ class Parser {
     auto
     parsePredicate(Predicate& predicate) -> bool
     {
+        if (source_.substr(position_, 2) == "[[") {
+            return parseStandaloneReference(predicate);
+        }
         if (!consume("(")) {
             return fail("Expected a Query predicate.", "(predicate ...)");
         }
@@ -151,7 +155,8 @@ class Parser {
                             "two or more predicates");
             }
             skipSeparators();
-            while (position_ < end_ && source_[position_] == '(') {
+            while (position_ < end_ && (source_[position_] == '(' ||
+                                        source_.substr(position_, 2) == "[[")) {
                 predicate.operands.emplace_back();
                 if (!parsePredicate(predicate.operands.back())) {
                     return false;
@@ -245,11 +250,124 @@ class Parser {
                 return fail("property-equals requires a valid string value.",
                             "quoted string");
             }
+        } else if (name == "child-of" || name == "descendant-of" ||
+                   name == "parent-of" || name == "ancestor-of" ||
+                   name == "page-links-to" || name == "block-references" ||
+                   name == "linked-by" || name == "block-referenced-by") {
+            if (name == "child-of") {
+                predicate.kind = PredicateKind::childOf;
+            } else if (name == "descendant-of") {
+                predicate.kind = PredicateKind::descendantOf;
+            } else if (name == "parent-of") {
+                predicate.kind = PredicateKind::parentOf;
+            } else if (name == "ancestor-of") {
+                predicate.kind = PredicateKind::ancestorOf;
+            } else if (name == "page-links-to") {
+                predicate.kind = PredicateKind::pageLinksTo;
+            } else if (name == "block-references") {
+                predicate.kind = PredicateKind::blockReferences;
+            } else if (name == "linked-by") {
+                predicate.kind = PredicateKind::linkedBy;
+            } else {
+                predicate.kind = PredicateKind::blockReferencedBy;
+            }
+            if (!parseAnchorAtom(separatedAtom(), predicate, true)) {
+                return false;
+            }
+        } else if (name == "in-page-subtree") {
+            predicate.kind = PredicateKind::inPageSubtree;
+            if (!parseAnchorAtom(separatedAtom(), predicate, false) ||
+                !std::holds_alternative<PageNameAnchor>(
+                    predicate.anchor->target)) {
+                return fail("in-page-subtree requires a Page-name anchor.",
+                            "[[exact/page_name]]");
+            }
         } else {
             return fail("This Query predicate is not supported.",
                         "supported predicate");
         }
         return closePredicate();
+    }
+
+    auto
+    parseStandaloneReference(Predicate& predicate) -> bool
+    {
+        const auto anchor = readAtom();
+        if (!parseAnchorAtom(anchor, predicate, false)) {
+            return false;
+        }
+        if (std::holds_alternative<BlockId>(predicate.anchor->target)) {
+            predicate.kind = PredicateKind::authoredBlockReference;
+        } else {
+            predicate.kind = PredicateKind::authoredPageLink;
+        }
+        return true;
+    }
+
+    auto
+    parseAnchorAtom(std::string_view anchor, Predicate& predicate,
+                    bool allowSelf) -> bool
+    {
+        predicate.anchor = QueryAnchor{
+            SelfAnchor{}, position_ - static_cast<std::size_t>(anchor.size()),
+            anchor.size()};
+        if (anchor == "self") {
+            if (!allowSelf) {
+                return fail("self is not valid in this Query position.",
+                            "Page or Block anchor");
+            }
+            return true;
+        }
+        constexpr std::string_view blockPrefix = "[[block:";
+        if (anchor.starts_with(blockPrefix) && anchor.ends_with("]]")) {
+            BlockId blockId;
+            if (!parseUuid(anchor.substr(blockPrefix.size(), 36), blockId) ||
+                anchor.size() != blockPrefix.size() + 38) {
+                return fail("The Block Reference Query Anchor is invalid.",
+                            "[[block:UUID]]");
+            }
+            predicate.anchor->target = blockId;
+            return true;
+        }
+        if (anchor.starts_with("[[") && anchor.ends_with("]]")) {
+            const auto pageName = anchor.substr(2, anchor.size() - 4);
+            if (!authored_text::validPageName(pageName)) {
+                return fail("The Page Query Anchor is invalid.",
+                            "[[exact/page_name]]");
+            }
+            predicate.anchor->target = PageNameAnchor{std::string(pageName)};
+            return true;
+        }
+        return fail("The Query Anchor is invalid.", "Page or Block anchor");
+    }
+
+    static auto
+    parseUuid(std::string_view value, BlockId& identifier) -> bool
+    {
+        if (value.size() != 36) {
+            return false;
+        }
+        std::size_t byteIndex = 0;
+        for (std::size_t index = 0; index < value.size();) {
+            if (index == 8 || index == 13 || index == 18 || index == 23) {
+                if (value[index++] != '-') {
+                    return false;
+                }
+                continue;
+            }
+            unsigned int byte = 0;
+            const auto* begin = value.data() + index;
+            const auto* end = begin + 2;
+            const auto [position, error] =
+                std::from_chars(begin, end, byte, 16);
+            if (error != std::errc{} || position != end ||
+                byteIndex >= identifier.bytes.size()) {
+                return false;
+            }
+            identifier.bytes[byteIndex++] = static_cast<std::byte>(byte);
+            index += 2;
+        }
+        return byteIndex == identifier.bytes.size();
     }
 
     auto
@@ -414,6 +532,36 @@ parse(std::string_view source) -> ParseResult
     }
     const auto [begin, end] = trimmedBounds(source);
     return Parser(source, begin, end).parseQuery();
+}
+
+auto
+rewritePageAnchors(std::string_view source, PageAnchorRename rename)
+    -> std::string
+{
+    const auto parsed = parse(source);
+    if (!parsed.query) {
+        return std::string(source);
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> replacements;
+    const auto collect = [&](auto&& self, const Predicate& predicate) -> void {
+        const auto* pageAnchor =
+            predicate.anchor
+                ? std::get_if<PageNameAnchor>(&predicate.anchor->target)
+                : nullptr;
+        if (pageAnchor != nullptr && pageAnchor->name == rename.oldName) {
+            replacements.emplace_back(predicate.anchor->sourceByteOffset,
+                                      predicate.anchor->sourceByteLength);
+        }
+        for (const auto& operand : predicate.operands) {
+            self(self, operand);
+        }
+    };
+    collect(collect, parsed.query->where);
+    auto rewritten = std::string(source);
+    for (const auto& [offset, length] : replacements | std::views::reverse) {
+        rewritten.replace(offset + 2, length - 4, rename.newName);
+    }
+    return rewritten;
 }
 
 } // namespace hieda::notebook::query_language
