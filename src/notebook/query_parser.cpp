@@ -536,8 +536,8 @@ parse(std::string_view source) -> ParseResult
 }
 
 auto
-rewritePageAnchors(std::string_view source, std::string_view oldName,
-                   std::string_view newName) -> std::string
+rewritePageAnchors(std::string_view source, PageAnchorRename rename)
+    -> std::string
 {
     const auto parsed = parse(source);
     if (!parsed.query) {
@@ -546,7 +546,7 @@ rewritePageAnchors(std::string_view source, std::string_view oldName,
     std::vector<std::pair<std::size_t, std::size_t>> replacements;
     const auto collect = [&](auto&& self, const Predicate& predicate) -> void {
         if (predicate.anchorKind == AnchorKind::pageName &&
-            predicate.anchorPageName == oldName) {
+            predicate.anchorPageName == rename.oldName) {
             replacements.emplace_back(predicate.anchorSourceByteOffset,
                                       predicate.anchorSourceByteLength);
         }
@@ -557,7 +557,7 @@ rewritePageAnchors(std::string_view source, std::string_view oldName,
     collect(collect, parsed.query->where);
     auto rewritten = std::string(source);
     for (const auto& [offset, length] : replacements | std::views::reverse) {
-        rewritten.replace(offset + 2, length - 4, newName);
+        rewritten.replace(offset + 2, length - 4, rename.newName);
     }
     return rewritten;
 }

@@ -76,10 +76,14 @@ struct ParseResult {
     std::optional<QueryError> error;
 };
 
+struct PageAnchorRename {
+    std::string_view oldName;
+    std::string_view newName;
+};
+
 [[nodiscard]] auto hasQueryIntent(std::string_view source) -> bool;
 [[nodiscard]] auto parse(std::string_view source) -> ParseResult;
 [[nodiscard]] auto rewritePageAnchors(std::string_view source,
-                                      std::string_view oldName,
-                                      std::string_view newName) -> std::string;
+                                      PageAnchorRename rename) -> std::string;
 
 } // namespace hieda::notebook::query_language

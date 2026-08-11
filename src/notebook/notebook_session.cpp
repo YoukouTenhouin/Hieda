@@ -3823,7 +3823,7 @@ class NotebookSession::Impl {
                     return fail(source.error());
                 }
                 auto rewritten = query_language::rewritePageAnchors(
-                    source.value().authoredText, oldName, name);
+                    source.value().authoredText, {oldName, name});
                 if (rewritten != source.value().authoredText) {
                     if (!validAuthoredText(rewritten)) {
                         mdb_cursor_close(cursor);
