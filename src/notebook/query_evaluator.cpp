@@ -3,12 +3,26 @@
 #include "authored_text_parser.hpp"
 
 #include <algorithm>
+#include <map>
 #include <ranges>
 #include <tuple>
-#include <unordered_map>
 
 namespace hieda::notebook::query_evaluation {
 namespace {
+
+auto
+dateKey(JournalDate date)
+{
+    return std::tuple{date.year, date.month, date.day};
+}
+
+struct BlockIdLess {
+    auto
+    operator()(const BlockId& left, const BlockId& right) const -> bool
+    {
+        return std::ranges::lexicographical_compare(left.bytes, right.bytes);
+    }
+};
 
 class Evaluator {
   public:
@@ -17,7 +31,7 @@ class Evaluator {
         : queryEntryId_(queryEntryId), candidates_(candidates)
     {
         for (const auto& candidate : candidates_) {
-            byId_.emplace(candidate.row.metadata.id.toString(), &candidate);
+            byId_.emplace(candidate.row.metadata.id, &candidate);
             if (candidate.row.type == QueryResultBlockType::page &&
                 candidate.row.pageKind == PageKind::named) {
                 pagesByName_.emplace(candidate.row.pageName, &candidate);
@@ -160,7 +174,7 @@ class Evaluator {
     [[nodiscard]] auto
     findById(const BlockId& blockId) const -> const Candidate*
     {
-        const auto found = byId_.find(blockId.toString());
+        const auto found = byId_.find(blockId);
         return found == byId_.end() ? nullptr : found->second;
     }
 
@@ -171,9 +185,6 @@ class Evaluator {
         if (!candidate.row.journalDate) {
             return false;
         }
-        const auto dateKey = [](JournalDate date) {
-            return std::tuple{date.year, date.month, date.day};
-        };
         const auto actual = dateKey(*candidate.row.journalDate);
         const auto expected = dateKey(predicate.journalDate);
         switch (predicate.dateComparison) {
@@ -206,7 +217,7 @@ class Evaluator {
     hasAncestor(const Candidate& descendant, const BlockId& ancestorId) const
         -> bool
     {
-        auto* current = &descendant;
+        const auto* current = &descendant;
         for (std::size_t depth = 0;
              current->parentId && depth < candidates_.size(); ++depth) {
             if (*current->parentId == ancestorId) {
@@ -296,15 +307,9 @@ class Evaluator {
 
     BlockId queryEntryId_;
     const std::vector<Candidate>& candidates_;
-    std::unordered_map<std::string, const Candidate*> byId_;
-    std::unordered_map<std::string, const Candidate*> pagesByName_;
+    std::map<BlockId, const Candidate*, BlockIdLess> byId_;
+    std::map<std::string, const Candidate*> pagesByName_;
 };
-
-auto
-dateKey(JournalDate date)
-{
-    return std::tuple{date.year, date.month, date.day};
-}
 
 } // namespace
 
