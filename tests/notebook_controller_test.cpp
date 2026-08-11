@@ -10,6 +10,7 @@
 #include <QThread>
 #include <QUrl>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -894,4 +895,58 @@ TEST_CASE("the Qt adapter exposes live Query results errors and navigation")
     controller.setQueryExpanded(queryId, true);
     CHECK(
         model->data(queryIndex, OutlineEntryModel::QueryExpandedRole).toBool());
+}
+
+TEST_CASE("the Qt adapter finishes semantic Queries scheduled together")
+{
+    auto argumentCount = 1;
+    std::array executableName{'h', 'i', 'e', 'd', 'a', '\0'};
+    std::array<char*, 2> arguments{executableName.data(), nullptr};
+    QCoreApplication application(argumentCount, arguments.data());
+    TemporaryDirectory temporaryDirectory;
+    const auto notebookPath =
+        temporaryDirectory.path() / "semantic-query-reopen.hieda";
+    NotebookController controller;
+    controller.createNotebook(localFileUrl(notebookPath));
+    REQUIRE(controller.insertOutlineEntry(QStringLiteral("target")) == 0);
+    const auto targetId = controller.outlineEntryId(0);
+    REQUIRE(controller.insertOutlineEntry(
+                QStringLiteral("[[block:%1]]").arg(targetId)) == 1);
+    REQUIRE(
+        controller.insertOutlineEntry(
+            QStringLiteral("{{query (where (block-references [[block:%1]]))}}")
+                .arg(targetId)) == 2);
+    REQUIRE(
+        controller.insertOutlineEntry(
+            QStringLiteral("{{query (where (block-references [[block:%1]]))}}")
+                .arg(targetId)) == 3);
+    const std::array queryIds{controller.outlineEntryId(2),
+                              controller.outlineEntryId(3)};
+
+    controller.closeNotebook();
+    controller.openNotebook(localFileUrl(notebookPath));
+
+    auto* model = controller.outlineEntries();
+    controller.setQueryActive(queryIds[0], true);
+    controller.setQueryActive(queryIds[1], true);
+
+    REQUIRE(waitUntil([&]() -> bool {
+        return std::ranges::all_of(std::array{2, 3}, [model](int row) -> bool {
+            return !model
+                        ->data(model->index(row, 0),
+                               OutlineEntryModel::QueryLoadingRole)
+                        .toBool();
+        });
+    }));
+    for (const auto row : std::array{2, 3}) {
+        const auto results = model
+                                 ->data(model->index(row, 0),
+                                        OutlineEntryModel::QueryResultsRole)
+                                 .toList();
+        REQUIRE(results.size() == 1);
+        CHECK(results.front()
+                  .toMap()
+                  .value(QStringLiteral("blockId"))
+                  .toString() == controller.outlineEntryId(1));
+    }
 }
