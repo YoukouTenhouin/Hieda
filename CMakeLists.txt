@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.25)
 
 project(Hieda VERSION 0.1.0 LANGUAGES C CXX)
 
@@ -26,14 +26,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(unofficial-lmdb 0.9.30 CONFIG QUIET)
-if(TARGET unofficial::lmdb::lmdb)
-    set(HIEDA_LMDB_TARGET unofficial::lmdb::lmdb)
-else()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(LMDB REQUIRED IMPORTED_TARGET "lmdb>=0.9.30")
-    set(HIEDA_LMDB_TARGET PkgConfig::LMDB)
-endif()
+set(MIARE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(MIARE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(MIARE_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(MIARE_BUILD_QUALIFICATION OFF CACHE BOOL "" FORCE)
+set(MIARE_BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+set(MIARE_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+set(MIARE_ENABLE_SODIUM OFF CACHE BOOL "" FORCE)
+set(MIARE_ENABLE_ZSTD ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/miare EXCLUDE_FROM_ALL SYSTEM)
 find_package(Qt6 6.8 REQUIRED COMPONENTS Concurrent Core Gui Qml Quick QuickControls2 QuickDialogs2 Widgets)
 qt_standard_project_setup(REQUIRES 6.8)
 include(CTest)
@@ -55,6 +56,7 @@ add_library(hieda_notebook
     src/notebook/authored_text_parser.cpp
     src/notebook/authored_text_parser.hpp
     src/notebook/notebook_session.cpp
+    src/notebook/miare_store.hpp
     src/notebook/platform_file.hpp
     src/notebook/query_evaluator.cpp
     src/notebook/query_evaluator.hpp
@@ -64,7 +66,7 @@ add_library(hieda_notebook
 )
 add_library(Hieda::Notebook ALIAS hieda_notebook)
 target_include_directories(hieda_notebook PUBLIC include)
-target_link_libraries(hieda_notebook PRIVATE ${HIEDA_LMDB_TARGET})
+target_link_libraries(hieda_notebook PRIVATE miare::miare)
 if(BUILD_TESTING)
     target_compile_definitions(hieda_notebook PRIVATE HIEDA_TESTING)
 endif()
@@ -101,6 +103,7 @@ elseif(APPLE)
         "${mac_icon}"
         "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
         "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/miare/LICENSE"
     )
     set_source_files_properties("${mac_icon}" PROPERTIES
         GENERATED TRUE
@@ -111,6 +114,10 @@ elseif(APPLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
         PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources/licenses"
+    )
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/miare/LICENSE"
+        PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/licenses/miare"
     )
     set_target_properties(hieda PROPERTIES
         OUTPUT_NAME Hieda
@@ -151,6 +158,8 @@ install(TARGETS hieda
 )
 if(NOT APPLE)
     install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/hieda)
+    install(FILES third_party/miare/LICENSE
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/hieda/licenses/miare)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     install(FILES assets/hieda.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
@@ -191,7 +200,7 @@ if(BUILD_TESTING)
     find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
     add_executable(notebook_session_test tests/notebook_session_test.cpp)
     target_include_directories(notebook_session_test PRIVATE src/notebook)
-    target_link_libraries(notebook_session_test PRIVATE Hieda::Notebook Catch2::Catch2WithMain ${HIEDA_LMDB_TARGET})
+    target_link_libraries(notebook_session_test PRIVATE Hieda::Notebook Catch2::Catch2WithMain miare::miare)
     include(Catch)
     set(hieda_catch_skip_arguments)
     if(Catch2_VERSION VERSION_LESS 3.8)

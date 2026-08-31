@@ -6,18 +6,20 @@ Hieda is a native Qt Quick notebook application. It creates, closes, and reopens
 ## Prerequisites
 
 - A 64-bit Linux or Windows system, or an Apple Silicon Mac
-- CMake 3.24 or newer and Ninja
+- CMake 3.25 or newer and Ninja
 - GCC 11 or newer, Clang 16 or newer, AppleClang 15 or newer, or MSVC 2022
 - Qt 6.8 or newer with Core, GUI, Widgets, QML, Quick, Quick Controls, and Quick Dialogs
-- LMDB 0.9.30 or newer
+- Zstandard
 - Catch2 3
 - clang-format, clang-tidy, and ripgrep for linting
 
-On Linux, dependencies may be supplied by the host distribution; LMDB must be exposed through
-`pkg-config`. On openSUSE Tumbleweed the relevant development packages are `qt6-base-devel`,
-`qt6-declarative-devel`, `qt6-quickcontrols2-devel`, `lmdb-devel`, and `Catch2-devel`.
+Miare is included as a Git submodule. Clone with `--recurse-submodules`, or run
+`git submodule update --init --recursive` in an existing checkout. On Linux, other dependencies
+may be supplied by the host distribution. On openSUSE Tumbleweed the relevant development
+packages are `qt6-base-devel`, `qt6-declarative-devel`, `qt6-quickcontrols2-devel`,
+`libzstd-devel`, and `Catch2-devel`.
 
-On Windows and macOS, install LMDB and Catch2 from the checked-in vcpkg manifest and provide the
+On Windows and macOS, install Zstandard and Catch2 from the checked-in vcpkg manifest and provide the
 vcpkg toolchain file when configuring CMake. Qt is installed separately so its official desktop
 tools and QML modules are available to the build.
 
@@ -53,8 +55,10 @@ baseline and builds Qt 6.8.3 from a checksum-verified source archive.
 
 ## Notebook files
 
-One closed `.hieda` file contains the canonical Notebook. LMDB and Hieda may create disposable
-lock files beside an open Notebook. Do not copy or synchronize a Notebook while it is open.
+One closed `.hieda` file contains the canonical Notebook. Miare uses unencrypted Zstandard
+compression for Notebook storage, and Hieda may create a disposable lock file beside an open
+Notebook. Do not copy or synchronize a Notebook while it is open. Files created by the former
+prototype LMDB backend are not compatible with this format.
 
 ## Journal editing
 

@@ -373,6 +373,38 @@ class Result {
     std::variant<T, NotebookError> value_;
 };
 
+template <>
+class Result<void> {
+  public:
+    [[nodiscard]] static auto
+    success() -> Result
+    {
+        return Result{};
+    }
+    [[nodiscard]] static auto
+    failure(NotebookError error) -> Result
+    {
+        return Result(std::move(error));
+    }
+
+    [[nodiscard]] explicit
+    operator bool() const noexcept
+    {
+        return std::holds_alternative<std::monostate>(value_);
+    }
+    [[nodiscard]] auto
+    error() const& -> const NotebookError&
+    {
+        return std::get<NotebookError>(value_);
+    }
+
+  private:
+    Result() = default;
+    explicit Result(NotebookError error) : value_(std::move(error)) {}
+
+    std::variant<std::monostate, NotebookError> value_;
+};
+
 class NotebookSession {
   public:
     NotebookSession();
@@ -387,7 +419,7 @@ class NotebookSession {
         -> Result<NotebookInfo>;
     [[nodiscard]] auto open(const std::filesystem::path& path)
         -> Result<NotebookInfo>;
-    void close() noexcept;
+    [[nodiscard]] auto close() -> Result<void>;
     [[nodiscard]] auto isOpen() const noexcept -> bool;
     [[nodiscard]] auto current() const -> std::optional<NotebookInfo>;
     [[nodiscard]] auto pages() const -> Result<std::vector<PageSummary>>;

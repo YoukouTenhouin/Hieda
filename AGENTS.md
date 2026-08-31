@@ -20,7 +20,8 @@ Toolkit neutrality applies at the Notebook module boundary, not to the presentat
 ## Build, Test, and Development Commands
 
 The project uses CMake with Ninja. Linux uses system-provided dependencies; Windows and macOS use
-the checked-in vcpkg manifest for LMDB and Catch2 while Qt is installed separately. The canonical
+the checked-in vcpkg manifest for Zstandard and Catch2 while Qt is installed separately. Miare is
+checked in as a Git submodule. The canonical
 commands are:
 
 - `make build` configures and builds the development preset.

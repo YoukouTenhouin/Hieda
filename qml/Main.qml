@@ -7,6 +7,14 @@ import QtQuick.Layouts
 ApplicationWindow {
     id: window
 
+    onClosing: close => {
+        if (!notebookController.hasOpenNotebook)
+            return;
+        close.accepted = false;
+        if (window.commitActiveOutlineEditor())
+            notebookController.requestApplicationQuit();
+    }
+
     readonly property real uiSpacing: Math.max(6, Math.round(font.pixelSize * 0.6))
     readonly property real maximumDocumentWidth: 780
     readonly property int structureModifier: Qt.platform.os === "osx" ? Qt.MetaModifier : Qt.ControlModifier
@@ -373,7 +381,7 @@ ApplicationWindow {
         shortcut: StandardKey.Quit
         onTriggered: {
             if (window.commitActiveOutlineEditor())
-                Qt.quit();
+                notebookController.requestApplicationQuit();
         }
     }
 
