@@ -23,6 +23,8 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: recursive
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
       - uses: jurplel/install-qt-action@d325aaf2a8baeeda41ad0b5d39f84a6af9bcf005
         with:
@@ -71,6 +73,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: recursive
       - uses: jurplel/install-qt-action@d325aaf2a8baeeda41ad0b5d39f84a6af9bcf005
         with:
           version: ${{ env.QT_VERSION }}
@@ -120,13 +124,15 @@ jobs:
           bison file flex fontconfig-devel freetype2-devel gcc13 gcc13-c++ git
           glib2-devel gperf
           libX11-devel libXext-devel libXi-devel libXrender-devel
-          libglvnd-devel libicu-devel libinput-devel libjpeg8-devel lmdb-devel
+          libglvnd-devel libicu-devel libinput-devel libjpeg8-devel libzstd-devel
           libopenssl-devel libpng16-devel libudev-devel libxcb-devel
           libxkbcommon-devel libxkbcommon-x11-devel ninja pcre2-devel
           perl pkg-config python311 tar util-linux which xcb-util-devel xcb-util-image-devel
           xcb-util-keysyms-devel xcb-util-renderutil-devel xcb-util-wm-devel
           xz zstd
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: recursive
       - id: qt-cache
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
         with:
@@ -182,6 +188,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          submodules: recursive
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist

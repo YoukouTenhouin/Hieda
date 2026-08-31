@@ -1161,10 +1161,27 @@ NotebookController::closeNotebook()
 }
 
 void
+NotebookController::requestApplicationQuit()
+{
+    if (!session_.isOpen()) {
+        QCoreApplication::quit();
+        return;
+    }
+    quitRequested_ = true;
+    closeNotebook();
+}
+
+void
 NotebookController::finishCloseNotebook()
 {
     closeRequested_ = false;
-    session_.close();
+    const auto closed = session_.close();
+    if (!closed) {
+        error_ = tr("Hieda could not safely close that Notebook. It remains "
+                    "open; try again.");
+        emit stateChanged();
+        return;
+    }
     path_.clear();
     name_.clear();
     error_.clear();
@@ -1191,6 +1208,10 @@ NotebookController::finishCloseNotebook()
     pageHierarchy_.clear();
     emit stateChanged();
     emit destinationChanged();
+    if (quitRequested_) {
+        quitRequested_ = false;
+        QCoreApplication::quit();
+    }
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)

@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "hieda/notebook/notebook_session.hpp"
 #include "authored_text_parser.hpp"
+#include "miare_store.hpp"
 #include "notebook_session_test_access.hpp"
 #include "platform_file.hpp"
 #include "query_evaluator.hpp"
 #include "query_parser.hpp"
-
-#include <lmdb.h>
 
 #include <algorithm>
 #include <array>
@@ -32,12 +31,11 @@ namespace {
 
 constexpr std::uint32_t formatVersion = 1;
 constexpr std::uint32_t schemaVersion = 2;
-constexpr std::size_t mapSize = 8ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr std::string_view formatMagic = "HIEDA_NOTEBOOK";
 constexpr std::string_view derivedIndexVersionKey = "derived_index_version";
 constexpr std::uint32_t derivedIndexVersion = 1;
 
-constexpr std::array<std::string_view, 12> databaseNames{
+constexpr std::array<std::string_view, 11> databaseNames{
     "metadata",
     "blocks",
     "blocks_by_type",
@@ -46,7 +44,6 @@ constexpr std::array<std::string_view, 12> databaseNames{
     "references_by_source",
     "references_by_target",
     "properties_by_block",
-    "property_index",
     "pages_by_title",
     "journal_by_date",
     "settings",
@@ -79,17 +76,17 @@ struct BlockRecord {
 class JournalCommitAdapter {
   public:
     virtual ~JournalCommitAdapter() = default;
-    virtual auto commit(MDB_txn*& transaction) -> int = 0;
+    virtual auto commit(StoreTransaction*& transaction) -> int = 0;
 };
 
-class LmdbJournalCommitAdapter final : public JournalCommitAdapter {
+class MiareJournalCommitAdapter final : public JournalCommitAdapter {
   public:
     auto
-    commit(MDB_txn*& transaction) -> int override
+    commit(StoreTransaction*& transaction) -> int override
     {
         auto* committing = transaction;
         transaction = nullptr;
-        return mdb_txn_commit(committing);
+        return store_txn_commit(committing);
     }
 };
 
@@ -97,17 +94,17 @@ class LmdbJournalCommitAdapter final : public JournalCommitAdapter {
 class RejectNextJournalCommitAdapter final : public JournalCommitAdapter {
   public:
     auto
-    commit(MDB_txn*& transaction) -> int override
+    commit(StoreTransaction*& transaction) -> int override
     {
         if (shouldReject_) {
             shouldReject_ = false;
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             transaction = nullptr;
             return EIO;
         }
         auto* committing = transaction;
         transaction = nullptr;
-        return mdb_txn_commit(committing);
+        return store_txn_commit(committing);
     }
 
   private:
@@ -184,67 +181,52 @@ pathWithSuffix(const std::filesystem::path& path, std::string_view suffix)
 }
 
 auto
-lmdbPath(const std::filesystem::path& path) -> std::string
+errorFromStore(const std::filesystem::path& path, int error,
+               std::string_view operation) -> NotebookError
 {
-#ifdef _WIN32
-    const auto utf8 = path.u8string();
-    return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
-#else
-    return path.native();
-#endif
-}
-
-auto
-errorFromLmdb(const std::filesystem::path& path, int error,
-              std::string_view operation) -> NotebookError
-{
-    if (error == MDB_KEYEXIST || error == MDB_PANIC || error == MDB_TLS_FULL ||
-        error == MDB_BAD_TXN || error == MDB_BAD_RSLOT ||
-        error == MDB_BAD_VALSIZE || error == MDB_INCOMPATIBLE ||
-        error == MDB_BAD_DBI || error == MDB_DBS_FULL ||
-        error == MDB_PAGE_FULL || error == MDB_CURSOR_FULL) {
+    if (error == storeKeyExists || error == storePanic ||
+        error == storeThreadLimit || error == storeBadTransaction ||
+        error == storeBadReader || error == storeBadValue ||
+        error == storeIncompatible || error == storeBadDatabase ||
+        error == storeDatabaseLimit || error == storeCapacityLimit ||
+        error == storeCursorLimit) {
         throw NotebookException(std::string(operation) + ": " +
-                                mdb_strerror(error));
+                                store_strerror(error));
     }
     auto code = NotebookErrorCode::ioFailure;
-    if (error == MDB_INVALID || error == MDB_CORRUPTED ||
-        error == MDB_PAGE_NOTFOUND || error == MDB_NOTFOUND) {
+    if (error == storeInvalid || error == storeCorrupt ||
+        error == storePageNotFound || error == storeNotFound) {
         code = NotebookErrorCode::invalidNotebook;
-    } else if (error == MDB_VERSION_MISMATCH) {
+    } else if (error == storeVersionMismatch) {
         code = NotebookErrorCode::unsupportedVersion;
+    } else if (error == EBUSY) {
+        code = NotebookErrorCode::alreadyInUse;
     } else if (error == EACCES || error == EPERM) {
         code = NotebookErrorCode::permissionDenied;
     } else if (error == ENOENT) {
         code = NotebookErrorCode::pathNotFound;
     }
     return makeError(code, path,
-                     std::string(operation) + ": " + mdb_strerror(error));
+                     std::string(operation) + ": " + store_strerror(error));
 }
 
 auto
-openLmdbEnvironment(const std::filesystem::path& path) -> Result<MDB_env*>
+openStoreEnvironment(const std::filesystem::path& path)
+    -> Result<StoreEnvironment*>
 {
-    MDB_env* environment = nullptr;
-    auto result = mdb_env_create(&environment);
-    if (result == MDB_SUCCESS) {
-        result = mdb_env_set_maxdbs(environment, 16);
+    StoreEnvironment* environment = nullptr;
+    auto result = store_env_create(&environment);
+    if (result == storeSuccess) {
+        result = store_env_open(environment, path);
     }
-    if (result == MDB_SUCCESS) {
-        result = mdb_env_set_mapsize(environment, mapSize);
-    }
-    if (result == MDB_SUCCESS) {
-        const auto encodedPath = lmdbPath(path);
-        result =
-            mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR, 0600);
-    }
-    if (result != MDB_SUCCESS) {
+    if (result != storeSuccess) {
         if (environment != nullptr) {
-            mdb_env_close(environment);
+            store_env_close(environment);
         }
-        return Result<MDB_env*>::failure(
-            errorFromLmdb(path, result, "open LMDB environment"));
+        return Result<StoreEnvironment*>::failure(
+            errorFromStore(path, result, "open Miare database"));
     }
-    return Result<MDB_env*>::success(environment);
+    return Result<StoreEnvironment*>::success(environment);
 }
 
 void
@@ -337,11 +319,11 @@ readU64(const std::uint8_t* data) -> std::uint64_t
 }
 
 auto
-decodeManifest(const MDB_val& value, const std::filesystem::path& path)
+decodeManifest(const StoreValue& value, const std::filesystem::path& path)
     -> Result<Manifest>
 {
-    const auto* bytes = static_cast<const std::uint8_t*>(value.mv_data);
-    const auto size = value.mv_size;
+    const auto* bytes = static_cast<const std::uint8_t*>(value.data);
+    const auto size = value.size;
     if (size < 2 || readU16(bytes) != 1) {
         return Result<Manifest>::failure(
             makeError(NotebookErrorCode::invalidNotebook, path,
@@ -592,11 +574,11 @@ encodeBlock(const BlockRecord& block) -> std::vector<std::uint8_t>
 }
 
 auto
-decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
+decodeBlock(const StoreValue& value, const BlockId& blockIdentifier,
             const std::filesystem::path& path) -> Result<BlockRecord>
 {
-    const auto* bytes = static_cast<const std::uint8_t*>(value.mv_data);
-    if (value.mv_size < 2 || readU16(bytes) != 2) {
+    const auto* bytes = static_cast<const std::uint8_t*>(value.data);
+    if (value.size < 2 || readU16(bytes) != 2) {
         return Result<BlockRecord>::failure(
             makeError(NotebookErrorCode::invalidNotebook, path,
                       "invalid Block record version"));
@@ -608,8 +590,8 @@ decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
     bool hasUpdated = false;
     bool hasPageKind = false;
     std::size_t offset = 2;
-    while (offset < value.mv_size) {
-        if (value.mv_size - offset < 6) {
+    while (offset < value.size) {
+        if (value.size - offset < 6) {
             return Result<BlockRecord>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "truncated Block field"));
@@ -618,7 +600,7 @@ decodeBlock(const MDB_val& value, const BlockId& blockIdentifier,
         const auto length =
             static_cast<std::size_t>(readU32(bytes + offset + 2));
         offset += 6;
-        if (length > value.mv_size - offset) {
+        if (length > value.size - offset) {
             return Result<BlockRecord>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "invalid Block field length"));
@@ -688,7 +670,7 @@ dateKey(JournalDate date) -> std::array<std::uint8_t, 4>
 }
 
 auto
-blockKey(const BlockId& blockIdentifier) -> MDB_val
+blockKey(const BlockId& blockIdentifier) -> StoreValue
 {
     return {blockIdentifier.bytes.size(),
             const_cast<std::byte*>(blockIdentifier.bytes.data())};
@@ -727,36 +709,36 @@ auto
 createEnvironment(const std::filesystem::path& path, const Manifest& manifest)
     -> std::optional<NotebookError>
 {
-    auto opened = openLmdbEnvironment(path);
+    auto opened = openStoreEnvironment(path);
     if (!opened) {
         return opened.error();
     }
-    MDB_env* environment = opened.value();
-    auto result = MDB_SUCCESS;
+    StoreEnvironment* environment = opened.value();
+    auto result = storeSuccess;
     const auto closeEnvironment = [&environment]() -> void {
         if (environment != nullptr) {
-            mdb_env_close(environment);
+            store_env_close(environment);
             environment = nullptr;
         }
     };
 
-    MDB_txn* transaction = nullptr;
-    result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-    if (result != MDB_SUCCESS) {
-        auto error = errorFromLmdb(path, result, "begin schema transaction");
+    StoreTransaction* transaction = nullptr;
+    result = store_txn_begin(environment, nullptr, 0, &transaction);
+    if (result != storeSuccess) {
+        auto error = errorFromStore(path, result, "begin schema transaction");
         closeEnvironment();
         return error;
     }
 
-    MDB_dbi metadata = 0;
+    LogicalDatabase metadata = 0;
     for (const auto name : databaseNames) {
-        MDB_dbi database = 0;
+        LogicalDatabase database = 0;
         const std::string ownedName(name);
-        result =
-            mdb_dbi_open(transaction, ownedName.c_str(), MDB_CREATE, &database);
-        if (result != MDB_SUCCESS) {
-            mdb_txn_abort(transaction);
-            auto error = errorFromLmdb(path, result, "create Notebook schema");
+        result = store_dbi_open(transaction, ownedName.c_str(), storeCreate,
+                                &database);
+        if (result != storeSuccess) {
+            store_txn_abort(transaction);
+            auto error = errorFromStore(path, result, "create Notebook schema");
             closeEnvironment();
             return error;
         }
@@ -767,43 +749,39 @@ createEnvironment(const std::filesystem::path& path, const Manifest& manifest)
 
     auto encodedManifest = encodeManifest(manifest);
     constexpr std::string_view keyText = "manifest";
-    MDB_val key{keyText.size(), const_cast<char*>(keyText.data())};
-    MDB_val value{encodedManifest.size(), encodedManifest.data()};
-    result = mdb_put(transaction, metadata, &key, &value, MDB_NOOVERWRITE);
-    if (result != MDB_SUCCESS) {
-        mdb_txn_abort(transaction);
-        auto error = errorFromLmdb(path, result, "commit Notebook manifest");
+    StoreValue key{keyText.size(), const_cast<char*>(keyText.data())};
+    StoreValue value{encodedManifest.size(), encodedManifest.data()};
+    result = store_put(transaction, metadata, &key, &value, storeNoOverwrite);
+    if (result != storeSuccess) {
+        store_txn_abort(transaction);
+        auto error = errorFromStore(path, result, "commit Notebook manifest");
         closeEnvironment();
         return error;
     }
     std::vector<std::uint8_t> encodedDerivedVersion;
     appendU32(encodedDerivedVersion, derivedIndexVersion);
-    MDB_val derivedKey{derivedIndexVersionKey.size(),
-                       const_cast<char*>(derivedIndexVersionKey.data())};
-    MDB_val derivedValue{encodedDerivedVersion.size(),
-                         encodedDerivedVersion.data()};
-    result = mdb_put(transaction, metadata, &derivedKey, &derivedValue,
-                     MDB_NOOVERWRITE);
-    if (result != MDB_SUCCESS) {
-        mdb_txn_abort(transaction);
+    StoreValue derivedKey{derivedIndexVersionKey.size(),
+                          const_cast<char*>(derivedIndexVersionKey.data())};
+    StoreValue derivedValue{encodedDerivedVersion.size(),
+                            encodedDerivedVersion.data()};
+    result = store_put(transaction, metadata, &derivedKey, &derivedValue,
+                       storeNoOverwrite);
+    if (result != storeSuccess) {
+        store_txn_abort(transaction);
         auto error =
-            errorFromLmdb(path, result, "commit derived index version");
+            errorFromStore(path, result, "commit derived index version");
         closeEnvironment();
         return error;
     }
-    result = mdb_txn_commit(transaction);
+    result = store_txn_commit(transaction);
     transaction = nullptr;
-    if (result != MDB_SUCCESS) {
-        auto error = errorFromLmdb(path, result, "commit Notebook manifest");
+    if (result != storeSuccess) {
+        auto error = errorFromStore(path, result, "commit Notebook manifest");
         closeEnvironment();
         return error;
     }
 
-    result = mdb_env_sync(environment, 1);
     closeEnvironment();
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result, "flush new Notebook");
-    }
     return std::nullopt;
 }
 
@@ -815,17 +793,16 @@ removeIfPresent(const std::filesystem::path& path) noexcept
 }
 
 struct JournalDatabases {
-    MDB_dbi metadata{0};
-    MDB_dbi blocks{0};
-    MDB_dbi blocksByType{0};
-    MDB_dbi containmentByParent{0};
-    MDB_dbi containmentByChild{0};
-    MDB_dbi journalByDate{0};
-    MDB_dbi pagesByName{0};
-    MDB_dbi referencesBySource{0};
-    MDB_dbi referencesByTarget{0};
-    MDB_dbi propertiesByBlock{0};
-    MDB_dbi propertyIndex{0};
+    LogicalDatabase metadata{0};
+    LogicalDatabase blocks{0};
+    LogicalDatabase blocksByType{0};
+    LogicalDatabase containmentByParent{0};
+    LogicalDatabase containmentByChild{0};
+    LogicalDatabase journalByDate{0};
+    LogicalDatabase pagesByName{0};
+    LogicalDatabase referencesBySource{0};
+    LogicalDatabase referencesByTarget{0};
+    LogicalDatabase propertiesByBlock{0};
 };
 
 enum class SemanticReferenceTargetIndexKind : std::uint8_t {
@@ -1039,12 +1016,13 @@ enum class OutlineEditKind : std::uint8_t {
 };
 
 auto
-openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path,
+openJournalDatabases(StoreTransaction* transaction,
+                     const std::filesystem::path& path,
                      bool createDerivedIndexes = false)
     -> Result<JournalDatabases>
 {
     JournalDatabases databases;
-    const std::array<std::pair<const char*, MDB_dbi*>, 11> names{{
+    const std::array<std::pair<const char*, LogicalDatabase*>, 10> names{{
         {"metadata", &databases.metadata},
         {"blocks", &databases.blocks},
         {"blocks_by_type", &databases.blocksByType},
@@ -1055,60 +1033,59 @@ openJournalDatabases(MDB_txn* transaction, const std::filesystem::path& path,
         {"references_by_source", &databases.referencesBySource},
         {"references_by_target", &databases.referencesByTarget},
         {"properties_by_block", &databases.propertiesByBlock},
-        {"property_index", &databases.propertyIndex},
     }};
     for (std::size_t index = 0; index < names.size(); ++index) {
         const auto& [name, database] = names[index];
         const auto derived = index >= 7;
         const auto flags = createDerivedIndexes && derived
-                               ? static_cast<unsigned int>(MDB_CREATE)
+                               ? static_cast<unsigned int>(storeCreate)
                                : 0U;
-        const auto result = mdb_dbi_open(transaction, name, flags, database);
-        if (result != MDB_SUCCESS) {
+        const auto result = store_dbi_open(transaction, name, flags, database);
+        if (result != storeSuccess) {
             return Result<JournalDatabases>::failure(
-                errorFromLmdb(path, result, "open Journal database"));
+                errorFromStore(path, result, "open Journal database"));
         }
     }
     return Result<JournalDatabases>::success(databases);
 }
 
 auto
-readBlock(MDB_txn* transaction, MDB_dbi database,
+readBlock(StoreTransaction* transaction, LogicalDatabase database,
           const BlockId& blockIdentifier, const std::filesystem::path& path)
     -> Result<BlockRecord>
 {
     auto key = blockKey(blockIdentifier);
-    MDB_val value{};
-    const auto result = mdb_get(transaction, database, &key, &value);
-    if (result == MDB_NOTFOUND) {
+    StoreValue value{};
+    const auto result = store_get(transaction, database, &key, &value);
+    if (result == storeNotFound) {
         return Result<BlockRecord>::failure(makeError(
             NotebookErrorCode::blockNotFound, path, "Block does not exist"));
     }
-    if (result != MDB_SUCCESS) {
+    if (result != storeSuccess) {
         return Result<BlockRecord>::failure(
-            errorFromLmdb(path, result, "read Block"));
+            errorFromStore(path, result, "read Block"));
     }
     return decodeBlock(value, blockIdentifier, path);
 }
 
 auto
-readProperties(MDB_txn* transaction, MDB_dbi database,
+readProperties(StoreTransaction* transaction, LogicalDatabase database,
                const BlockId& blockIdentifier,
                const std::filesystem::path& path)
     -> Result<std::vector<authored_text::Property>>
 {
     auto key = blockKey(blockIdentifier);
-    MDB_val value{};
-    const auto result = mdb_get(transaction, database, &key, &value);
-    if (result == MDB_NOTFOUND) {
+    StoreValue value{};
+    const auto result = store_get(transaction, database, &key, &value);
+    if (result == storeNotFound) {
         return Result<std::vector<authored_text::Property>>::success({});
     }
-    if (result != MDB_SUCCESS) {
+    if (result != storeSuccess) {
         return Result<std::vector<authored_text::Property>>::failure(
-            errorFromLmdb(path, result, "read Properties"));
+            errorFromStore(path, result, "read Properties"));
     }
-    const auto* bytes = static_cast<const std::uint8_t*>(value.mv_data);
-    if (value.mv_size < 6 || readU16(bytes) != 1) {
+    const auto* bytes = static_cast<const std::uint8_t*>(value.data);
+    if (value.size < 6 || readU16(bytes) != 1) {
         return Result<std::vector<authored_text::Property>>::failure(
             makeError(NotebookErrorCode::invalidNotebook, path,
                       "Property index is invalid"));
@@ -1118,7 +1095,7 @@ readProperties(MDB_txn* transaction, MDB_dbi database,
     std::vector<authored_text::Property> properties;
     properties.reserve(count);
     for (std::uint32_t index = 0; index < count; ++index) {
-        if (value.mv_size - offset < 16) {
+        if (value.size - offset < 16) {
             return Result<std::vector<authored_text::Property>>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "Property index is truncated"));
@@ -1127,7 +1104,7 @@ readProperties(MDB_txn* transaction, MDB_dbi database,
         const auto sourceLength = readU32(bytes + offset + 4);
         const auto keyLength = readU32(bytes + offset + 8);
         offset += 12;
-        if (value.mv_size - offset < static_cast<std::size_t>(keyLength) + 4) {
+        if (value.size - offset < static_cast<std::size_t>(keyLength) + 4) {
             return Result<std::vector<authored_text::Property>>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "Property key is truncated"));
@@ -1137,7 +1114,7 @@ readProperties(MDB_txn* transaction, MDB_dbi database,
         offset += keyLength;
         const auto valueLength = readU32(bytes + offset);
         offset += 4;
-        if (value.mv_size - offset < valueLength) {
+        if (value.size - offset < valueLength) {
             return Result<std::vector<authored_text::Property>>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "Property value is truncated"));
@@ -1148,7 +1125,7 @@ readProperties(MDB_txn* transaction, MDB_dbi database,
                          valueLength)});
         offset += valueLength;
     }
-    if (offset != value.mv_size) {
+    if (offset != value.size) {
         return Result<std::vector<authored_text::Property>>::failure(
             makeError(NotebookErrorCode::invalidNotebook, path,
                       "Property index has trailing bytes"));
@@ -1158,30 +1135,32 @@ readProperties(MDB_txn* transaction, MDB_dbi database,
 }
 
 auto
-writeBlock(MDB_txn* transaction, MDB_dbi database, const BlockRecord& block,
-           const std::filesystem::path& path) -> std::optional<NotebookError>
+writeBlock(StoreTransaction* transaction, LogicalDatabase database,
+           const BlockRecord& block, const std::filesystem::path& path)
+    -> std::optional<NotebookError>
 {
     auto key = blockKey(block.metadata.id);
     auto encoded = encodeBlock(block);
-    MDB_val value{encoded.size(), encoded.data()};
-    const auto result = mdb_put(transaction, database, &key, &value, 0);
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result, "write Block");
+    StoreValue value{encoded.size(), encoded.data()};
+    const auto result = store_put(transaction, database, &key, &value, 0);
+    if (result != storeSuccess) {
+        return errorFromStore(path, result, "write Block");
     }
     return std::nullopt;
 }
 
 auto
-writeIncrementedRevision(MDB_txn* transaction, MDB_dbi metadata,
+writeIncrementedRevision(StoreTransaction* transaction,
+                         LogicalDatabase metadata,
                          const std::filesystem::path& path)
     -> std::optional<NotebookError>
 {
     constexpr std::string_view keyText = "manifest";
-    MDB_val key{keyText.size(), const_cast<char*>(keyText.data())};
-    MDB_val value{};
-    auto result = mdb_get(transaction, metadata, &key, &value);
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result, "read Notebook revision");
+    StoreValue key{keyText.size(), const_cast<char*>(keyText.data())};
+    StoreValue value{};
+    auto result = store_get(transaction, metadata, &key, &value);
+    if (result != storeSuccess) {
+        return errorFromStore(path, result, "read Notebook revision");
     }
     auto manifest = decodeManifest(value, path);
     if (!manifest) {
@@ -1190,10 +1169,10 @@ writeIncrementedRevision(MDB_txn* transaction, MDB_dbi metadata,
     auto updatedManifest = std::move(manifest).value();
     ++updatedManifest.revision;
     auto encoded = encodeManifest(updatedManifest);
-    MDB_val updated{encoded.size(), encoded.data()};
-    result = mdb_put(transaction, metadata, &key, &updated, 0);
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result, "write Notebook revision");
+    StoreValue updated{encoded.size(), encoded.data()};
+    result = store_put(transaction, metadata, &key, &updated, 0);
+    if (result != storeSuccess) {
+        return errorFromStore(path, result, "write Notebook revision");
     }
     return std::nullopt;
 }
@@ -1223,69 +1202,66 @@ containmentParentKey(const BlockId& parent, std::uint64_t rank)
 }
 
 auto
-rankFromParentKey(const MDB_val& key) -> std::uint64_t
+rankFromParentKey(const StoreValue& key) -> std::uint64_t
 {
-    const auto* bytes = static_cast<const std::uint8_t*>(key.mv_data);
+    const auto* bytes = static_cast<const std::uint8_t*>(key.data);
     return readU64(bytes + 16);
 }
 
 auto
-writeTypeIndex(MDB_txn* transaction, MDB_dbi database, BlockType type,
-               const BlockId& blockIdentifier,
+writeTypeIndex(StoreTransaction* transaction, LogicalDatabase database,
+               BlockType type, const BlockId& blockIdentifier,
                const std::filesystem::path& path)
     -> std::optional<NotebookError>
 {
     auto encoded = typeIndexKey(type, blockIdentifier);
-    MDB_val key{encoded.size(), encoded.data()};
-    MDB_val value{0, nullptr};
+    StoreValue key{encoded.size(), encoded.data()};
+    StoreValue value{0, nullptr};
     const auto result =
-        mdb_put(transaction, database, &key, &value, MDB_NOOVERWRITE);
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result, "index Block type");
+        store_put(transaction, database, &key, &value, storeNoOverwrite);
+    if (result != storeSuccess) {
+        return errorFromStore(path, result, "index Block type");
     }
     return std::nullopt;
 }
 
 auto
-rebuildSemanticReferenceIndexes(MDB_txn* transaction,
+rebuildSemanticReferenceIndexes(StoreTransaction* transaction,
                                 const JournalDatabases& databases,
                                 const std::filesystem::path& path)
     -> std::optional<NotebookError>
 {
-    auto result = mdb_drop(transaction, databases.referencesBySource, 0);
-    if (result == MDB_SUCCESS) {
-        result = mdb_drop(transaction, databases.referencesByTarget, 0);
+    auto result = store_drop(transaction, databases.referencesBySource, 0);
+    if (result == storeSuccess) {
+        result = store_drop(transaction, databases.referencesByTarget, 0);
     }
-    if (result == MDB_SUCCESS) {
-        result = mdb_drop(transaction, databases.propertiesByBlock, 0);
+    if (result == storeSuccess) {
+        result = store_drop(transaction, databases.propertiesByBlock, 0);
     }
-    if (result == MDB_SUCCESS) {
-        result = mdb_drop(transaction, databases.propertyIndex, 0);
-    }
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result, "clear Page Link indexes");
+    if (result != storeSuccess) {
+        return errorFromStore(path, result, "clear Page Link indexes");
     }
 
-    MDB_cursor* cursor = nullptr;
-    result = mdb_cursor_open(transaction, databases.blocksByType, &cursor);
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result, "open Page Link source scan");
+    StoreCursor* cursor = nullptr;
+    result = store_cursor_open(transaction, databases.blocksByType, &cursor);
+    if (result != storeSuccess) {
+        return errorFromStore(path, result, "open Page Link source scan");
     }
     BlockId lowerId{};
     auto lower = typeIndexKey(BlockType::entry, lowerId);
-    MDB_val key{lower.size(), lower.data()};
-    MDB_val value{};
-    result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
-    while (result == MDB_SUCCESS && key.mv_size == lower.size() &&
-           static_cast<const std::uint8_t*>(key.mv_data)[0] ==
+    StoreValue key{lower.size(), lower.data()};
+    StoreValue value{};
+    result = store_cursor_get(cursor, &key, &value, storeSetRange);
+    while (result == storeSuccess && key.size == lower.size() &&
+           static_cast<const std::uint8_t*>(key.data)[0] ==
                static_cast<std::uint8_t>(BlockType::entry)) {
         BlockId sourceId;
         std::memcpy(sourceId.bytes.data(),
-                    static_cast<const std::uint8_t*>(key.mv_data) + 1,
+                    static_cast<const std::uint8_t*>(key.data) + 1,
                     sourceId.bytes.size());
         auto source = readBlock(transaction, databases.blocks, sourceId, path);
         if (!source) {
-            mdb_cursor_close(cursor);
+            store_cursor_close(cursor);
             return source.error();
         }
         const auto properties =
@@ -1307,39 +1283,14 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
                           static_cast<std::uint32_t>(property.value.size()));
                 encoded.insert(encoded.end(), property.value.begin(),
                                property.value.end());
-
-                std::vector<std::uint8_t> indexKey;
-                appendU32(indexKey,
-                          static_cast<std::uint32_t>(property.key.size()));
-                indexKey.insert(indexKey.end(), property.key.begin(),
-                                property.key.end());
-                appendU32(indexKey,
-                          static_cast<std::uint32_t>(property.value.size()));
-                indexKey.insert(indexKey.end(), property.value.begin(),
-                                property.value.end());
-                const auto* sourceBytes = reinterpret_cast<const std::uint8_t*>(
-                    sourceId.bytes.data());
-                indexKey.insert(indexKey.end(), sourceBytes,
-                                sourceBytes + sourceId.bytes.size());
-                appendU32(indexKey, static_cast<std::uint32_t>(
-                                        property.sourceByteOffset));
-                MDB_val propertyKey{indexKey.size(), indexKey.data()};
-                MDB_val empty{0, nullptr};
-                const auto put = mdb_put(transaction, databases.propertyIndex,
-                                         &propertyKey, &empty, 0);
-                if (put != MDB_SUCCESS) {
-                    mdb_cursor_close(cursor);
-                    return errorFromLmdb(path, put,
-                                         "write Property reverse index");
-                }
             }
             auto propertyBlockKey = blockKey(sourceId);
-            MDB_val propertyValue{encoded.size(), encoded.data()};
-            const auto put = mdb_put(transaction, databases.propertiesByBlock,
-                                     &propertyBlockKey, &propertyValue, 0);
-            if (put != MDB_SUCCESS) {
-                mdb_cursor_close(cursor);
-                return errorFromLmdb(path, put, "write Property source index");
+            StoreValue propertyValue{encoded.size(), encoded.data()};
+            const auto put = store_put(transaction, databases.propertiesByBlock,
+                                       &propertyBlockKey, &propertyValue, 0);
+            if (put != storeSuccess) {
+                store_cursor_close(cursor);
+                return errorFromStore(path, put, "write Property source index");
             }
         }
         const auto links =
@@ -1358,38 +1309,39 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
                 encoded.insert(encoded.end(), link.pageName.begin(),
                                link.pageName.end());
 
-                MDB_val nameKey{link.pageName.size(),
-                                const_cast<char*>(link.pageName.data())};
-                MDB_val pageValue{};
-                const auto lookup = mdb_get(transaction, databases.pagesByName,
-                                            &nameKey, &pageValue);
-                const auto resolved =
-                    lookup == MDB_SUCCESS &&
-                    pageValue.mv_size == sourceId.bytes.size();
+                StoreValue nameKey{link.pageName.size(),
+                                   const_cast<char*>(link.pageName.data())};
+                StoreValue pageValue{};
+                const auto lookup = store_get(
+                    transaction, databases.pagesByName, &nameKey, &pageValue);
+                const auto resolved = lookup == storeSuccess &&
+                                      pageValue.size == sourceId.bytes.size();
                 encoded.push_back(resolved ? 1U : 0U);
                 if (resolved) {
                     const auto* target =
-                        static_cast<const std::uint8_t*>(pageValue.mv_data);
+                        static_cast<const std::uint8_t*>(pageValue.data);
                     encoded.insert(encoded.end(), target,
                                    target + sourceId.bytes.size());
-                } else if (lookup != MDB_NOTFOUND) {
-                    mdb_cursor_close(cursor);
-                    return lookup == MDB_SUCCESS
+                } else if (lookup != storeNotFound) {
+                    store_cursor_close(cursor);
+                    return lookup == storeSuccess
                                ? makeError(NotebookErrorCode::invalidNotebook,
                                            path,
                                            "Page name index contains an "
                                            "invalid identity")
-                               : errorFromLmdb(path, lookup,
-                                               "resolve Page Link");
+                               : errorFromStore(path, lookup,
+                                                "resolve Page Link");
                 }
             }
             auto sourceKey = blockKey(sourceId);
-            MDB_val sourceValue{encoded.size(), encoded.data()};
-            const auto put = mdb_put(transaction, databases.referencesBySource,
-                                     &sourceKey, &sourceValue, 0);
-            if (put != MDB_SUCCESS) {
-                mdb_cursor_close(cursor);
-                return errorFromLmdb(path, put, "write Page Link source index");
+            StoreValue sourceValue{encoded.size(), encoded.data()};
+            const auto put =
+                store_put(transaction, databases.referencesBySource, &sourceKey,
+                          &sourceValue, 0);
+            if (put != storeSuccess) {
+                store_cursor_close(cursor);
+                return errorFromStore(path, put,
+                                      "write Page Link source index");
             }
         }
         for (const auto& reference :
@@ -1400,7 +1352,7 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
             const auto resolved = static_cast<bool>(target);
             if (!resolved &&
                 target.error().code != NotebookErrorCode::blockNotFound) {
-                mdb_cursor_close(cursor);
+                store_cursor_close(cursor);
                 return target.error();
             }
             auto reverseKey = blockReferenceTargetPrefix(targetId, resolved);
@@ -1408,55 +1360,56 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
                 reinterpret_cast<const std::uint8_t*>(sourceId.bytes.data());
             reverseKey.insert(reverseKey.end(), sourceBytes,
                               sourceBytes + sourceId.bytes.size());
-            MDB_val reverseKeyValue{reverseKey.size(), reverseKey.data()};
-            MDB_val empty{0, nullptr};
-            const auto put = mdb_put(transaction, databases.referencesByTarget,
-                                     &reverseKeyValue, &empty, 0);
-            if (put != MDB_SUCCESS) {
-                mdb_cursor_close(cursor);
-                return errorFromLmdb(path, put,
-                                     "write Block Reference reverse index");
+            StoreValue reverseKeyValue{reverseKey.size(), reverseKey.data()};
+            StoreValue empty{0, nullptr};
+            const auto put =
+                store_put(transaction, databases.referencesByTarget,
+                          &reverseKeyValue, &empty, 0);
+            if (put != storeSuccess) {
+                store_cursor_close(cursor);
+                return errorFromStore(path, put,
+                                      "write Block Reference reverse index");
             }
         }
-        result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+        result = store_cursor_get(cursor, &key, &value, storeNext);
     }
-    mdb_cursor_close(cursor);
-    if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
-        return errorFromLmdb(path, result, "scan Page Link sources");
+    store_cursor_close(cursor);
+    if (result != storeSuccess && result != storeNotFound) {
+        return errorFromStore(path, result, "scan Page Link sources");
     }
 
-    MDB_cursor* sourceCursor = nullptr;
-    result = mdb_cursor_open(transaction, databases.referencesBySource,
-                             &sourceCursor);
-    if (result != MDB_SUCCESS) {
-        return errorFromLmdb(path, result,
-                             "open Page Link reverse indexing scan");
+    StoreCursor* sourceCursor = nullptr;
+    result = store_cursor_open(transaction, databases.referencesBySource,
+                               &sourceCursor);
+    if (result != storeSuccess) {
+        return errorFromStore(path, result,
+                              "open Page Link reverse indexing scan");
     }
-    MDB_val sourceKey{};
-    MDB_val sourceValue{};
-    result = mdb_cursor_get(sourceCursor, &sourceKey, &sourceValue, MDB_FIRST);
-    while (result == MDB_SUCCESS) {
-        const auto* bytes =
-            static_cast<const std::uint8_t*>(sourceValue.mv_data);
-        if (sourceKey.mv_size != BlockId{}.bytes.size() ||
-            sourceValue.mv_size < 6 || readU16(bytes) != 1) {
-            mdb_cursor_close(sourceCursor);
+    StoreValue sourceKey{};
+    StoreValue sourceValue{};
+    result =
+        store_cursor_get(sourceCursor, &sourceKey, &sourceValue, storeFirst);
+    while (result == storeSuccess) {
+        const auto* bytes = static_cast<const std::uint8_t*>(sourceValue.data);
+        if (sourceKey.size != BlockId{}.bytes.size() || sourceValue.size < 6 ||
+            readU16(bytes) != 1) {
+            store_cursor_close(sourceCursor);
             return makeError(NotebookErrorCode::invalidNotebook, path,
                              "Page Link source index is invalid");
         }
         const auto count = readU32(bytes + 2);
         std::size_t offset = 6;
         for (std::uint32_t index = 0; index < count; ++index) {
-            if (sourceValue.mv_size - offset < 11) {
-                mdb_cursor_close(sourceCursor);
+            if (sourceValue.size - offset < 11) {
+                store_cursor_close(sourceCursor);
                 return makeError(NotebookErrorCode::invalidNotebook, path,
                                  "Page Link occurrence index is truncated");
             }
             const auto nameLength = readU16(bytes + offset + 8);
             offset += 10;
-            if (sourceValue.mv_size - offset <
+            if (sourceValue.size - offset <
                 static_cast<std::size_t>(nameLength) + 1) {
-                mdb_cursor_close(sourceCursor);
+                store_cursor_close(sourceCursor);
                 return makeError(NotebookErrorCode::invalidNotebook, path,
                                  "Page Link occurrence name is truncated");
             }
@@ -1466,10 +1419,10 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
                 resolved ? SemanticReferenceTargetIndexKind::resolvedPage
                          : SemanticReferenceTargetIndexKind::unresolvedPage));
             if (resolved) {
-                if (sourceValue.mv_size - offset <
+                if (sourceValue.size - offset <
                     static_cast<std::size_t>(nameLength) + 1 +
                         BlockId{}.bytes.size()) {
-                    mdb_cursor_close(sourceCursor);
+                    store_cursor_close(sourceCursor);
                     return makeError(NotebookErrorCode::invalidNotebook, path,
                                      "resolved Page Link target is truncated");
                 }
@@ -1484,46 +1437,47 @@ rebuildSemanticReferenceIndexes(MDB_txn* transaction,
                 offset += nameLength + 1;
             }
             const auto* source =
-                static_cast<const std::uint8_t*>(sourceKey.mv_data);
+                static_cast<const std::uint8_t*>(sourceKey.data);
             reverseKey.insert(reverseKey.end(), source,
-                              source + sourceKey.mv_size);
-            MDB_val reverseKeyValue{reverseKey.size(), reverseKey.data()};
-            MDB_val empty{0, nullptr};
-            const auto put = mdb_put(transaction, databases.referencesByTarget,
-                                     &reverseKeyValue, &empty, 0);
-            if (put != MDB_SUCCESS) {
-                mdb_cursor_close(sourceCursor);
-                return errorFromLmdb(path, put,
-                                     "write Page Link reverse index");
+                              source + sourceKey.size);
+            StoreValue reverseKeyValue{reverseKey.size(), reverseKey.data()};
+            StoreValue empty{0, nullptr};
+            const auto put =
+                store_put(transaction, databases.referencesByTarget,
+                          &reverseKeyValue, &empty, 0);
+            if (put != storeSuccess) {
+                store_cursor_close(sourceCursor);
+                return errorFromStore(path, put,
+                                      "write Page Link reverse index");
             }
         }
-        if (offset != sourceValue.mv_size) {
-            mdb_cursor_close(sourceCursor);
+        if (offset != sourceValue.size) {
+            store_cursor_close(sourceCursor);
             return makeError(NotebookErrorCode::invalidNotebook, path,
                              "Page Link source index has trailing bytes");
         }
         result =
-            mdb_cursor_get(sourceCursor, &sourceKey, &sourceValue, MDB_NEXT);
+            store_cursor_get(sourceCursor, &sourceKey, &sourceValue, storeNext);
     }
-    mdb_cursor_close(sourceCursor);
-    if (result != MDB_NOTFOUND) {
-        return errorFromLmdb(path, result, "scan Page Link reverse sources");
+    store_cursor_close(sourceCursor);
+    if (result != storeNotFound) {
+        return errorFromStore(path, result, "scan Page Link reverse sources");
     }
     std::vector<std::uint8_t> encodedVersion;
     appendU32(encodedVersion, derivedIndexVersion);
-    MDB_val versionKey{derivedIndexVersionKey.size(),
-                       const_cast<char*>(derivedIndexVersionKey.data())};
-    MDB_val versionValue{encodedVersion.size(), encodedVersion.data()};
-    result =
-        mdb_put(transaction, databases.metadata, &versionKey, &versionValue, 0);
-    return result == MDB_SUCCESS
+    StoreValue versionKey{derivedIndexVersionKey.size(),
+                          const_cast<char*>(derivedIndexVersionKey.data())};
+    StoreValue versionValue{encodedVersion.size(), encodedVersion.data()};
+    result = store_put(transaction, databases.metadata, &versionKey,
+                       &versionValue, 0);
+    return result == storeSuccess
                ? std::nullopt
-               : std::optional<NotebookError>{errorFromLmdb(
+               : std::optional<NotebookError>{errorFromStore(
                      path, result, "write derived index version")};
 }
 
 auto
-incrementRevision(MDB_txn* transaction, MDB_dbi metadata,
+incrementRevision(StoreTransaction* transaction, LogicalDatabase metadata,
                   const std::filesystem::path& path)
     -> std::optional<NotebookError>
 {
@@ -1563,23 +1517,44 @@ class NotebookSubscription::Impl {
 class NotebookSession::Impl {
   public:
     Impl()
-        : commitAdapter(std::make_unique<LmdbJournalCommitAdapter>()),
+        : commitAdapter(std::make_unique<MiareJournalCommitAdapter>()),
           subscriptions(std::make_shared<SubscriptionState>())
     {
     }
 
-    ~Impl()
+    ~Impl() noexcept
     {
-        closeUnlocked();
+        try {
+            (void)closeUnlocked();
+        } catch (...) {
+            // Destruction is best effort; explicit close reports failures.
+            static_cast<void>(std::current_exception());
+        }
     }
 
-    void
-    closeUnlocked() noexcept
+    auto
+    closeUnlocked() -> Result<void>
     {
+#ifdef HIEDA_TESTING
+        if (rejectNextClose) {
+            rejectNextClose = false;
+            return Result<void>::failure(
+                makeError(NotebookErrorCode::ioFailure,
+                          info.value_or(NotebookInfo{}).path,
+                          "close Miare database: injected failure"));
+        }
+#endif
+        if (environment != nullptr) {
+            const auto result = store_env_try_close(environment);
+            if (result != storeSuccess) {
+                return Result<void>::failure(
+                    errorFromStore(info.value_or(NotebookInfo{}).path, result,
+                                   "close Miare database"));
+            }
+        }
         environment = nullptr;
         environmentOwner.reset();
         lockFile.reset();
-        dataLockFile.reset();
         info.reset();
         journalHistory.clear();
         pageHistories.clear();
@@ -1587,6 +1562,7 @@ class NotebookSession::Impl {
         crossPageRedo.clear();
         historyBytes = 0;
         nextHistorySequence = 1;
+        return Result<void>::success();
     }
 
     auto
@@ -1608,53 +1584,35 @@ class NotebookSession::Impl {
     }
 
     auto
-    acquireDataLock(const std::filesystem::path& path)
-        -> std::optional<NotebookError>
-    {
-        auto acquired = platform::acquireExclusiveFileLock(path, false);
-        if (const auto* error = std::get_if<platform::FileError>(&acquired)) {
-            if (error->kind == platform::FileErrorKind::alreadyLocked) {
-                return makeError(
-                    NotebookErrorCode::alreadyInUse, path,
-                    "Notebook is already open through another path");
-            }
-            return errorFromPlatform(path, *error, "lock Notebook data file");
-        }
-        dataLockFile.emplace(
-            std::get<platform::ExclusiveFileLock>(std::move(acquired)));
-        return std::nullopt;
-    }
-
-    auto
     openEnvironment(const std::filesystem::path& path) -> Result<NotebookInfo>
     {
-        auto opened = openLmdbEnvironment(path);
+        auto opened = openStoreEnvironment(path);
         if (!opened) {
             return Result<NotebookInfo>::failure(opened.error());
         }
-        MDB_env* openedEnvironment = opened.value();
-        auto result = MDB_SUCCESS;
+        StoreEnvironment* openedEnvironment = opened.value();
+        auto result = storeSuccess;
 
-        MDB_txn* transaction = nullptr;
-        MDB_dbi metadata = 0;
-        result =
-            mdb_txn_begin(openedEnvironment, nullptr, MDB_RDONLY, &transaction);
-        if (result == MDB_SUCCESS) {
-            result = mdb_dbi_open(transaction, "metadata", 0, &metadata);
+        StoreTransaction* transaction = nullptr;
+        LogicalDatabase metadata = 0;
+        result = store_txn_begin(openedEnvironment, nullptr, storeReadOnly,
+                                 &transaction);
+        if (result == storeSuccess) {
+            result = store_dbi_open(transaction, "metadata", 0, &metadata);
         }
         constexpr std::string_view keyText = "manifest";
-        MDB_val key{keyText.size(), const_cast<char*>(keyText.data())};
-        MDB_val value{};
-        if (result == MDB_SUCCESS) {
-            result = mdb_get(transaction, metadata, &key, &value);
+        StoreValue key{keyText.size(), const_cast<char*>(keyText.data())};
+        StoreValue value{};
+        if (result == storeSuccess) {
+            result = store_get(transaction, metadata, &key, &value);
         }
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             if (transaction != nullptr) {
-                mdb_txn_abort(transaction);
+                store_txn_abort(transaction);
             }
-            mdb_env_close(openedEnvironment);
+            store_env_close(openedEnvironment);
             return Result<NotebookInfo>::failure(
-                errorFromLmdb(path, result, "read Notebook manifest"));
+                errorFromStore(path, result, "read Notebook manifest"));
         }
 
         auto manifest = decodeManifest(value, path);
@@ -1662,75 +1620,75 @@ class NotebookSession::Impl {
         if (manifest) {
             for (const auto* name :
                  {"references_by_source", "references_by_target",
-                  "properties_by_block", "property_index"}) {
-                MDB_dbi database = 0;
-                result = mdb_dbi_open(transaction, name, 0, &database);
-                if (result == MDB_NOTFOUND) {
+                  "properties_by_block"}) {
+                LogicalDatabase database = 0;
+                result = store_dbi_open(transaction, name, 0, &database);
+                if (result == storeNotFound) {
                     derivedIndexesMissing = true;
-                } else if (result != MDB_SUCCESS) {
+                } else if (result != storeSuccess) {
                     break;
                 }
             }
-            MDB_val versionKey{
+            StoreValue versionKey{
                 derivedIndexVersionKey.size(),
                 const_cast<char*>(derivedIndexVersionKey.data())};
-            MDB_val versionValue{};
-            if (result == MDB_SUCCESS) {
-                result =
-                    mdb_get(transaction, metadata, &versionKey, &versionValue);
-                if (result == MDB_NOTFOUND) {
+            StoreValue versionValue{};
+            if (result == storeSuccess) {
+                result = store_get(transaction, metadata, &versionKey,
+                                   &versionValue);
+                if (result == storeNotFound) {
                     derivedIndexesMissing = true;
-                    result = MDB_SUCCESS;
-                } else if (result == MDB_SUCCESS &&
-                           (versionValue.mv_size != 4 ||
+                    result = storeSuccess;
+                } else if (result == storeSuccess &&
+                           (versionValue.size != 4 ||
                             readU32(static_cast<const std::uint8_t*>(
-                                versionValue.mv_data)) !=
-                                derivedIndexVersion)) {
+                                versionValue.data)) != derivedIndexVersion)) {
                     derivedIndexesMissing = true;
                 }
             }
         }
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         if (!manifest) {
-            mdb_env_close(openedEnvironment);
+            store_env_close(openedEnvironment);
             return Result<NotebookInfo>::failure(manifest.error());
         }
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
-            mdb_env_close(openedEnvironment);
+        if (result != storeSuccess && result != storeNotFound) {
+            store_env_close(openedEnvironment);
             return Result<NotebookInfo>::failure(
-                errorFromLmdb(path, result, "inspect derived indexes"));
+                errorFromStore(path, result, "inspect derived indexes"));
         }
         if (derivedIndexesMissing) {
             transaction = nullptr;
-            result = mdb_txn_begin(openedEnvironment, nullptr, 0, &transaction);
-            if (result == MDB_SUCCESS) {
+            result =
+                store_txn_begin(openedEnvironment, nullptr, 0, &transaction);
+            if (result == storeSuccess) {
                 auto databases = openJournalDatabases(transaction, path, true);
                 if (!databases) {
-                    mdb_txn_abort(transaction);
-                    mdb_env_close(openedEnvironment);
+                    store_txn_abort(transaction);
+                    store_env_close(openedEnvironment);
                     return Result<NotebookInfo>::failure(databases.error());
                 }
                 if (auto error = rebuildSemanticReferenceIndexes(
                         transaction, databases.value(), path)) {
-                    mdb_txn_abort(transaction);
-                    mdb_env_close(openedEnvironment);
+                    store_txn_abort(transaction);
+                    store_env_close(openedEnvironment);
                     return Result<NotebookInfo>::failure(std::move(*error));
                 }
-                result = mdb_txn_commit(transaction);
+                result = store_txn_commit(transaction);
                 transaction = nullptr;
             }
-            if (result != MDB_SUCCESS) {
+            if (result != storeSuccess) {
                 if (transaction != nullptr) {
-                    mdb_txn_abort(transaction);
+                    store_txn_abort(transaction);
                 }
-                mdb_env_close(openedEnvironment);
+                store_env_close(openedEnvironment);
                 return Result<NotebookInfo>::failure(
-                    errorFromLmdb(path, result, "backfill derived indexes"));
+                    errorFromStore(path, result, "backfill derived indexes"));
             }
         }
 
-        environmentOwner =
-            std::shared_ptr<MDB_env>(openedEnvironment, mdb_env_close);
+        environmentOwner = std::shared_ptr<StoreEnvironment>(openedEnvironment,
+                                                             store_env_close);
         environment = environmentOwner.get();
         info = NotebookInfo{manifest.value().id, path, schemaVersion,
                             manifest.value().revision};
@@ -1753,80 +1711,81 @@ class NotebookSession::Impl {
     }
 
     auto
-    childrenOf(MDB_txn* transaction, const JournalDatabases& databases,
+    childrenOf(StoreTransaction* transaction, const JournalDatabases& databases,
                const BlockId& parent) const
         -> Result<std::vector<std::pair<BlockId, std::uint64_t>>>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
         std::vector<std::pair<BlockId, std::uint64_t>> children;
-        MDB_cursor* cursor = nullptr;
-        auto result = mdb_cursor_open(transaction,
-                                      databases.containmentByParent, &cursor);
-        if (result != MDB_SUCCESS) {
+        StoreCursor* cursor = nullptr;
+        auto result = store_cursor_open(transaction,
+                                        databases.containmentByParent, &cursor);
+        if (result != storeSuccess) {
             return Result<std::vector<std::pair<BlockId, std::uint64_t>>>::
                 failure(
-                    errorFromLmdb(path, result, "open Containment children"));
+                    errorFromStore(path, result, "open Containment children"));
         }
         auto start = containmentParentKey(parent, 0);
-        MDB_val key{start.size(), start.data()};
-        MDB_val value{};
-        result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
-        while (result == MDB_SUCCESS && key.mv_size == 24 &&
-               std::memcmp(key.mv_data, parent.bytes.data(),
+        StoreValue key{start.size(), start.data()};
+        StoreValue value{};
+        result = store_cursor_get(cursor, &key, &value, storeSetRange);
+        while (result == storeSuccess && key.size == 24 &&
+               std::memcmp(key.data, parent.bytes.data(),
                            parent.bytes.size()) == 0) {
-            if (value.mv_size != BlockId{}.bytes.size()) {
-                mdb_cursor_close(cursor);
+            if (value.size != BlockId{}.bytes.size()) {
+                store_cursor_close(cursor);
                 return Result<std::vector<std::pair<BlockId, std::uint64_t>>>::
                     failure(makeError(NotebookErrorCode::invalidNotebook, path,
                                       "invalid Containment child"));
             }
             BlockId child;
-            std::memcpy(child.bytes.data(), value.mv_data, child.bytes.size());
+            std::memcpy(child.bytes.data(), value.data, child.bytes.size());
             children.emplace_back(child, rankFromParentKey(key));
-            result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+            result = store_cursor_get(cursor, &key, &value, storeNext);
         }
-        mdb_cursor_close(cursor);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+        store_cursor_close(cursor);
+        if (result != storeSuccess && result != storeNotFound) {
             return Result<std::vector<std::pair<BlockId, std::uint64_t>>>::
                 failure(
-                    errorFromLmdb(path, result, "read Containment children"));
+                    errorFromStore(path, result, "read Containment children"));
         }
         return Result<std::vector<std::pair<BlockId, std::uint64_t>>>::success(
             std::move(children));
     }
 
     auto
-    parentOf(MDB_txn* transaction, const JournalDatabases& databases,
+    parentOf(StoreTransaction* transaction, const JournalDatabases& databases,
              const BlockId& child) const -> Result<ParentLink>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
         auto key = blockKey(child);
-        MDB_val value{};
+        StoreValue value{};
         const auto result =
-            mdb_get(transaction, databases.containmentByChild, &key, &value);
-        if (result == MDB_NOTFOUND) {
+            store_get(transaction, databases.containmentByChild, &key, &value);
+        if (result == storeNotFound) {
             return Result<ParentLink>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "contained Block has no parent"));
         }
-        if (result != MDB_SUCCESS || value.mv_size != 24) {
+        if (result != storeSuccess || value.size != 24) {
             return Result<ParentLink>::failure(
-                result == MDB_SUCCESS
+                result == storeSuccess
                     ? makeError(NotebookErrorCode::invalidNotebook, path,
                                 "invalid Containment parent index")
-                    : errorFromLmdb(path, result, "read Containment parent"));
+                    : errorFromStore(path, result, "read Containment parent"));
         }
         ParentLink link;
-        std::memcpy(link.parent.bytes.data(), value.mv_data,
+        std::memcpy(link.parent.bytes.data(), value.data,
                     link.parent.bytes.size());
-        MDB_val encoded{value.mv_size, value.mv_data};
+        StoreValue encoded{value.size, value.data};
         link.rank = rankFromParentKey(encoded);
         return Result<ParentLink>::success(link);
     }
 
     auto
-    loadOutline(MDB_txn* transaction, const JournalDatabases& databases,
-                BlockRecord page) const -> Result<LoadedOutline>
+    loadOutline(StoreTransaction* transaction,
+                const JournalDatabases& databases, BlockRecord page) const
+        -> Result<LoadedOutline>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
         LoadedOutline outline{std::move(page), {}};
@@ -1891,7 +1850,8 @@ class NotebookSession::Impl {
     }
 
     auto
-    loadOutlineForEntry(MDB_txn* transaction, const JournalDatabases& databases,
+    loadOutlineForEntry(StoreTransaction* transaction,
+                        const JournalDatabases& databases,
                         BlockId entryId) const -> Result<LoadedOutline>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
@@ -1936,7 +1896,8 @@ class NotebookSession::Impl {
     }
 
     auto
-    eraseContainment(MDB_txn* transaction, const JournalDatabases& databases,
+    eraseContainment(StoreTransaction* transaction,
+                     const JournalDatabases& databases,
                      const OutlineEntryRecord& entry) const
         -> std::optional<NotebookError>
     {
@@ -1947,23 +1908,24 @@ class NotebookSession::Impl {
         }
         auto parentKey =
             containmentParentKey(parent.value().parent, parent.value().rank);
-        MDB_val encodedParent{parentKey.size(), parentKey.data()};
-        auto result = mdb_del(transaction, databases.containmentByParent,
-                              &encodedParent, nullptr);
-        if (result != MDB_SUCCESS) {
-            return errorFromLmdb(path, result, "remove Containment ordering");
+        StoreValue encodedParent{parentKey.size(), parentKey.data()};
+        auto result = store_del(transaction, databases.containmentByParent,
+                                &encodedParent, nullptr);
+        if (result != storeSuccess) {
+            return errorFromStore(path, result, "remove Containment ordering");
         }
         auto childKey = blockKey(entry.metadata.id);
-        result = mdb_del(transaction, databases.containmentByChild, &childKey,
-                         nullptr);
-        if (result != MDB_SUCCESS) {
-            return errorFromLmdb(path, result, "remove Containment parent");
+        result = store_del(transaction, databases.containmentByChild, &childKey,
+                           nullptr);
+        if (result != storeSuccess) {
+            return errorFromStore(path, result, "remove Containment parent");
         }
         return std::nullopt;
     }
 
     auto
-    rewriteContainment(MDB_txn* transaction, const JournalDatabases& databases,
+    rewriteContainment(StoreTransaction* transaction,
+                       const JournalDatabases& databases,
                        const LoadedOutline& before,
                        const LoadedOutline& after) const
         -> std::optional<NotebookError>
@@ -1991,22 +1953,22 @@ class NotebookSession::Impl {
                 found->second += rankGap;
             }
             auto parentBytes = containmentParentKey(parent, rank);
-            MDB_val parentKey{parentBytes.size(), parentBytes.data()};
-            MDB_val childValue{
+            StoreValue parentKey{parentBytes.size(), parentBytes.data()};
+            StoreValue childValue{
                 entry.metadata.id.bytes.size(),
                 const_cast<std::byte*>(entry.metadata.id.bytes.data())};
-            auto result = mdb_put(transaction, databases.containmentByParent,
-                                  &parentKey, &childValue, MDB_NOOVERWRITE);
-            if (result != MDB_SUCCESS) {
-                return errorFromLmdb(path, result,
-                                     "write Containment ordering");
+            auto result = store_put(transaction, databases.containmentByParent,
+                                    &parentKey, &childValue, storeNoOverwrite);
+            if (result != storeSuccess) {
+                return errorFromStore(path, result,
+                                      "write Containment ordering");
             }
             auto childKey = blockKey(entry.metadata.id);
-            MDB_val parentValue{parentBytes.size(), parentBytes.data()};
-            result = mdb_put(transaction, databases.containmentByChild,
-                             &childKey, &parentValue, MDB_NOOVERWRITE);
-            if (result != MDB_SUCCESS) {
-                return errorFromLmdb(path, result, "write Containment parent");
+            StoreValue parentValue{parentBytes.size(), parentBytes.data()};
+            result = store_put(transaction, databases.containmentByChild,
+                               &childKey, &parentValue, storeNoOverwrite);
+            if (result != storeSuccess) {
+                return errorFromStore(path, result, "write Containment parent");
             }
         }
         return std::nullopt;
@@ -2043,9 +2005,10 @@ class NotebookSession::Impl {
     }
 
     auto
-    touchContainer(MDB_txn* transaction, const JournalDatabases& databases,
-                   LoadedOutline& outline, std::optional<BlockId> parent,
-                   BlockTimestamp now) const -> std::optional<NotebookError>
+    touchContainer(StoreTransaction* transaction,
+                   const JournalDatabases& databases, LoadedOutline& outline,
+                   std::optional<BlockId> parent, BlockTimestamp now) const
+        -> std::optional<NotebookError>
     {
         if (!parent) {
             outline.page.metadata.updatedAt = now;
@@ -2074,29 +2037,30 @@ class NotebookSession::Impl {
     }
 
     auto
-    loadOutlineForDate(MDB_txn* transaction, const JournalDatabases& databases,
+    loadOutlineForDate(StoreTransaction* transaction,
+                       const JournalDatabases& databases,
                        JournalDate date) const
         -> Result<std::optional<LoadedOutline>>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
         const auto encodedDate = dateKey(date);
-        MDB_val key{encodedDate.size(),
-                    const_cast<std::uint8_t*>(encodedDate.data())};
-        MDB_val value{};
+        StoreValue key{encodedDate.size(),
+                       const_cast<std::uint8_t*>(encodedDate.data())};
+        StoreValue value{};
         const auto result =
-            mdb_get(transaction, databases.journalByDate, &key, &value);
-        if (result == MDB_NOTFOUND) {
+            store_get(transaction, databases.journalByDate, &key, &value);
+        if (result == storeNotFound) {
             return Result<std::optional<LoadedOutline>>::success(std::nullopt);
         }
-        if (result != MDB_SUCCESS || value.mv_size != BlockId{}.bytes.size()) {
+        if (result != storeSuccess || value.size != BlockId{}.bytes.size()) {
             return Result<std::optional<LoadedOutline>>::failure(
-                result == MDB_SUCCESS
+                result == storeSuccess
                     ? makeError(NotebookErrorCode::invalidNotebook, path,
                                 "invalid Journal date index")
-                    : errorFromLmdb(path, result, "read Journal date index"));
+                    : errorFromStore(path, result, "read Journal date index"));
         }
         BlockId pageId;
-        std::memcpy(pageId.bytes.data(), value.mv_data, pageId.bytes.size());
+        std::memcpy(pageId.bytes.data(), value.data, pageId.bytes.size());
         auto page = readBlock(transaction, databases.blocks, pageId, path);
         if (!page || page.value().type != BlockType::page ||
             page.value().pageKind != PageKind::journal ||
@@ -2295,23 +2259,24 @@ class NotebookSession::Impl {
     }
 
     auto
-    removeTypeIndex(MDB_txn* transaction, MDB_dbi database, BlockType type,
-                    const BlockId& identifier) const
+    removeTypeIndex(StoreTransaction* transaction, LogicalDatabase database,
+                    BlockType type, const BlockId& identifier) const
         -> std::optional<NotebookError>
     {
         auto bytes = typeIndexKey(type, identifier);
-        MDB_val key{bytes.size(), bytes.data()};
-        const auto result = mdb_del(transaction, database, &key, nullptr);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
-            return errorFromLmdb(info.value_or(NotebookInfo{}).path, result,
-                                 "remove Block type index");
+        StoreValue key{bytes.size(), bytes.data()};
+        const auto result = store_del(transaction, database, &key, nullptr);
+        if (result != storeSuccess && result != storeNotFound) {
+            return errorFromStore(info.value_or(NotebookInfo{}).path, result,
+                                  "remove Block type index");
         }
         return std::nullopt;
     }
 
     auto
-    restoreOutline(MDB_txn* transaction, const JournalDatabases& databases,
-                   JournalDate date, const std::optional<LoadedOutline>& target)
+    restoreOutline(StoreTransaction* transaction,
+                   const JournalDatabases& databases, JournalDate date,
+                   const std::optional<LoadedOutline>& target)
         -> std::optional<NotebookError>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
@@ -2328,10 +2293,10 @@ class NotebookSession::Impl {
                 }
                 auto key = blockKey(entry.metadata.id);
                 auto result =
-                    mdb_del(transaction, databases.blocks, &key, nullptr);
-                if (result != MDB_SUCCESS) {
-                    return errorFromLmdb(path, result,
-                                         "remove Journal Entry for history");
+                    store_del(transaction, databases.blocks, &key, nullptr);
+                if (result != storeSuccess) {
+                    return errorFromStore(path, result,
+                                          "remove Journal Entry for history");
                 }
                 if (auto error = removeTypeIndex(
                         transaction, databases.blocksByType,
@@ -2341,10 +2306,10 @@ class NotebookSession::Impl {
             }
             auto pageKey = blockKey(current->page.metadata.id);
             auto result =
-                mdb_del(transaction, databases.blocks, &pageKey, nullptr);
-            if (result != MDB_SUCCESS) {
-                return errorFromLmdb(path, result,
-                                     "remove Journal Page for history");
+                store_del(transaction, databases.blocks, &pageKey, nullptr);
+            if (result != storeSuccess) {
+                return errorFromStore(path, result,
+                                      "remove Journal Page for history");
             }
             if (auto error = removeTypeIndex(
                     transaction, databases.blocksByType, BlockType::journalPage,
@@ -2353,13 +2318,13 @@ class NotebookSession::Impl {
             }
         }
         const auto encodedDate = dateKey(date);
-        MDB_val dateKeyValue{encodedDate.size(),
-                             const_cast<std::uint8_t*>(encodedDate.data())};
-        auto result = mdb_del(transaction, databases.journalByDate,
-                              &dateKeyValue, nullptr);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
-            return errorFromLmdb(path, result,
-                                 "remove Journal date for history");
+        StoreValue dateKeyValue{encodedDate.size(),
+                                const_cast<std::uint8_t*>(encodedDate.data())};
+        auto result = store_del(transaction, databases.journalByDate,
+                                &dateKeyValue, nullptr);
+        if (result != storeSuccess && result != storeNotFound) {
+            return errorFromStore(path, result,
+                                  "remove Journal date for history");
         }
         if (!target) {
             return std::nullopt;
@@ -2373,14 +2338,14 @@ class NotebookSession::Impl {
                                         target->page.metadata.id, path)) {
             return error;
         }
-        MDB_val pageValue{
+        StoreValue pageValue{
             target->page.metadata.id.bytes.size(),
             const_cast<std::byte*>(target->page.metadata.id.bytes.data())};
-        result = mdb_put(transaction, databases.journalByDate, &dateKeyValue,
-                         &pageValue, MDB_NOOVERWRITE);
-        if (result != MDB_SUCCESS) {
-            return errorFromLmdb(path, result,
-                                 "restore Journal date for history");
+        result = store_put(transaction, databases.journalByDate, &dateKeyValue,
+                           &pageValue, storeNoOverwrite);
+        if (result != storeSuccess) {
+            return errorFromStore(path, result,
+                                  "restore Journal date for history");
         }
         for (const auto& entry : target->entries) {
             const BlockRecord block{BlockType::entry,
@@ -2421,15 +2386,15 @@ class NotebookSession::Impl {
         const auto& action = source.back();
         const auto target = redo ? action.after : action.before;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
-            return Result<JournalPage>::failure(errorFromLmdb(
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
+            return Result<JournalPage>::failure(errorFromStore(
                 path, result,
                 redo ? "begin Journal redo" : "begin Journal undo"));
         }
         const auto fail = [&](NotebookError error) -> Result<JournalPage> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -2445,8 +2410,8 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
-            return Result<JournalPage>::failure(errorFromLmdb(
+        if (result != storeSuccess) {
+            return Result<JournalPage>::failure(errorFromStore(
                 path, result,
                 redo ? "commit Journal redo" : "commit Journal undo"));
         }
@@ -2484,23 +2449,23 @@ class NotebookSession::Impl {
     readPage(BlockId pageId) const -> Result<Page>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<Page>::failure(
-                errorFromLmdb(path, result, "begin Page read"));
+                errorFromStore(path, result, "begin Page read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<Page>::failure(databases.error());
         }
         auto loaded =
             readBlock(transaction, databases.value().blocks, pageId, path);
         if (!loaded || loaded.value().type != BlockType::page ||
             loaded.value().pageKind != PageKind::named) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             if (!loaded &&
                 loaded.error().code != NotebookErrorCode::blockNotFound) {
                 return Result<Page>::failure(loaded.error());
@@ -2510,7 +2475,7 @@ class NotebookSession::Impl {
         }
         auto outline = loadOutline(transaction, databases.value(),
                                    std::move(loaded).value());
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         if (!outline) {
             return Result<Page>::failure(outline.error());
         }
@@ -2521,47 +2486,47 @@ class NotebookSession::Impl {
     readPageLinks(BlockId entryId) const -> Result<std::vector<PageLink>>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<std::vector<PageLink>>::failure(
-                errorFromLmdb(path, result, "begin Page Link read"));
+                errorFromStore(path, result, "begin Page Link read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::vector<PageLink>>::failure(databases.error());
         }
         auto entry =
             readBlock(transaction, databases.value().blocks, entryId, path);
         if (!entry || entry.value().type != BlockType::entry) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::vector<PageLink>>::failure(
                 entry ? makeError(NotebookErrorCode::blockNotFound, path,
                                   "Block is not an Entry")
                       : entry.error());
         }
         auto sourceKey = blockKey(entryId);
-        MDB_val encoded{};
-        result = mdb_get(transaction, databases.value().referencesBySource,
-                         &sourceKey, &encoded);
-        if (result == MDB_NOTFOUND) {
-            mdb_txn_abort(transaction);
+        StoreValue encoded{};
+        result = store_get(transaction, databases.value().referencesBySource,
+                           &sourceKey, &encoded);
+        if (result == storeNotFound) {
+            store_txn_abort(transaction);
             return Result<std::vector<PageLink>>::success({});
         }
-        if (result != MDB_SUCCESS || encoded.mv_size < 6) {
-            mdb_txn_abort(transaction);
+        if (result != storeSuccess || encoded.size < 6) {
+            store_txn_abort(transaction);
             return Result<std::vector<PageLink>>::failure(
-                result == MDB_SUCCESS
+                result == storeSuccess
                     ? makeError(NotebookErrorCode::invalidNotebook, path,
                                 "Page Link source index is truncated")
-                    : errorFromLmdb(path, result,
-                                    "read Page Link source index"));
+                    : errorFromStore(path, result,
+                                     "read Page Link source index"));
         }
-        const auto* bytes = static_cast<const std::uint8_t*>(encoded.mv_data);
+        const auto* bytes = static_cast<const std::uint8_t*>(encoded.data);
         if (readU16(bytes) != 1) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::vector<PageLink>>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "unsupported Page Link index version"));
@@ -2571,8 +2536,8 @@ class NotebookSession::Impl {
         std::vector<PageLink> links;
         links.reserve(count);
         for (std::uint32_t index = 0; index < count; ++index) {
-            if (encoded.mv_size - offset < 11) {
-                mdb_txn_abort(transaction);
+            if (encoded.size - offset < 11) {
+                store_txn_abort(transaction);
                 return Result<std::vector<PageLink>>::failure(
                     makeError(NotebookErrorCode::invalidNotebook, path,
                               "Page Link occurrence is truncated"));
@@ -2581,9 +2546,9 @@ class NotebookSession::Impl {
             const auto sourceLength = readU32(bytes + offset + 4);
             const auto nameLength = readU16(bytes + offset + 8);
             offset += 10;
-            if (encoded.mv_size - offset <
+            if (encoded.size - offset <
                 static_cast<std::size_t>(nameLength) + 1) {
-                mdb_txn_abort(transaction);
+                store_txn_abort(transaction);
                 return Result<std::vector<PageLink>>::failure(
                     makeError(NotebookErrorCode::invalidNotebook, path,
                               "Page Link name is truncated"));
@@ -2594,8 +2559,8 @@ class NotebookSession::Impl {
             const auto resolved = bytes[offset++] != 0;
             std::optional<PageSummary> target;
             if (resolved) {
-                if (encoded.mv_size - offset < BlockId{}.bytes.size()) {
-                    mdb_txn_abort(transaction);
+                if (encoded.size - offset < BlockId{}.bytes.size()) {
+                    store_txn_abort(transaction);
                     return Result<std::vector<PageLink>>::failure(
                         makeError(NotebookErrorCode::invalidNotebook, path,
                                   "Page Link target is truncated"));
@@ -2608,7 +2573,7 @@ class NotebookSession::Impl {
                                        targetId, path);
                 if (!block || block.value().type != BlockType::page ||
                     block.value().pageKind != PageKind::named) {
-                    mdb_txn_abort(transaction);
+                    store_txn_abort(transaction);
                     return Result<std::vector<PageLink>>::failure(
                         block ? makeError(
                                     NotebookErrorCode::invalidNotebook, path,
@@ -2622,13 +2587,13 @@ class NotebookSession::Impl {
             links.push_back({sourceOffset, sourceLength, std::move(pageName),
                              std::move(target)});
         }
-        if (offset != encoded.mv_size) {
-            mdb_txn_abort(transaction);
+        if (offset != encoded.size) {
+            store_txn_abort(transaction);
             return Result<std::vector<PageLink>>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "Page Link source index has trailing bytes"));
         }
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<std::vector<PageLink>>::success(std::move(links));
     }
 
@@ -2637,23 +2602,23 @@ class NotebookSession::Impl {
         -> Result<std::vector<BlockReference>>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<std::vector<BlockReference>>::failure(
-                errorFromLmdb(path, result, "begin Block Reference read"));
+                errorFromStore(path, result, "begin Block Reference read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::vector<BlockReference>>::failure(
                 databases.error());
         }
         auto entry =
             readBlock(transaction, databases.value().blocks, entryId, path);
         if (!entry || entry.value().type != BlockType::entry) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::vector<BlockReference>>::failure(
                 entry ? makeError(NotebookErrorCode::blockNotFound, path,
                                   "Block is not an Entry")
@@ -2670,7 +2635,7 @@ class NotebookSession::Impl {
                 target = targetBlock.value().metadata;
             } else if (targetBlock.error().code !=
                        NotebookErrorCode::blockNotFound) {
-                mdb_txn_abort(transaction);
+                store_txn_abort(transaction);
                 return Result<std::vector<BlockReference>>::failure(
                     targetBlock.error());
             }
@@ -2678,7 +2643,7 @@ class NotebookSession::Impl {
                                   occurrence.sourceByteLength, targetId,
                                   std::move(target)});
         }
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<std::vector<BlockReference>>::success(
             std::move(references));
     }
@@ -2687,22 +2652,22 @@ class NotebookSession::Impl {
     readEntry(BlockId entryId) const -> Result<Entry>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<Entry>::failure(
-                errorFromLmdb(path, result, "begin Entry read"));
+                errorFromStore(path, result, "begin Entry read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<Entry>::failure(databases.error());
         }
         auto block =
             readBlock(transaction, databases.value().blocks, entryId, path);
         if (!block || block.value().type != BlockType::entry) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<Entry>::failure(
                 block ? makeError(NotebookErrorCode::blockNotFound, path,
                                   "Block is not an Entry")
@@ -2710,13 +2675,13 @@ class NotebookSession::Impl {
         }
         auto parent = parentOf(transaction, databases.value(), entryId);
         if (!parent) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<Entry>::failure(parent.error());
         }
         auto parentBlock = readBlock(transaction, databases.value().blocks,
                                      parent.value().parent, path);
         if (!parentBlock) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<Entry>::failure(parentBlock.error());
         }
         const auto parentEntry =
@@ -2725,7 +2690,7 @@ class NotebookSession::Impl {
                 : std::nullopt;
         Entry entry{block.value().metadata, block.value().authoredText,
                     parentEntry};
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<Entry>::success(std::move(entry));
     }
 
@@ -2734,16 +2699,16 @@ class NotebookSession::Impl {
         -> Result<BlockReferenceDestination>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
-            return Result<BlockReferenceDestination>::failure(errorFromLmdb(
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
+            return Result<BlockReferenceDestination>::failure(errorFromStore(
                 path, result, "begin Block Reference target read"));
         }
         const auto fail =
             [&](NotebookError error) -> Result<BlockReferenceDestination> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<BlockReferenceDestination>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -2794,7 +2759,7 @@ class NotebookSession::Impl {
         auto destination = BlockReferenceDestination{target.value().metadata,
                                                      publicOutline(outline),
                                                      std::move(pathIds)};
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<BlockReferenceDestination>::success(
             std::move(destination));
     }
@@ -2817,16 +2782,16 @@ class NotebookSession::Impl {
             batchOffset = cursor->offset;
         }
 
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<LinkedReferencesBatch>::failure(
-                errorFromLmdb(path, result, "begin Linked References read"));
+                errorFromStore(path, result, "begin Linked References read"));
         }
         const auto fail =
             [&](NotebookError error) -> Result<LinkedReferencesBatch> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<LinkedReferencesBatch>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -2842,33 +2807,33 @@ class NotebookSession::Impl {
         std::vector<BlockId> sourceIds;
         const auto collectSources = [&](const std::vector<std::uint8_t>& prefix)
             -> std::optional<NotebookError> {
-            MDB_cursor* cursor = nullptr;
-            auto scan = mdb_cursor_open(
+            StoreCursor* cursor = nullptr;
+            auto scan = store_cursor_open(
                 transaction, databases.value().referencesByTarget, &cursor);
-            if (scan != MDB_SUCCESS) {
-                return errorFromLmdb(path, scan, "open Linked References scan");
+            if (scan != storeSuccess) {
+                return errorFromStore(path, scan,
+                                      "open Linked References scan");
             }
-            MDB_val key{prefix.size(),
-                        const_cast<std::uint8_t*>(prefix.data())};
-            MDB_val value{};
-            scan = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
-            while (scan == MDB_SUCCESS &&
-                   key.mv_size == prefix.size() + BlockId{}.bytes.size() &&
-                   std::memcmp(key.mv_data, prefix.data(), prefix.size()) ==
-                       0) {
+            StoreValue key{prefix.size(),
+                           const_cast<std::uint8_t*>(prefix.data())};
+            StoreValue value{};
+            scan = store_cursor_get(cursor, &key, &value, storeSetRange);
+            while (scan == storeSuccess &&
+                   key.size == prefix.size() + BlockId{}.bytes.size() &&
+                   std::memcmp(key.data, prefix.data(), prefix.size()) == 0) {
                 BlockId sourceId;
                 std::memcpy(sourceId.bytes.data(),
-                            static_cast<const std::uint8_t*>(key.mv_data) +
+                            static_cast<const std::uint8_t*>(key.data) +
                                 prefix.size(),
                             sourceId.bytes.size());
                 if (std::ranges::find(sourceIds, sourceId) == sourceIds.end()) {
                     sourceIds.push_back(sourceId);
                 }
-                scan = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+                scan = store_cursor_get(cursor, &key, &value, storeNext);
             }
-            mdb_cursor_close(cursor);
-            if (scan != MDB_SUCCESS && scan != MDB_NOTFOUND) {
-                return errorFromLmdb(path, scan, "scan Linked References");
+            store_cursor_close(cursor);
+            if (scan != storeSuccess && scan != storeNotFound) {
+                return errorFromStore(path, scan, "scan Linked References");
             }
             return std::nullopt;
         };
@@ -3035,7 +3000,7 @@ class NotebookSession::Impl {
                                        batchEnd}
                     .encode();
         }
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<LinkedReferencesBatch>::success(
             {std::move(sources), total, std::move(nextCursor)});
     }
@@ -3044,15 +3009,15 @@ class NotebookSession::Impl {
     readPagePreview(const std::string& name) const -> Result<PagePreview>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<PagePreview>::failure(
-                errorFromLmdb(path, result, "begin Page Preview read"));
+                errorFromStore(path, result, "begin Page Preview read"));
         }
         const auto fail = [&](NotebookError error) -> Result<PagePreview> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<PagePreview>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -3070,40 +3035,40 @@ class NotebookSession::Impl {
         }
 
         PagePreview preview{name, {}};
-        MDB_cursor* cursor = nullptr;
-        result = mdb_cursor_open(transaction,
-                                 databases.value().referencesByTarget, &cursor);
-        if (result != MDB_SUCCESS) {
+        StoreCursor* cursor = nullptr;
+        result = store_cursor_open(
+            transaction, databases.value().referencesByTarget, &cursor);
+        if (result != storeSuccess) {
             return fail(
-                errorFromLmdb(path, result, "open Page Preview source scan"));
+                errorFromStore(path, result, "open Page Preview source scan"));
         }
         auto prefix = unresolvedPageLinkTargetPrefix(name);
-        MDB_val key{prefix.size(), prefix.data()};
-        MDB_val value{};
-        result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
-        while (result == MDB_SUCCESS &&
-               key.mv_size == prefix.size() + BlockId{}.bytes.size() &&
-               std::memcmp(key.mv_data, prefix.data(), prefix.size()) == 0) {
+        StoreValue key{prefix.size(), prefix.data()};
+        StoreValue value{};
+        result = store_cursor_get(cursor, &key, &value, storeSetRange);
+        while (result == storeSuccess &&
+               key.size == prefix.size() + BlockId{}.bytes.size() &&
+               std::memcmp(key.data, prefix.data(), prefix.size()) == 0) {
             BlockId sourceId;
             std::memcpy(sourceId.bytes.data(),
-                        static_cast<const std::uint8_t*>(key.mv_data) +
+                        static_cast<const std::uint8_t*>(key.data) +
                             prefix.size(),
                         sourceId.bytes.size());
             auto source = readBlock(transaction, databases.value().blocks,
                                     sourceId, path);
             if (!source) {
-                mdb_cursor_close(cursor);
+                store_cursor_close(cursor);
                 return fail(source.error());
             }
             auto parent = parentOf(transaction, databases.value(), sourceId);
             if (!parent) {
-                mdb_cursor_close(cursor);
+                store_cursor_close(cursor);
                 return fail(parent.error());
             }
             auto parentBlock = readBlock(transaction, databases.value().blocks,
                                          parent.value().parent, path);
             if (!parentBlock) {
-                mdb_cursor_close(cursor);
+                store_cursor_close(cursor);
                 return fail(parentBlock.error());
             }
             const auto parentEntry =
@@ -3113,14 +3078,14 @@ class NotebookSession::Impl {
             preview.sources.push_back({source.value().metadata,
                                        source.value().authoredText,
                                        parentEntry});
-            result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+            result = store_cursor_get(cursor, &key, &value, storeNext);
         }
-        mdb_cursor_close(cursor);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+        store_cursor_close(cursor);
+        if (result != storeSuccess && result != storeNotFound) {
             return fail(
-                errorFromLmdb(path, result, "scan Page Preview sources"));
+                errorFromStore(path, result, "scan Page Preview sources"));
         }
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<PagePreview>::success(std::move(preview));
     }
 
@@ -3141,17 +3106,17 @@ class NotebookSession::Impl {
             }
             batchOffset = cursor->offset;
         }
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<UnresolvedPageLinkSourcesBatch>::failure(
-                errorFromLmdb(path, result,
-                              "begin Page Preview Linked References read"));
+                errorFromStore(path, result,
+                               "begin Page Preview Linked References read"));
         }
         const auto fail =
             [&](NotebookError error) -> Result<UnresolvedPageLinkSourcesBatch> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<UnresolvedPageLinkSourcesBatch>::failure(
                 std::move(error));
         };
@@ -3170,32 +3135,32 @@ class NotebookSession::Impl {
         }
 
         std::vector<BlockId> sourceIds;
-        MDB_cursor* cursor = nullptr;
-        result = mdb_cursor_open(transaction,
-                                 databases.value().referencesByTarget, &cursor);
-        if (result != MDB_SUCCESS) {
+        StoreCursor* cursor = nullptr;
+        result = store_cursor_open(
+            transaction, databases.value().referencesByTarget, &cursor);
+        if (result != storeSuccess) {
             return fail(
-                errorFromLmdb(path, result, "open Page Preview source scan"));
+                errorFromStore(path, result, "open Page Preview source scan"));
         }
         auto prefix = unresolvedPageLinkTargetPrefix(name);
-        MDB_val key{prefix.size(), prefix.data()};
-        MDB_val value{};
-        result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
-        while (result == MDB_SUCCESS &&
-               key.mv_size == prefix.size() + BlockId{}.bytes.size() &&
-               std::memcmp(key.mv_data, prefix.data(), prefix.size()) == 0) {
+        StoreValue key{prefix.size(), prefix.data()};
+        StoreValue value{};
+        result = store_cursor_get(cursor, &key, &value, storeSetRange);
+        while (result == storeSuccess &&
+               key.size == prefix.size() + BlockId{}.bytes.size() &&
+               std::memcmp(key.data, prefix.data(), prefix.size()) == 0) {
             BlockId sourceId;
             std::memcpy(sourceId.bytes.data(),
-                        static_cast<const std::uint8_t*>(key.mv_data) +
+                        static_cast<const std::uint8_t*>(key.data) +
                             prefix.size(),
                         sourceId.bytes.size());
             sourceIds.push_back(sourceId);
-            result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+            result = store_cursor_get(cursor, &key, &value, storeNext);
         }
-        mdb_cursor_close(cursor);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+        store_cursor_close(cursor);
+        if (result != storeSuccess && result != storeNotFound) {
             return fail(
-                errorFromLmdb(path, result, "scan Page Preview sources"));
+                errorFromStore(path, result, "scan Page Preview sources"));
         }
 
         struct SourceCandidate {
@@ -3333,7 +3298,7 @@ class NotebookSession::Impl {
                                        batchEnd}
                     .encode();
         }
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<UnresolvedPageLinkSourcesBatch>::success(
             {std::move(sources), total, std::move(nextCursor)});
     }
@@ -3342,40 +3307,40 @@ class NotebookSession::Impl {
     readPages() const -> Result<std::vector<PageSummary>>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<std::vector<PageSummary>>::failure(
-                errorFromLmdb(path, result, "begin Page list read"));
+                errorFromStore(path, result, "begin Page list read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::vector<PageSummary>>::failure(databases.error());
         }
-        MDB_cursor* cursor = nullptr;
-        result = mdb_cursor_open(transaction, databases.value().blocksByType,
-                                 &cursor);
+        StoreCursor* cursor = nullptr;
+        result = store_cursor_open(transaction, databases.value().blocksByType,
+                                   &cursor);
         std::vector<PageSummary> pages;
         auto start = typeIndexKey(BlockType::page, BlockId{});
-        MDB_val key{start.size(), start.data()};
-        MDB_val value{};
-        if (result == MDB_SUCCESS) {
-            result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+        StoreValue key{start.size(), start.data()};
+        StoreValue value{};
+        if (result == storeSuccess) {
+            result = store_cursor_get(cursor, &key, &value, storeSetRange);
         }
-        while (result == MDB_SUCCESS && key.mv_size == 17 &&
-               static_cast<const std::uint8_t*>(key.mv_data)[0] ==
+        while (result == storeSuccess && key.size == 17 &&
+               static_cast<const std::uint8_t*>(key.data)[0] ==
                    static_cast<std::uint8_t>(BlockType::page)) {
             BlockId id;
             std::memcpy(id.bytes.data(),
-                        static_cast<const std::uint8_t*>(key.mv_data) + 1,
+                        static_cast<const std::uint8_t*>(key.data) + 1,
                         id.bytes.size());
             auto block =
                 readBlock(transaction, databases.value().blocks, id, path);
             if (!block || block.value().type != BlockType::page) {
-                mdb_cursor_close(cursor);
-                mdb_txn_abort(transaction);
+                store_cursor_close(cursor);
+                store_txn_abort(transaction);
                 return Result<std::vector<PageSummary>>::failure(
                     block ? makeError(NotebookErrorCode::invalidNotebook, path,
                                       "Page type index is invalid")
@@ -3385,44 +3350,45 @@ class NotebookSession::Impl {
                 pages.push_back({block.value().metadata, block.value().pageName,
                                  block.value().displayTitle});
             }
-            result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+            result = store_cursor_get(cursor, &key, &value, storeNext);
         }
         if (cursor != nullptr) {
-            mdb_cursor_close(cursor);
+            store_cursor_close(cursor);
         }
-        mdb_txn_abort(transaction);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+        store_txn_abort(transaction);
+        if (result != storeSuccess && result != storeNotFound) {
             return Result<std::vector<PageSummary>>::failure(
-                errorFromLmdb(path, result, "read Page list"));
+                errorFromStore(path, result, "read Page list"));
         }
         std::ranges::sort(pages, {}, &PageSummary::name);
         return Result<std::vector<PageSummary>>::success(std::move(pages));
     }
 
     auto
-    namedPageByName(MDB_txn* transaction, const JournalDatabases& databases,
+    namedPageByName(StoreTransaction* transaction,
+                    const JournalDatabases& databases,
                     std::string_view name) const
         -> Result<std::optional<PageSummary>>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_val key{name.size(), const_cast<char*>(name.data())};
-        MDB_val value{};
+        StoreValue key{name.size(), const_cast<char*>(name.data())};
+        StoreValue value{};
         const auto result =
-            mdb_get(transaction, databases.pagesByName, &key, &value);
-        if (result == MDB_NOTFOUND) {
+            store_get(transaction, databases.pagesByName, &key, &value);
+        if (result == storeNotFound) {
             return Result<std::optional<PageSummary>>::success(std::nullopt);
         }
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<std::optional<PageSummary>>::failure(
-                errorFromLmdb(path, result, "read Page hierarchy name"));
+                errorFromStore(path, result, "read Page hierarchy name"));
         }
-        if (value.mv_size != BlockId{}.bytes.size()) {
+        if (value.size != BlockId{}.bytes.size()) {
             return Result<std::optional<PageSummary>>::failure(
                 makeError(NotebookErrorCode::invalidNotebook, path,
                           "invalid Page name index value"));
         }
         BlockId id;
-        std::memcpy(id.bytes.data(), value.mv_data, id.bytes.size());
+        std::memcpy(id.bytes.data(), value.data, id.bytes.size());
         auto block = readBlock(transaction, databases.blocks, id, path);
         if (!block || block.value().type != BlockType::page ||
             block.value().pageKind != PageKind::named ||
@@ -3439,28 +3405,28 @@ class NotebookSession::Impl {
     }
 
     auto
-    hierarchyNameHasChildren(MDB_txn* transaction,
+    hierarchyNameHasChildren(StoreTransaction* transaction,
                              const JournalDatabases& databases,
                              std::string_view name) const -> Result<bool>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
         const auto prefix = std::string(name) + '/';
-        MDB_cursor* cursor = nullptr;
+        StoreCursor* cursor = nullptr;
         auto result =
-            mdb_cursor_open(transaction, databases.pagesByName, &cursor);
-        if (result != MDB_SUCCESS) {
-            return Result<bool>::failure(errorFromLmdb(
+            store_cursor_open(transaction, databases.pagesByName, &cursor);
+        if (result != storeSuccess) {
+            return Result<bool>::failure(errorFromStore(
                 path, result, "open Page hierarchy child lookup"));
         }
-        MDB_val key{prefix.size(), const_cast<char*>(prefix.data())};
-        MDB_val value{};
-        result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+        StoreValue key{prefix.size(), const_cast<char*>(prefix.data())};
+        StoreValue value{};
+        result = store_cursor_get(cursor, &key, &value, storeSetRange);
         const auto hasChildren =
-            result == MDB_SUCCESS && key.mv_size >= prefix.size() &&
-            std::memcmp(key.mv_data, prefix.data(), prefix.size()) == 0;
-        mdb_cursor_close(cursor);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
-            return Result<bool>::failure(errorFromLmdb(
+            result == storeSuccess && key.size >= prefix.size() &&
+            std::memcmp(key.data, prefix.data(), prefix.size()) == 0;
+        store_cursor_close(cursor);
+        if (result != storeSuccess && result != storeNotFound) {
+            return Result<bool>::failure(errorFromStore(
                 path, result, "read Page hierarchy child lookup"));
         }
         return Result<bool>::success(hasChildren);
@@ -3471,16 +3437,16 @@ class NotebookSession::Impl {
         -> Result<std::optional<PageHierarchyNode>>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<std::optional<PageHierarchyNode>>::failure(
-                errorFromLmdb(path, result, "begin Page hierarchy lookup"));
+                errorFromStore(path, result, "begin Page hierarchy lookup"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::optional<PageHierarchyNode>>::failure(
                 databases.error());
         }
@@ -3488,12 +3454,12 @@ class NotebookSession::Impl {
         auto hasChildren =
             hierarchyNameHasChildren(transaction, databases.value(), name);
         if (!page || !hasChildren) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::optional<PageHierarchyNode>>::failure(
                 page ? hasChildren.error() : page.error());
         }
         if (!page.value() && !hasChildren.value()) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::optional<PageHierarchyNode>>::success(
                 std::nullopt);
         }
@@ -3502,7 +3468,7 @@ class NotebookSession::Impl {
             separator == std::string::npos ? name : name.substr(separator + 1);
         PageHierarchyNode node{std::move(name), std::move(localSegment),
                                std::move(page).value(), hasChildren.value()};
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<std::optional<PageHierarchyNode>>::success(
             std::move(node));
     }
@@ -3545,41 +3511,41 @@ class NotebookSession::Impl {
             lastSegment = continuationCursor->substr(secondBreak + 1);
         }
 
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
-            return Result<PageHierarchyBatch>::failure(errorFromLmdb(
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
+            return Result<PageHierarchyBatch>::failure(errorFromStore(
                 path, result, "begin Page hierarchy enumeration"));
         }
         const auto fail =
             [&](NotebookError error) -> Result<PageHierarchyBatch> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<PageHierarchyBatch>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
             return fail(databases.error());
         }
-        MDB_cursor* cursor = nullptr;
-        result = mdb_cursor_open(transaction, databases.value().pagesByName,
-                                 &cursor);
-        if (result != MDB_SUCCESS) {
-            return fail(
-                errorFromLmdb(path, result, "open Page hierarchy enumeration"));
+        StoreCursor* cursor = nullptr;
+        result = store_cursor_open(transaction, databases.value().pagesByName,
+                                   &cursor);
+        if (result != storeSuccess) {
+            return fail(errorFromStore(path, result,
+                                       "open Page hierarchy enumeration"));
         }
         const auto prefix = parent.empty() ? std::string{} : parent + '/';
         const auto scanStart = prefix + lastSegment;
-        MDB_val key{scanStart.size(), const_cast<char*>(scanStart.data())};
-        MDB_val value{};
+        StoreValue key{scanStart.size(), const_cast<char*>(scanStart.data())};
+        StoreValue value{};
         result = scanStart.empty()
-                     ? mdb_cursor_get(cursor, &key, &value, MDB_FIRST)
-                     : mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
+                     ? store_cursor_get(cursor, &key, &value, storeFirst)
+                     : store_cursor_get(cursor, &key, &value, storeSetRange);
         PageHierarchyBatch batch;
         std::string previousSegment;
-        while (result == MDB_SUCCESS) {
-            const auto pageName = std::string_view(
-                static_cast<const char*>(key.mv_data), key.mv_size);
+        while (result == storeSuccess) {
+            const auto pageName =
+                std::string_view(static_cast<const char*>(key.data), key.size);
             if (!prefix.empty() && !pageName.starts_with(prefix)) {
                 break;
             }
@@ -3595,7 +3561,7 @@ class NotebookSession::Impl {
                 auto hasChildren = hierarchyNameHasChildren(
                     transaction, databases.value(), name);
                 if (!materialized || !hasChildren) {
-                    mdb_cursor_close(cursor);
+                    store_cursor_close(cursor);
                     return fail(materialized ? hasChildren.error()
                                              : materialized.error());
                 }
@@ -3606,12 +3572,12 @@ class NotebookSession::Impl {
                     break;
                 }
             }
-            result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+            result = store_cursor_get(cursor, &key, &value, storeNext);
         }
-        mdb_cursor_close(cursor);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
-            return fail(
-                errorFromLmdb(path, result, "read Page hierarchy enumeration"));
+        store_cursor_close(cursor);
+        if (result != storeSuccess && result != storeNotFound) {
+            return fail(errorFromStore(path, result,
+                                       "read Page hierarchy enumeration"));
         }
         if (batch.nodes.size() == 101) {
             batch.nodes.pop_back();
@@ -3619,7 +3585,7 @@ class NotebookSession::Impl {
                                        parent + '\n' +
                                        batch.nodes.back().localSegment;
         }
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         return Result<PageHierarchyBatch>::success(std::move(batch));
     }
 
@@ -3628,30 +3594,30 @@ class NotebookSession::Impl {
     {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<Page>::failure(
-                errorFromLmdb(path, result, "begin Page creation"));
+                errorFromStore(path, result, "begin Page creation"));
         }
         const auto fail = [&](NotebookError error) -> Result<Page> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<Page>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
             return fail(databases.error());
         }
-        MDB_val nameKey{name.size(), name.data()};
-        MDB_val existing{};
-        result = mdb_get(transaction, databases.value().pagesByName, &nameKey,
-                         &existing);
-        if (result == MDB_SUCCESS) {
+        StoreValue nameKey{name.size(), name.data()};
+        StoreValue existing{};
+        result = store_get(transaction, databases.value().pagesByName, &nameKey,
+                           &existing);
+        if (result == storeSuccess) {
             return fail(makeError(NotebookErrorCode::pageNameConflict, path,
                                   "Page name is already in use"));
         }
-        if (result != MDB_NOTFOUND) {
-            return fail(errorFromLmdb(path, result, "check Page name"));
+        if (result != storeNotFound) {
+            return fail(errorFromStore(path, result, "check Page name"));
         }
         const auto now = currentTimestamp();
         BlockRecord block{
@@ -3659,7 +3625,7 @@ class NotebookSession::Impl {
             std::nullopt,    {},
             std::move(name), std::move(displayTitle),
             PageKind::named};
-        nameKey = MDB_val{block.pageName.size(), block.pageName.data()};
+        nameKey = StoreValue{block.pageName.size(), block.pageName.data()};
         if (auto error = writeBlock(transaction, databases.value().blocks,
                                     block, path)) {
             return fail(std::move(*error));
@@ -3669,21 +3635,21 @@ class NotebookSession::Impl {
                                block.type, block.metadata.id, path)) {
             return fail(std::move(*error));
         }
-        MDB_val idValue{block.metadata.id.bytes.size(),
-                        block.metadata.id.bytes.data()};
-        result = mdb_put(transaction, databases.value().pagesByName, &nameKey,
-                         &idValue, MDB_NOOVERWRITE);
-        if (result != MDB_SUCCESS) {
-            return fail(errorFromLmdb(path, result, "index Page name"));
+        StoreValue idValue{block.metadata.id.bytes.size(),
+                           block.metadata.id.bytes.data()};
+        result = store_put(transaction, databases.value().pagesByName, &nameKey,
+                           &idValue, storeNoOverwrite);
+        if (result != storeSuccess) {
+            return fail(errorFromStore(path, result, "index Page name"));
         }
         if (auto error = incrementRevision(transaction,
                                            databases.value().metadata, path)) {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<Page>::failure(
-                errorFromLmdb(path, result, "commit Page creation"));
+                errorFromStore(path, result, "commit Page creation"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -3715,14 +3681,14 @@ class NotebookSession::Impl {
         lastCommandCommitted = false;
         lastMechanicalTextChanges.clear();
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<Page>::failure(
-                errorFromLmdb(path, result, "begin Page rename"));
+                errorFromStore(path, result, "begin Page rename"));
         }
         const auto fail = [&](NotebookError error) -> Result<Page> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<Page>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -3744,30 +3710,29 @@ class NotebookSession::Impl {
         const auto oldName = block.pageName;
         std::vector<MechanicalTextChange> textChanges;
         if (oldName != name) {
-            MDB_cursor* cursor = nullptr;
-            result = mdb_cursor_open(
+            StoreCursor* cursor = nullptr;
+            result = store_cursor_open(
                 transaction, databases.value().referencesByTarget, &cursor);
-            if (result != MDB_SUCCESS) {
-                return fail(
-                    errorFromLmdb(path, result, "open Page Link rewrite scan"));
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result,
+                                           "open Page Link rewrite scan"));
             }
             auto prefix = resolvedPageLinkTargetPrefix(pageId);
-            MDB_val key{prefix.size(), prefix.data()};
-            MDB_val value{};
-            result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
-            while (result == MDB_SUCCESS &&
-                   key.mv_size == prefix.size() + BlockId{}.bytes.size() &&
-                   std::memcmp(key.mv_data, prefix.data(), prefix.size()) ==
-                       0) {
+            StoreValue key{prefix.size(), prefix.data()};
+            StoreValue value{};
+            result = store_cursor_get(cursor, &key, &value, storeSetRange);
+            while (result == storeSuccess &&
+                   key.size == prefix.size() + BlockId{}.bytes.size() &&
+                   std::memcmp(key.data, prefix.data(), prefix.size()) == 0) {
                 BlockId sourceId;
                 std::memcpy(sourceId.bytes.data(),
-                            static_cast<const std::uint8_t*>(key.mv_data) +
+                            static_cast<const std::uint8_t*>(key.data) +
                                 prefix.size(),
                             sourceId.bytes.size());
                 auto source = readBlock(transaction, databases.value().blocks,
                                         sourceId, path);
                 if (!source) {
-                    mdb_cursor_close(cursor);
+                    store_cursor_close(cursor);
                     return fail(source.error());
                 }
                 auto rewritten = source.value().authoredText;
@@ -3781,7 +3746,7 @@ class NotebookSession::Impl {
                 }
                 if (rewritten != source.value().authoredText) {
                     if (!validAuthoredText(rewritten)) {
-                        mdb_cursor_close(cursor);
+                        store_cursor_close(cursor);
                         return fail(makeError(
                             NotebookErrorCode::invalidAuthoredText, path,
                             "Page Link rewrite exceeds Authored Text limits"));
@@ -3790,44 +3755,43 @@ class NotebookSession::Impl {
                                            source.value().authoredText,
                                            std::move(rewritten)});
                 }
-                result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+                result = store_cursor_get(cursor, &key, &value, storeNext);
             }
-            mdb_cursor_close(cursor);
-            if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
-                return fail(errorFromLmdb(path, result,
-                                          "scan Page Link rewrite sources"));
+            store_cursor_close(cursor);
+            if (result != storeSuccess && result != storeNotFound) {
+                return fail(errorFromStore(path, result,
+                                           "scan Page Link rewrite sources"));
             }
-            result = mdb_cursor_open(transaction,
-                                     databases.value().blocksByType, &cursor);
-            if (result != MDB_SUCCESS) {
-                return fail(errorFromLmdb(path, result,
-                                          "open Query Anchor rewrite scan"));
+            result = store_cursor_open(transaction,
+                                       databases.value().blocksByType, &cursor);
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result,
+                                           "open Query Anchor rewrite scan"));
             }
             auto entryPrefix = typeIndexKey(BlockType::entry, BlockId{});
-            MDB_val entryKey{entryPrefix.size(), entryPrefix.data()};
-            MDB_val entryValue{};
+            StoreValue entryKey{entryPrefix.size(), entryPrefix.data()};
+            StoreValue entryValue{};
             result =
-                mdb_cursor_get(cursor, &entryKey, &entryValue, MDB_SET_RANGE);
-            while (result == MDB_SUCCESS &&
-                   entryKey.mv_size == entryPrefix.size() &&
-                   static_cast<const std::uint8_t*>(entryKey.mv_data)[0] ==
+                store_cursor_get(cursor, &entryKey, &entryValue, storeSetRange);
+            while (result == storeSuccess &&
+                   entryKey.size == entryPrefix.size() &&
+                   static_cast<const std::uint8_t*>(entryKey.data)[0] ==
                        static_cast<std::uint8_t>(BlockType::entry)) {
                 BlockId sourceId;
                 std::memcpy(sourceId.bytes.data(),
-                            static_cast<const std::uint8_t*>(entryKey.mv_data) +
-                                1,
+                            static_cast<const std::uint8_t*>(entryKey.data) + 1,
                             sourceId.bytes.size());
                 auto source = readBlock(transaction, databases.value().blocks,
                                         sourceId, path);
                 if (!source) {
-                    mdb_cursor_close(cursor);
+                    store_cursor_close(cursor);
                     return fail(source.error());
                 }
                 auto rewritten = query_language::rewritePageAnchors(
                     source.value().authoredText, {oldName, name});
                 if (rewritten != source.value().authoredText) {
                     if (!validAuthoredText(rewritten)) {
-                        mdb_cursor_close(cursor);
+                        store_cursor_close(cursor);
                         return fail(makeError(
                             NotebookErrorCode::invalidAuthoredText, path,
                             "Query Anchor rewrite exceeds Authored Text "
@@ -3838,12 +3802,12 @@ class NotebookSession::Impl {
                                            std::move(rewritten)});
                 }
                 result =
-                    mdb_cursor_get(cursor, &entryKey, &entryValue, MDB_NEXT);
+                    store_cursor_get(cursor, &entryKey, &entryValue, storeNext);
             }
-            mdb_cursor_close(cursor);
-            if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
-                return fail(errorFromLmdb(path, result,
-                                          "scan Query Anchor rewrite sources"));
+            store_cursor_close(cursor);
+            if (result != storeSuccess && result != storeNotFound) {
+                return fail(errorFromStore(
+                    path, result, "scan Query Anchor rewrite sources"));
             }
             for (const auto& change : textChanges) {
                 auto source = readBlock(transaction, databases.value().blocks,
@@ -3861,30 +3825,30 @@ class NotebookSession::Impl {
             }
         }
         if (block.pageName != name) {
-            MDB_val newKey{name.size(), name.data()};
-            MDB_val existing{};
-            result = mdb_get(transaction, databases.value().pagesByName,
-                             &newKey, &existing);
-            if (result == MDB_SUCCESS) {
+            StoreValue newKey{name.size(), name.data()};
+            StoreValue existing{};
+            result = store_get(transaction, databases.value().pagesByName,
+                               &newKey, &existing);
+            if (result == storeSuccess) {
                 return fail(makeError(NotebookErrorCode::pageNameConflict, path,
                                       "Page name is already in use"));
             }
-            if (result != MDB_NOTFOUND) {
+            if (result != storeNotFound) {
                 return fail(
-                    errorFromLmdb(path, result, "check renamed Page name"));
+                    errorFromStore(path, result, "check renamed Page name"));
             }
-            MDB_val oldKey{block.pageName.size(), block.pageName.data()};
-            result = mdb_del(transaction, databases.value().pagesByName,
-                             &oldKey, nullptr);
-            if (result != MDB_SUCCESS) {
+            StoreValue oldKey{block.pageName.size(), block.pageName.data()};
+            result = store_del(transaction, databases.value().pagesByName,
+                               &oldKey, nullptr);
+            if (result != storeSuccess) {
                 return fail(
-                    errorFromLmdb(path, result, "remove old Page name"));
+                    errorFromStore(path, result, "remove old Page name"));
             }
-            MDB_val idValue{pageId.bytes.size(), pageId.bytes.data()};
-            result = mdb_put(transaction, databases.value().pagesByName,
-                             &newKey, &idValue, MDB_NOOVERWRITE);
-            if (result != MDB_SUCCESS) {
-                return fail(errorFromLmdb(path, result, "index renamed Page"));
+            StoreValue idValue{pageId.bytes.size(), pageId.bytes.data()};
+            result = store_put(transaction, databases.value().pagesByName,
+                               &newKey, &idValue, storeNoOverwrite);
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result, "index renamed Page"));
             }
         }
         block.pageName = std::move(name);
@@ -3899,9 +3863,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<Page>::failure(
-                errorFromLmdb(path, result, "commit Page rename"));
+                errorFromStore(path, result, "commit Page rename"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -3916,14 +3880,14 @@ class NotebookSession::Impl {
     {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<Page>::failure(
-                errorFromLmdb(path, result, "begin Page Entry insertion"));
+                errorFromStore(path, result, "begin Page Entry insertion"));
         }
         const auto fail = [&](NotebookError error) -> Result<Page> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<Page>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -3995,9 +3959,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<Page>::failure(
-                errorFromLmdb(path, result, "commit Page Entry insertion"));
+                errorFromStore(path, result, "commit Page Entry insertion"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -4023,21 +3987,21 @@ class NotebookSession::Impl {
     pageIdForEntry(BlockId entryId) const -> Result<BlockId>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<BlockId>::failure(
-                errorFromLmdb(path, result, "begin Page Entry read"));
+                errorFromStore(path, result, "begin Page Entry read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<BlockId>::failure(databases.error());
         }
         auto outline =
             loadOutlineForEntry(transaction, databases.value(), entryId);
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         if (!outline || outline.value().page.pageKind != PageKind::named) {
             return Result<BlockId>::failure(
                 outline ? makeError(NotebookErrorCode::blockNotFound, path,
@@ -4051,21 +4015,21 @@ class NotebookSession::Impl {
     pageKindForEntry(BlockId entryId) const -> Result<PageKind>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<PageKind>::failure(
-                errorFromLmdb(path, result, "begin containing Page read"));
+                errorFromStore(path, result, "begin containing Page read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<PageKind>::failure(databases.error());
         }
         auto outline =
             loadOutlineForEntry(transaction, databases.value(), entryId);
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         if (!outline) {
             return Result<PageKind>::failure(outline.error());
         }
@@ -4145,15 +4109,15 @@ class NotebookSession::Impl {
     {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<std::optional<Page>>::failure(
-                errorFromLmdb(path, result, "begin Page history"));
+                errorFromStore(path, result, "begin Page history"));
         }
         const auto fail =
             [&](NotebookError error) -> Result<std::optional<Page>> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::optional<Page>>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -4180,11 +4144,11 @@ class NotebookSession::Impl {
                     return fail(std::move(*error));
                 }
                 auto key = blockKey(entry.metadata.id);
-                result = mdb_del(transaction, databases.value().blocks, &key,
-                                 nullptr);
-                if (result != MDB_SUCCESS) {
-                    return fail(errorFromLmdb(path, result,
-                                              "remove Page Entry for history"));
+                result = store_del(transaction, databases.value().blocks, &key,
+                                   nullptr);
+                if (result != storeSuccess) {
+                    return fail(errorFromStore(
+                        path, result, "remove Page Entry for history"));
                 }
                 if (auto error = removeTypeIndex(
                         transaction, databases.value().blocksByType,
@@ -4192,21 +4156,21 @@ class NotebookSession::Impl {
                     return fail(std::move(*error));
                 }
             }
-            MDB_val nameKey{
+            StoreValue nameKey{
                 currentBlock.value().pageName.size(),
                 const_cast<char*>(currentBlock.value().pageName.data())};
-            result = mdb_del(transaction, databases.value().pagesByName,
-                             &nameKey, nullptr);
-            if (result != MDB_SUCCESS) {
-                return fail(errorFromLmdb(path, result,
-                                          "remove Page name for history"));
+            result = store_del(transaction, databases.value().pagesByName,
+                               &nameKey, nullptr);
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result,
+                                           "remove Page name for history"));
             }
             auto key = blockKey(pageId);
             result =
-                mdb_del(transaction, databases.value().blocks, &key, nullptr);
-            if (result != MDB_SUCCESS) {
+                store_del(transaction, databases.value().blocks, &key, nullptr);
+            if (result != storeSuccess) {
                 return fail(
-                    errorFromLmdb(path, result, "remove Page for history"));
+                    errorFromStore(path, result, "remove Page for history"));
             }
             if (auto error =
                     removeTypeIndex(transaction, databases.value().blocksByType,
@@ -4244,9 +4208,9 @@ class NotebookSession::Impl {
                 return fail(std::move(*error));
             }
             result = commitAdapter->commit(transaction);
-            if (result != MDB_SUCCESS) {
+            if (result != storeSuccess) {
                 return Result<std::optional<Page>>::failure(
-                    errorFromLmdb(path, result, "commit Page history"));
+                    errorFromStore(path, result, "commit Page history"));
             }
             incrementCachedRevision();
             lastCommandCommitted = true;
@@ -4264,17 +4228,17 @@ class NotebookSession::Impl {
                                BlockType::page, pageId, path)) {
             return fail(std::move(*error));
         }
-        MDB_val nameKey{restoredBlock.pageName.size(),
-                        restoredBlock.pageName.data()};
-        MDB_val pageValue{pageId.bytes.size(), pageId.bytes.data()};
-        result = mdb_put(transaction, databases.value().pagesByName, &nameKey,
-                         &pageValue, MDB_NOOVERWRITE);
-        if (result != MDB_SUCCESS) {
-            return fail(result == MDB_KEYEXIST
+        StoreValue nameKey{restoredBlock.pageName.size(),
+                           restoredBlock.pageName.data()};
+        StoreValue pageValue{pageId.bytes.size(), pageId.bytes.data()};
+        result = store_put(transaction, databases.value().pagesByName, &nameKey,
+                           &pageValue, storeNoOverwrite);
+        if (result != storeSuccess) {
+            return fail(result == storeKeyExists
                             ? makeError(NotebookErrorCode::pageNameConflict,
                                         path, "Page name is already in use")
-                            : errorFromLmdb(path, result,
-                                            "restore Page name for history"));
+                            : errorFromStore(path, result,
+                                             "restore Page name for history"));
         }
         LoadedOutline restored{restoredBlock, {}};
         for (const auto& entry : target->entries) {
@@ -4310,9 +4274,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<std::optional<Page>>::failure(
-                errorFromLmdb(path, result, "commit Page history"));
+                errorFromStore(path, result, "commit Page history"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -4348,44 +4312,44 @@ class NotebookSession::Impl {
     readNestedJournalPage(JournalDate date) const -> Result<JournalPage>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "begin Journal read"));
+                errorFromStore(path, result, "begin Journal read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(databases.error());
         }
         const auto encodedDate = dateKey(date);
-        MDB_val key{encodedDate.size(),
-                    const_cast<std::uint8_t*>(encodedDate.data())};
-        MDB_val value{};
-        result =
-            mdb_get(transaction, databases.value().journalByDate, &key, &value);
-        if (result == MDB_NOTFOUND) {
-            mdb_txn_abort(transaction);
+        StoreValue key{encodedDate.size(),
+                       const_cast<std::uint8_t*>(encodedDate.data())};
+        StoreValue value{};
+        result = store_get(transaction, databases.value().journalByDate, &key,
+                           &value);
+        if (result == storeNotFound) {
+            store_txn_abort(transaction);
             return Result<JournalPage>::success({date, std::nullopt, {}});
         }
-        if (result != MDB_SUCCESS || value.mv_size != BlockId{}.bytes.size()) {
-            mdb_txn_abort(transaction);
+        if (result != storeSuccess || value.size != BlockId{}.bytes.size()) {
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(
-                result == MDB_SUCCESS
+                result == storeSuccess
                     ? makeError(NotebookErrorCode::invalidNotebook, path,
                                 "invalid Journal date index")
-                    : errorFromLmdb(path, result, "read Journal date index"));
+                    : errorFromStore(path, result, "read Journal date index"));
         }
         BlockId pageId;
-        std::memcpy(pageId.bytes.data(), value.mv_data, pageId.bytes.size());
+        std::memcpy(pageId.bytes.data(), value.data, pageId.bytes.size());
         auto page =
             readBlock(transaction, databases.value().blocks, pageId, path);
         if (!page || page.value().type != BlockType::page ||
             page.value().pageKind != PageKind::journal ||
             page.value().journalDate != date) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(
                 page ? makeError(NotebookErrorCode::invalidNotebook, path,
                                  "Journal date points to an invalid Page")
@@ -4393,7 +4357,7 @@ class NotebookSession::Impl {
         }
         auto outline = loadOutline(transaction, databases.value(),
                                    std::move(page).value());
-        mdb_txn_abort(transaction);
+        store_txn_abort(transaction);
         if (!outline) {
             return Result<JournalPage>::failure(outline.error());
         }
@@ -4406,48 +4370,47 @@ class NotebookSession::Impl {
     readJournalPage(JournalDate date) const -> Result<JournalPage>
     {
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
+        StoreTransaction* transaction = nullptr;
         auto result =
-            mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction);
-        if (result != MDB_SUCCESS) {
+            store_txn_begin(environment, nullptr, storeReadOnly, &transaction);
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "begin Journal read"));
+                errorFromStore(path, result, "begin Journal read"));
         }
         auto databases = openJournalDatabases(transaction, path);
         if (!databases) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(databases.error());
         }
 
         const auto encodedDate = dateKey(date);
-        MDB_val dateKeyValue{encodedDate.size(),
-                             const_cast<std::uint8_t*>(encodedDate.data())};
-        MDB_val pageValue{};
-        result = mdb_get(transaction, databases.value().journalByDate,
-                         &dateKeyValue, &pageValue);
-        if (result == MDB_NOTFOUND) {
-            mdb_txn_abort(transaction);
+        StoreValue dateKeyValue{encodedDate.size(),
+                                const_cast<std::uint8_t*>(encodedDate.data())};
+        StoreValue pageValue{};
+        result = store_get(transaction, databases.value().journalByDate,
+                           &dateKeyValue, &pageValue);
+        if (result == storeNotFound) {
+            store_txn_abort(transaction);
             return Result<JournalPage>::success(
                 JournalPage{date, std::nullopt, {}});
         }
-        if (result != MDB_SUCCESS ||
-            pageValue.mv_size != BlockId{}.bytes.size()) {
-            mdb_txn_abort(transaction);
+        if (result != storeSuccess ||
+            pageValue.size != BlockId{}.bytes.size()) {
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(
-                result == MDB_SUCCESS
+                result == storeSuccess
                     ? makeError(NotebookErrorCode::invalidNotebook, path,
                                 "invalid Journal date index")
-                    : errorFromLmdb(path, result, "read Journal date index"));
+                    : errorFromStore(path, result, "read Journal date index"));
         }
         BlockId pageId;
-        std::memcpy(pageId.bytes.data(), pageValue.mv_data,
-                    pageId.bytes.size());
+        std::memcpy(pageId.bytes.data(), pageValue.data, pageId.bytes.size());
         auto pageBlock =
             readBlock(transaction, databases.value().blocks, pageId, path);
         if (!pageBlock || pageBlock.value().type != BlockType::page ||
             pageBlock.value().pageKind != PageKind::journal ||
             pageBlock.value().journalDate != date) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(
                 pageBlock ? makeError(NotebookErrorCode::invalidNotebook, path,
                                       "Journal date points to an invalid Page")
@@ -4455,42 +4418,42 @@ class NotebookSession::Impl {
         }
 
         JournalPage page{date, pageBlock.value().metadata, {}};
-        MDB_cursor* cursor = nullptr;
-        result = mdb_cursor_open(
+        StoreCursor* cursor = nullptr;
+        result = store_cursor_open(
             transaction, databases.value().containmentByParent, &cursor);
-        if (result != MDB_SUCCESS) {
-            mdb_txn_abort(transaction);
+        if (result != storeSuccess) {
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "open Journal containment"));
+                errorFromStore(path, result, "open Journal containment"));
         }
         auto start = containmentParentKey(pageId, 0);
-        MDB_val containmentKey{start.size(), start.data()};
-        MDB_val childValue{};
-        result =
-            mdb_cursor_get(cursor, &containmentKey, &childValue, MDB_SET_RANGE);
-        while (result == MDB_SUCCESS) {
-            if (containmentKey.mv_size != 24 ||
-                std::memcmp(containmentKey.mv_data, pageId.bytes.data(),
+        StoreValue containmentKey{start.size(), start.data()};
+        StoreValue childValue{};
+        result = store_cursor_get(cursor, &containmentKey, &childValue,
+                                  storeSetRange);
+        while (result == storeSuccess) {
+            if (containmentKey.size != 24 ||
+                std::memcmp(containmentKey.data, pageId.bytes.data(),
                             pageId.bytes.size()) != 0) {
                 break;
             }
-            if (childValue.mv_size != BlockId{}.bytes.size()) {
-                mdb_cursor_close(cursor);
-                mdb_txn_abort(transaction);
+            if (childValue.size != BlockId{}.bytes.size()) {
+                store_cursor_close(cursor);
+                store_txn_abort(transaction);
                 return Result<JournalPage>::failure(
                     makeError(NotebookErrorCode::invalidNotebook, path,
                               "invalid Journal containment"));
             }
             BlockId entryId;
-            std::memcpy(entryId.bytes.data(), childValue.mv_data,
+            std::memcpy(entryId.bytes.data(), childValue.data,
                         entryId.bytes.size());
             auto entryBlock =
                 readBlock(transaction, databases.value().blocks, entryId, path);
             if (!entryBlock ||
                 (entryBlock.value().type != BlockType::journalEntry &&
                  entryBlock.value().type != BlockType::pageEntry)) {
-                mdb_cursor_close(cursor);
-                mdb_txn_abort(transaction);
+                store_cursor_close(cursor);
+                store_txn_abort(transaction);
                 return Result<JournalPage>::failure(
                     entryBlock
                         ? makeError(NotebookErrorCode::invalidNotebook, path,
@@ -4500,14 +4463,14 @@ class NotebookSession::Impl {
             page.entries.push_back(Entry{entryBlock.value().metadata,
                                          entryBlock.value().authoredText,
                                          std::nullopt});
-            result =
-                mdb_cursor_get(cursor, &containmentKey, &childValue, MDB_NEXT);
+            result = store_cursor_get(cursor, &containmentKey, &childValue,
+                                      storeNext);
         }
-        mdb_cursor_close(cursor);
-        mdb_txn_abort(transaction);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+        store_cursor_close(cursor);
+        store_txn_abort(transaction);
+        if (result != storeSuccess && result != storeNotFound) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "read Journal containment"));
+                errorFromStore(path, result, "read Journal containment"));
         }
         return Result<JournalPage>::success(std::move(page));
     }
@@ -4518,14 +4481,14 @@ class NotebookSession::Impl {
     {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "begin Journal update"));
+                errorFromStore(path, result, "begin Journal update"));
         }
         const auto fail = [&](NotebookError error) -> Result<JournalPage> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -4534,13 +4497,13 @@ class NotebookSession::Impl {
         }
         const auto now = currentTimestamp();
         const auto encodedDate = dateKey(date);
-        MDB_val dateIndexKey{encodedDate.size(),
-                             const_cast<std::uint8_t*>(encodedDate.data())};
-        MDB_val pageValue{};
-        result = mdb_get(transaction, databases.value().journalByDate,
-                         &dateIndexKey, &pageValue);
+        StoreValue dateIndexKey{encodedDate.size(),
+                                const_cast<std::uint8_t*>(encodedDate.data())};
+        StoreValue pageValue{};
+        result = store_get(transaction, databases.value().journalByDate,
+                           &dateIndexKey, &pageValue);
         BlockRecord pageBlock;
-        if (result == MDB_NOTFOUND) {
+        if (result == storeNotFound) {
             if (afterEntry) {
                 return fail(
                     makeError(NotebookErrorCode::invalidInsertionPoint, path,
@@ -4562,24 +4525,24 @@ class NotebookSession::Impl {
                     pageBlock.metadata.id, path)) {
                 return fail(std::move(*error));
             }
-            MDB_val pageIdValue{pageBlock.metadata.id.bytes.size(),
-                                pageBlock.metadata.id.bytes.data()};
-            result = mdb_put(transaction, databases.value().journalByDate,
-                             &dateIndexKey, &pageIdValue, MDB_NOOVERWRITE);
-            if (result != MDB_SUCCESS) {
-                return fail(errorFromLmdb(path, result, "index Journal date"));
+            StoreValue pageIdValue{pageBlock.metadata.id.bytes.size(),
+                                   pageBlock.metadata.id.bytes.data()};
+            result = store_put(transaction, databases.value().journalByDate,
+                               &dateIndexKey, &pageIdValue, storeNoOverwrite);
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result, "index Journal date"));
             }
         } else {
-            if (result != MDB_SUCCESS ||
-                pageValue.mv_size != BlockId{}.bytes.size()) {
-                return fail(result == MDB_SUCCESS
+            if (result != storeSuccess ||
+                pageValue.size != BlockId{}.bytes.size()) {
+                return fail(result == storeSuccess
                                 ? makeError(NotebookErrorCode::invalidNotebook,
                                             path, "invalid Journal date index")
-                                : errorFromLmdb(path, result,
-                                                "read Journal date index"));
+                                : errorFromStore(path, result,
+                                                 "read Journal date index"));
             }
             BlockId pageId;
-            std::memcpy(pageId.bytes.data(), pageValue.mv_data,
+            std::memcpy(pageId.bytes.data(), pageValue.data,
                         pageId.bytes.size());
             auto loaded =
                 readBlock(transaction, databases.value().blocks, pageId, path);
@@ -4599,36 +4562,37 @@ class NotebookSession::Impl {
         }
 
         std::vector<std::pair<BlockId, std::uint64_t>> siblings;
-        MDB_cursor* cursor = nullptr;
-        result = mdb_cursor_open(
+        StoreCursor* cursor = nullptr;
+        result = store_cursor_open(
             transaction, databases.value().containmentByParent, &cursor);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return fail(
-                errorFromLmdb(path, result, "open Journal containment"));
+                errorFromStore(path, result, "open Journal containment"));
         }
         auto start = containmentParentKey(pageBlock.metadata.id, 0);
-        MDB_val parentKey{start.size(), start.data()};
-        MDB_val childValue{};
-        result = mdb_cursor_get(cursor, &parentKey, &childValue, MDB_SET_RANGE);
-        while (result == MDB_SUCCESS && parentKey.mv_size == 24 &&
-               std::memcmp(parentKey.mv_data,
-                           pageBlock.metadata.id.bytes.data(),
+        StoreValue parentKey{start.size(), start.data()};
+        StoreValue childValue{};
+        result =
+            store_cursor_get(cursor, &parentKey, &childValue, storeSetRange);
+        while (result == storeSuccess && parentKey.size == 24 &&
+               std::memcmp(parentKey.data, pageBlock.metadata.id.bytes.data(),
                            pageBlock.metadata.id.bytes.size()) == 0) {
-            if (childValue.mv_size != BlockId{}.bytes.size()) {
-                mdb_cursor_close(cursor);
+            if (childValue.size != BlockId{}.bytes.size()) {
+                store_cursor_close(cursor);
                 return fail(makeError(NotebookErrorCode::invalidNotebook, path,
                                       "invalid Journal containment"));
             }
             BlockId child;
-            std::memcpy(child.bytes.data(), childValue.mv_data,
+            std::memcpy(child.bytes.data(), childValue.data,
                         child.bytes.size());
             siblings.emplace_back(child, rankFromParentKey(parentKey));
-            result = mdb_cursor_get(cursor, &parentKey, &childValue, MDB_NEXT);
+            result =
+                store_cursor_get(cursor, &parentKey, &childValue, storeNext);
         }
-        mdb_cursor_close(cursor);
-        if (result != MDB_SUCCESS && result != MDB_NOTFOUND) {
+        store_cursor_close(cursor);
+        if (result != storeSuccess && result != storeNotFound) {
             return fail(
-                errorFromLmdb(path, result, "read Journal containment"));
+                errorFromStore(path, result, "read Journal containment"));
         }
 
         std::size_t insertionIndex = siblings.size();
@@ -4677,13 +4641,13 @@ class NotebookSession::Impl {
                 static_cast<void>(siblingId);
                 auto oldKeyBytes =
                     containmentParentKey(pageBlock.metadata.id, oldRank);
-                MDB_val oldKey{oldKeyBytes.size(), oldKeyBytes.data()};
-                result =
-                    mdb_del(transaction, databases.value().containmentByParent,
-                            &oldKey, nullptr);
-                if (result != MDB_SUCCESS) {
-                    return fail(errorFromLmdb(path, result,
-                                              "rebalance Journal ordering"));
+                StoreValue oldKey{oldKeyBytes.size(), oldKeyBytes.data()};
+                result = store_del(transaction,
+                                   databases.value().containmentByParent,
+                                   &oldKey, nullptr);
+                if (result != storeSuccess) {
+                    return fail(errorFromStore(path, result,
+                                               "rebalance Journal ordering"));
                 }
             }
             for (std::size_t index = 0; index < siblings.size(); ++index) {
@@ -4692,26 +4656,27 @@ class NotebookSession::Impl {
                 siblings[index].second = rebalancedRank;
                 auto parentBytes =
                     containmentParentKey(pageBlock.metadata.id, rebalancedRank);
-                MDB_val rebalancedParentKey{parentBytes.size(),
-                                            parentBytes.data()};
-                MDB_val siblingValue{siblings[index].first.bytes.size(),
-                                     siblings[index].first.bytes.data()};
-                result = mdb_put(
+                StoreValue rebalancedParentKey{parentBytes.size(),
+                                               parentBytes.data()};
+                StoreValue siblingValue{siblings[index].first.bytes.size(),
+                                        siblings[index].first.bytes.data()};
+                result = store_put(
                     transaction, databases.value().containmentByParent,
-                    &rebalancedParentKey, &siblingValue, MDB_NOOVERWRITE);
-                if (result != MDB_SUCCESS) {
-                    return fail(errorFromLmdb(path, result,
-                                              "rebalance Journal ordering"));
+                    &rebalancedParentKey, &siblingValue, storeNoOverwrite);
+                if (result != storeSuccess) {
+                    return fail(errorFromStore(path, result,
+                                               "rebalance Journal ordering"));
                 }
                 auto siblingKey = blockKey(siblings[index].first);
                 auto childIndex =
                     containmentParentKey(pageBlock.metadata.id, rebalancedRank);
-                MDB_val childIndexValue{childIndex.size(), childIndex.data()};
+                StoreValue childIndexValue{childIndex.size(),
+                                           childIndex.data()};
                 result =
-                    mdb_put(transaction, databases.value().containmentByChild,
-                            &siblingKey, &childIndexValue, 0);
-                if (result != MDB_SUCCESS) {
-                    return fail(errorFromLmdb(
+                    store_put(transaction, databases.value().containmentByChild,
+                              &siblingKey, &childIndexValue, 0);
+                if (result != storeSuccess) {
+                    return fail(errorFromStore(
                         path, result, "rebalance Journal parent index"));
                 }
             }
@@ -4743,13 +4708,13 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         auto encodedParent = containmentParentKey(pageBlock.metadata.id, rank);
-        MDB_val newParentKey{encodedParent.size(), encodedParent.data()};
-        MDB_val entryIdValue{entryBlock.metadata.id.bytes.size(),
-                             entryBlock.metadata.id.bytes.data()};
-        result = mdb_put(transaction, databases.value().containmentByParent,
-                         &newParentKey, &entryIdValue, MDB_NOOVERWRITE);
-        if (result != MDB_SUCCESS) {
-            return fail(errorFromLmdb(path, result, "write Journal ordering"));
+        StoreValue newParentKey{encodedParent.size(), encodedParent.data()};
+        StoreValue entryIdValue{entryBlock.metadata.id.bytes.size(),
+                                entryBlock.metadata.id.bytes.data()};
+        result = store_put(transaction, databases.value().containmentByParent,
+                           &newParentKey, &entryIdValue, storeNoOverwrite);
+        if (result != storeSuccess) {
+            return fail(errorFromStore(path, result, "write Journal ordering"));
         }
         auto childKey = blockKey(entryBlock.metadata.id);
         std::array<std::uint8_t, 24> childIndex{};
@@ -4759,12 +4724,12 @@ class NotebookSession::Impl {
             childIndex[16 + index] =
                 static_cast<std::uint8_t>(rank >> ((7U - index) * 8U));
         }
-        MDB_val childIndexValue{childIndex.size(), childIndex.data()};
-        result = mdb_put(transaction, databases.value().containmentByChild,
-                         &childKey, &childIndexValue, MDB_NOOVERWRITE);
-        if (result != MDB_SUCCESS) {
+        StoreValue childIndexValue{childIndex.size(), childIndex.data()};
+        result = store_put(transaction, databases.value().containmentByChild,
+                           &childKey, &childIndexValue, storeNoOverwrite);
+        if (result != storeSuccess) {
             return fail(
-                errorFromLmdb(path, result, "write Journal parent index"));
+                errorFromStore(path, result, "write Journal parent index"));
         }
 
         JournalPage committedPage{date, pageBlock.metadata, {}};
@@ -4796,9 +4761,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "commit Journal Entry"));
+                errorFromStore(path, result, "commit Journal Entry"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -4811,15 +4776,15 @@ class NotebookSession::Impl {
     {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<OutlineEntryRecord>::failure(
-                errorFromLmdb(path, result, "begin outline edit"));
+                errorFromStore(path, result, "begin outline edit"));
         }
         const auto fail =
             [&](NotebookError error) -> Result<OutlineEntryRecord> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<OutlineEntryRecord>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -4858,7 +4823,7 @@ class NotebookSession::Impl {
                 ? std::optional<BlockId>{parentLink.value().parent}
                 : std::nullopt;
         if (entry.authoredText == authoredText) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<OutlineEntryRecord>::success(
                 {entry.metadata, entry.authoredText, parentEntry});
         }
@@ -4873,9 +4838,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<OutlineEntryRecord>::failure(
-                errorFromLmdb(path, result, "commit outline edit"));
+                errorFromStore(path, result, "commit outline edit"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -4900,14 +4865,14 @@ class NotebookSession::Impl {
     {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "begin Journal insertion"));
+                errorFromStore(path, result, "begin Journal insertion"));
         }
         const auto fail = [&](NotebookError error) -> Result<JournalPage> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -4916,14 +4881,14 @@ class NotebookSession::Impl {
         }
         const auto now = currentTimestamp();
         const auto encodedDate = dateKey(date);
-        MDB_val dateIndexKey{encodedDate.size(),
-                             const_cast<std::uint8_t*>(encodedDate.data())};
-        MDB_val pageValue{};
-        result = mdb_get(transaction, databases.value().journalByDate,
-                         &dateIndexKey, &pageValue);
-        const auto pageWasCreated = result == MDB_NOTFOUND;
+        StoreValue dateIndexKey{encodedDate.size(),
+                                const_cast<std::uint8_t*>(encodedDate.data())};
+        StoreValue pageValue{};
+        result = store_get(transaction, databases.value().journalByDate,
+                           &dateIndexKey, &pageValue);
+        const auto pageWasCreated = result == storeNotFound;
         BlockRecord page;
-        if (result == MDB_NOTFOUND) {
+        if (result == storeNotFound) {
             if (afterEntry) {
                 return fail(
                     makeError(NotebookErrorCode::invalidInsertionPoint, path,
@@ -4945,24 +4910,24 @@ class NotebookSession::Impl {
                                    page.type, page.metadata.id, path)) {
                 return fail(std::move(*error));
             }
-            MDB_val pageIdValue{page.metadata.id.bytes.size(),
-                                page.metadata.id.bytes.data()};
-            result = mdb_put(transaction, databases.value().journalByDate,
-                             &dateIndexKey, &pageIdValue, MDB_NOOVERWRITE);
-            if (result != MDB_SUCCESS) {
-                return fail(errorFromLmdb(path, result, "index Journal date"));
+            StoreValue pageIdValue{page.metadata.id.bytes.size(),
+                                   page.metadata.id.bytes.data()};
+            result = store_put(transaction, databases.value().journalByDate,
+                               &dateIndexKey, &pageIdValue, storeNoOverwrite);
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result, "index Journal date"));
             }
         } else {
-            if (result != MDB_SUCCESS ||
-                pageValue.mv_size != BlockId{}.bytes.size()) {
-                return fail(result == MDB_SUCCESS
+            if (result != storeSuccess ||
+                pageValue.size != BlockId{}.bytes.size()) {
+                return fail(result == storeSuccess
                                 ? makeError(NotebookErrorCode::invalidNotebook,
                                             path, "invalid Journal date index")
-                                : errorFromLmdb(path, result,
-                                                "read Journal date index"));
+                                : errorFromStore(path, result,
+                                                 "read Journal date index"));
             }
             BlockId pageId;
-            std::memcpy(pageId.bytes.data(), pageValue.mv_data,
+            std::memcpy(pageId.bytes.data(), pageValue.data,
                         pageId.bytes.size());
             auto loaded =
                 readBlock(transaction, databases.value().blocks, pageId, path);
@@ -5032,9 +4997,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "commit Journal insertion"));
+                errorFromStore(path, result, "commit Journal insertion"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -5054,14 +5019,14 @@ class NotebookSession::Impl {
     {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "begin Journal structural edit"));
+                errorFromStore(path, result, "begin Journal structural edit"));
         }
         const auto fail = [&](NotebookError error) -> Result<JournalPage> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -5320,20 +5285,20 @@ class NotebookSession::Impl {
         }
         if (deleteOriginal) {
             auto blockKeyValue = blockKey(entryId);
-            result = mdb_del(transaction, databases.value().blocks,
-                             &blockKeyValue, nullptr);
-            if (result != MDB_SUCCESS) {
+            result = store_del(transaction, databases.value().blocks,
+                               &blockKeyValue, nullptr);
+            if (result != storeSuccess) {
                 return fail(
-                    errorFromLmdb(path, result, "delete Journal Entry"));
+                    errorFromStore(path, result, "delete Journal Entry"));
             }
             const auto entryType = BlockType::entry;
             auto typeKeyBytes = typeIndexKey(entryType, entryId);
-            MDB_val typeKey{typeKeyBytes.size(), typeKeyBytes.data()};
-            result = mdb_del(transaction, databases.value().blocksByType,
-                             &typeKey, nullptr);
-            if (result != MDB_SUCCESS) {
-                return fail(errorFromLmdb(path, result,
-                                          "delete Journal Entry type index"));
+            StoreValue typeKey{typeKeyBytes.size(), typeKeyBytes.data()};
+            result = store_del(transaction, databases.value().blocksByType,
+                               &typeKey, nullptr);
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result,
+                                           "delete Journal Entry type index"));
             }
         }
         if (auto error = incrementRevision(transaction,
@@ -5341,9 +5306,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "commit Journal structural edit"));
+                errorFromStore(path, result, "commit Journal structural edit"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -5366,14 +5331,14 @@ class NotebookSession::Impl {
                 NotebookErrorCode::invalidStructuralMove, path,
                 "at least one Journal subtree must be selected for deletion"));
         }
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "begin Journal subtree deletion"));
+                errorFromStore(path, result, "begin Journal subtree deletion"));
         }
         const auto fail = [&](NotebookError error) -> Result<JournalPage> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<JournalPage>::failure(std::move(error));
         };
         auto databases = openJournalDatabases(transaction, path);
@@ -5461,10 +5426,10 @@ class NotebookSession::Impl {
             }
             auto key = blockKey(entry.metadata.id);
             result =
-                mdb_del(transaction, databases.value().blocks, &key, nullptr);
-            if (result != MDB_SUCCESS) {
-                return fail(errorFromLmdb(path, result,
-                                          "delete selected Journal Entry"));
+                store_del(transaction, databases.value().blocks, &key, nullptr);
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result,
+                                           "delete selected Journal Entry"));
             }
             const auto entryType = BlockType::entry;
             if (auto error =
@@ -5478,9 +5443,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
-            return Result<JournalPage>::failure(
-                errorFromLmdb(path, result, "commit Journal subtree deletion"));
+        if (result != storeSuccess) {
+            return Result<JournalPage>::failure(errorFromStore(
+                path, result, "commit Journal subtree deletion"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -5500,15 +5465,15 @@ class NotebookSession::Impl {
     {
         lastCommandCommitted = false;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<std::vector<LoadedOutline>>::failure(
-                errorFromLmdb(path, result, "begin cross-Page Entry move"));
+                errorFromStore(path, result, "begin cross-Page Entry move"));
         }
         const auto fail =
             [&](NotebookError error) -> Result<std::vector<LoadedOutline>> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::vector<LoadedOutline>>::failure(
                 std::move(error));
         };
@@ -5572,16 +5537,16 @@ class NotebookSession::Impl {
                     return fail(std::move(*error));
                 }
                 const auto encodedDate = dateKey(date);
-                MDB_val dateIndexKey{
+                StoreValue dateIndexKey{
                     encodedDate.size(),
                     const_cast<std::uint8_t*>(encodedDate.data())};
-                MDB_val pageValue{page.metadata.id.bytes.size(),
-                                  page.metadata.id.bytes.data()};
-                result = mdb_put(transaction, databases.value().journalByDate,
-                                 &dateIndexKey, &pageValue, MDB_NOOVERWRITE);
-                if (result != MDB_SUCCESS) {
-                    return fail(errorFromLmdb(path, result,
-                                              "materialize move destination"));
+                StoreValue pageValue{page.metadata.id.bytes.size(),
+                                     page.metadata.id.bytes.data()};
+                result = store_put(transaction, databases.value().journalByDate,
+                                   &dateIndexKey, &pageValue, storeNoOverwrite);
+                if (result != storeSuccess) {
+                    return fail(errorFromStore(path, result,
+                                               "materialize move destination"));
                 }
                 destination = {std::move(page), {}};
             }
@@ -5668,9 +5633,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<std::vector<LoadedOutline>>::failure(
-                errorFromLmdb(path, result, "commit cross-Page Entry move"));
+                errorFromStore(path, result, "commit cross-Page Entry move"));
         }
         incrementCachedRevision();
         lastCommandCommitted = true;
@@ -5714,15 +5679,15 @@ class NotebookSession::Impl {
             redo ? std::optional<LoadedOutline>{action.afterDestination}
                  : action.beforeDestination;
         const auto path = info.value_or(NotebookInfo{}).path;
-        MDB_txn* transaction = nullptr;
-        auto result = mdb_txn_begin(environment, nullptr, 0, &transaction);
-        if (result != MDB_SUCCESS) {
+        StoreTransaction* transaction = nullptr;
+        auto result = store_txn_begin(environment, nullptr, 0, &transaction);
+        if (result != storeSuccess) {
             return Result<std::vector<LoadedOutline>>::failure(
-                errorFromLmdb(path, result, "begin cross-Page history"));
+                errorFromStore(path, result, "begin cross-Page history"));
         }
         const auto fail =
             [&](NotebookError error) -> Result<std::vector<LoadedOutline>> {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             return Result<std::vector<LoadedOutline>>::failure(
                 std::move(error));
         };
@@ -5763,29 +5728,29 @@ class NotebookSession::Impl {
                 if (targetDestination->page.journalDate) {
                     const auto encodedDate =
                         dateKey(*targetDestination->page.journalDate);
-                    MDB_val dateIndexKey{
+                    StoreValue dateIndexKey{
                         encodedDate.size(),
                         const_cast<std::uint8_t*>(encodedDate.data())};
-                    MDB_val pageValue{
+                    StoreValue pageValue{
                         targetDestination->page.metadata.id.bytes.size(),
                         const_cast<std::byte*>(
                             targetDestination->page.metadata.id.bytes.data())};
                     result =
-                        mdb_put(transaction, databases.value().journalByDate,
-                                &dateIndexKey, &pageValue, MDB_NOOVERWRITE);
-                    if (result != MDB_SUCCESS) {
-                        return fail(errorFromLmdb(
+                        store_put(transaction, databases.value().journalByDate,
+                                  &dateIndexKey, &pageValue, storeNoOverwrite);
+                    if (result != storeSuccess) {
+                        return fail(errorFromStore(
                             path, result, "restore Journal move destination"));
                     }
                 }
             }
         } else if (currentDestination) {
             auto pageKey = blockKey(currentDestination->page.metadata.id);
-            result = mdb_del(transaction, databases.value().blocks, &pageKey,
-                             nullptr);
-            if (result != MDB_SUCCESS) {
-                return fail(errorFromLmdb(path, result,
-                                          "remove virtualized Journal Page"));
+            result = store_del(transaction, databases.value().blocks, &pageKey,
+                               nullptr);
+            if (result != storeSuccess) {
+                return fail(errorFromStore(path, result,
+                                           "remove virtualized Journal Page"));
             }
             if (auto error =
                     removeTypeIndex(transaction, databases.value().blocksByType,
@@ -5796,13 +5761,13 @@ class NotebookSession::Impl {
             if (currentDestination->page.journalDate) {
                 const auto encodedDate =
                     dateKey(*currentDestination->page.journalDate);
-                MDB_val dateIndexKey{
+                StoreValue dateIndexKey{
                     encodedDate.size(),
                     const_cast<std::uint8_t*>(encodedDate.data())};
-                result = mdb_del(transaction, databases.value().journalByDate,
-                                 &dateIndexKey, nullptr);
-                if (result != MDB_SUCCESS) {
-                    return fail(errorFromLmdb(
+                result = store_del(transaction, databases.value().journalByDate,
+                                   &dateIndexKey, nullptr);
+                if (result != storeSuccess) {
+                    return fail(errorFromStore(
                         path, result, "virtualize Journal move destination"));
                 }
             }
@@ -5841,9 +5806,9 @@ class NotebookSession::Impl {
             return fail(std::move(*error));
         }
         result = commitAdapter->commit(transaction);
-        if (result != MDB_SUCCESS) {
+        if (result != storeSuccess) {
             return Result<std::vector<LoadedOutline>>::failure(
-                errorFromLmdb(path, result, "commit cross-Page history"));
+                errorFromStore(path, result, "commit cross-Page history"));
         }
         auto applied = std::move(sourceActions.back());
         sourceActions.pop_back();
@@ -5878,10 +5843,9 @@ class NotebookSession::Impl {
     }
 
     mutable std::mutex mutex;
-    std::shared_ptr<MDB_env> environmentOwner;
-    MDB_env* environment{nullptr};
+    std::shared_ptr<StoreEnvironment> environmentOwner;
+    StoreEnvironment* environment{nullptr};
     std::optional<platform::ExclusiveFileLock> lockFile;
-    std::optional<platform::ExclusiveFileLock> dataLockFile;
     std::optional<NotebookInfo> info;
     std::unique_ptr<JournalCommitAdapter> commitAdapter;
     std::shared_ptr<SubscriptionState> subscriptions;
@@ -5893,6 +5857,9 @@ class NotebookSession::Impl {
     std::deque<CrossPageHistoryAction> crossPageRedo;
     std::size_t historyBytes{0};
     std::uint64_t nextHistorySequence{1};
+#ifdef HIEDA_TESTING
+    bool rejectNextClose{false};
+#endif
 };
 
 #ifdef HIEDA_TESTING
@@ -5902,6 +5869,13 @@ NotebookSessionTestAccess::rejectNextCommit(NotebookSession& session)
     std::scoped_lock lock(session.impl_->mutex);
     session.impl_->commitAdapter =
         std::make_unique<RejectNextJournalCommitAdapter>();
+}
+
+void
+NotebookSessionTestAccess::rejectNextClose(NotebookSession& session)
+{
+    std::scoped_lock lock(session.impl_->mutex);
+    session.impl_->rejectNextClose = true;
 }
 
 void
@@ -6019,11 +5993,6 @@ NotebookSession::create(const std::filesystem::path& inputPath)
     removeIfPresent(temporaryPath);
     removeIfPresent(temporaryLockPath);
 
-    if (auto lockError = impl_->acquireDataLock(path)) {
-        impl_->closeUnlocked();
-        return Result<NotebookInfo>::failure(std::move(*lockError));
-    }
-
     if (const auto syncError = platform::syncParentDirectory(path)) {
         impl_->closeUnlocked();
         return Result<NotebookInfo>::failure(errorFromPlatform(
@@ -6061,18 +6030,14 @@ NotebookSession::open(const std::filesystem::path& inputPath)
     if (auto lockError = impl_->acquireLock(path)) {
         return Result<NotebookInfo>::failure(std::move(*lockError));
     }
-    if (auto lockError = impl_->acquireDataLock(path)) {
-        impl_->closeUnlocked();
-        return Result<NotebookInfo>::failure(std::move(*lockError));
-    }
     return impl_->finishOpen(path);
 }
 
-void
-NotebookSession::close() noexcept
+auto
+NotebookSession::close() -> Result<void>
 {
     std::scoped_lock lock(impl_->mutex);
-    impl_->closeUnlocked();
+    return impl_->closeUnlocked();
 }
 
 auto
@@ -6577,17 +6542,17 @@ NotebookSession::evaluateQuery(
         }
         offset = cursor->offset;
     }
-    MDB_txn* transaction = nullptr;
-    auto result =
-        mdb_txn_begin(environment.get(), nullptr, MDB_RDONLY, &transaction);
+    StoreTransaction* transaction = nullptr;
+    auto result = store_txn_begin(environment.get(), nullptr, storeReadOnly,
+                                  &transaction);
     lock.unlock();
-    if (result != MDB_SUCCESS) {
+    if (result != storeSuccess) {
         return Result<QueryResultsBatch>::failure(
-            errorFromLmdb(path, result, "begin Query read"));
+            errorFromStore(path, result, "begin Query read"));
     }
     const auto abort = [&transaction]() -> void {
         if (transaction != nullptr) {
-            mdb_txn_abort(transaction);
+            store_txn_abort(transaction);
             transaction = nullptr;
         }
     };
@@ -6650,33 +6615,32 @@ NotebookSession::evaluateQuery(
 
     std::unordered_map<std::string, std::size_t> journalOutlineOrder;
     std::vector<query_evaluation::Candidate> candidates;
-    MDB_cursor* cursor = nullptr;
+    StoreCursor* cursor = nullptr;
     result =
-        mdb_cursor_open(transaction, databases.value().blocksByType, &cursor);
-    if (result != MDB_SUCCESS) {
+        store_cursor_open(transaction, databases.value().blocksByType, &cursor);
+    if (result != storeSuccess) {
         abort();
         return Result<QueryResultsBatch>::failure(
-            errorFromLmdb(path, result, "open Query Block scan"));
+            errorFromStore(path, result, "open Query Block scan"));
     }
     auto start = typeIndexKey(BlockType::page, BlockId{});
-    MDB_val key{start.size(), start.data()};
-    MDB_val value{};
-    result = mdb_cursor_get(cursor, &key, &value, MDB_SET_RANGE);
-    while (result == MDB_SUCCESS && key.mv_size == start.size()) {
-        const auto storedType =
-            static_cast<const std::uint8_t*>(key.mv_data)[0];
+    StoreValue key{start.size(), start.data()};
+    StoreValue value{};
+    result = store_cursor_get(cursor, &key, &value, storeSetRange);
+    while (result == storeSuccess && key.size == start.size()) {
+        const auto storedType = static_cast<const std::uint8_t*>(key.data)[0];
         if (storedType < static_cast<std::uint8_t>(BlockType::page) ||
             storedType > static_cast<std::uint8_t>(BlockType::entry)) {
             break;
         }
         BlockId identifier;
         std::memcpy(identifier.bytes.data(),
-                    static_cast<const std::uint8_t*>(key.mv_data) + 1,
+                    static_cast<const std::uint8_t*>(key.data) + 1,
                     identifier.bytes.size());
         auto block =
             readBlock(transaction, databases.value().blocks, identifier, path);
         if (!block) {
-            mdb_cursor_close(cursor);
+            store_cursor_close(cursor);
             abort();
             return Result<QueryResultsBatch>::failure(block.error());
         }
@@ -6685,7 +6649,7 @@ NotebookSession::evaluateQuery(
                 ? Result<QueryLocation>::success({block.value(), std::nullopt})
                 : entryLocation(identifier);
         if (!location) {
-            mdb_cursor_close(cursor);
+            store_cursor_close(cursor);
             abort();
             return Result<QueryResultsBatch>::failure(location.error());
         }
@@ -6694,7 +6658,7 @@ NotebookSession::evaluateQuery(
             auto outline = impl_->loadOutline(transaction, databases.value(),
                                               block.value());
             if (!outline) {
-                mdb_cursor_close(cursor);
+                store_cursor_close(cursor);
                 abort();
                 return Result<QueryResultsBatch>::failure(outline.error());
             }
@@ -6714,7 +6678,7 @@ NotebookSession::evaluateQuery(
                 readProperties(transaction, databases.value().propertiesByBlock,
                                identifier, path);
             if (!properties) {
-                mdb_cursor_close(cursor);
+                store_cursor_close(cursor);
                 abort();
                 return Result<QueryResultsBatch>::failure(properties.error());
             }
@@ -6739,13 +6703,13 @@ NotebookSession::evaluateQuery(
              parentId,
              std::move(propertyValues),
              outlineOrder});
-        result = mdb_cursor_get(cursor, &key, &value, MDB_NEXT);
+        result = store_cursor_get(cursor, &key, &value, storeNext);
     }
-    mdb_cursor_close(cursor);
-    if (result != MDB_NOTFOUND && result != MDB_SUCCESS) {
+    store_cursor_close(cursor);
+    if (result != storeNotFound && result != storeSuccess) {
         abort();
         return Result<QueryResultsBatch>::failure(
-            errorFromLmdb(path, result, "scan Query Blocks"));
+            errorFromStore(path, result, "scan Query Blocks"));
     }
     batch.rows =
         query_evaluation::evaluate(*parsed.query, queryEntryId, candidates);
