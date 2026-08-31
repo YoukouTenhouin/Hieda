@@ -3,7 +3,7 @@
 Status: superseded by ADR-0022
 
 Ticket 04 adds undo and redo at the `NotebookSession` interface. History records complete
-before-and-after Journal Page domain state rather than LMDB operations, so text, stable Block
+before-and-after Journal Page domain state rather than storage operations, so text, stable Block
 identity, timestamps, Containment, ordering, deletion, and virtual Page state are restored
 together. Each undo or redo is a new durable Notebook transaction and revision. A failed commit
 leaves both the acknowledged Page and the history position unchanged.

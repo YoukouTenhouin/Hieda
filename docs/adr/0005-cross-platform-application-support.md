@@ -2,6 +2,9 @@
 
 Status: accepted
 
+The LMDB-specific dependency and path decisions are superseded by
+[ADR 0026](0026-use-miare-for-notebook-storage.md).
+
 Hieda supports 64-bit Linux and Windows builds and Apple Silicon macOS builds. The compiler
 baselines are GCC 11, Clang 16, AppleClang 15, and MSVC 2022. Qt remains at 6.8 or newer. Linux may
 use system LMDB 0.9.30 or newer and Catch2 3 through their conventional discovery interfaces;
