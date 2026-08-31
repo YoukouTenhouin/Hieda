@@ -1,6 +1,7 @@
 CPP_SOURCES := $(shell rg --files \
 	-g '*.c' -g '*.cc' -g '*.cpp' -g '*.cxx' \
-	-g '*.h' -g '*.hh' -g '*.hpp' -g '*.hxx')
+	-g '*.h' -g '*.hh' -g '*.hpp' -g '*.hxx' \
+	-g '!third_party/**')
 
 build:
 	cmake --preset dev

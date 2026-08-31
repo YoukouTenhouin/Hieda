@@ -1,0 +1,3 @@
+[submodule "third_party/miare"]
+	path = third_party/miare
+	url = ../Miare.git

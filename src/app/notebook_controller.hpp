@@ -251,6 +251,7 @@ class NotebookController final : public QObject {
     Q_INVOKABLE void createNotebook(const QUrl& url);
     Q_INVOKABLE void openNotebook(const QUrl& url);
     Q_INVOKABLE void closeNotebook();
+    Q_INVOKABLE void requestApplicationQuit();
     Q_INVOKABLE void clearError();
     Q_INVOKABLE bool createPage(const QString& name,
                                 const QString& displayTitle);
@@ -438,6 +439,7 @@ class NotebookController final : public QObject {
     QHash<QString, QueryTaskRequest> pendingQueries_;
     QSet<QString> activeQueries_;
     bool closeRequested_{false};
+    bool quitRequested_{false};
     QStringList pageChoices_;
     std::vector<hieda::notebook::BlockId> pageIds_;
     std::optional<hieda::notebook::BlockId> selectedBlockReferenceTargetId_;

@@ -2,8 +2,8 @@
 #include "hieda/notebook/notebook_session.hpp"
 #include "notebook_session_test_access.hpp"
 
+#include "miare_store.hpp"
 #include <catch2/catch_test_macros.hpp>
-#include <lmdb.h>
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +19,8 @@
 #endif
 
 namespace {
+
+using namespace hieda::notebook;
 
 class TemporaryDirectory {
   public:
@@ -61,17 +63,6 @@ class TimestampOverride {
     }
 };
 
-auto
-lmdbFixturePath(const std::filesystem::path& path) -> std::string
-{
-#ifdef _WIN32
-    const auto utf8 = path.u8string();
-    return {reinterpret_cast<const char*>(utf8.data()), utf8.size()};
-#else
-    return path.native();
-#endif
-}
-
 void
 appendU16(std::vector<std::uint8_t>& output, std::uint16_t value)
 {
@@ -102,18 +93,15 @@ createNotebookFixture(const std::filesystem::path& path,
                       std::uint32_t fixtureSchemaVersion,
                       bool includeIdentity = true)
 {
-    MDB_env* environment = nullptr;
-    REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
-    REQUIRE(mdb_env_set_maxdbs(environment, 1) == MDB_SUCCESS);
-    const auto encodedPath = lmdbFixturePath(path);
-    REQUIRE(mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR,
-                         0600) == MDB_SUCCESS);
-    MDB_txn* transaction = nullptr;
-    REQUIRE(mdb_txn_begin(environment, nullptr, 0, &transaction) ==
-            MDB_SUCCESS);
-    MDB_dbi metadata = 0;
-    REQUIRE(mdb_dbi_open(transaction, "metadata", MDB_CREATE, &metadata) ==
-            MDB_SUCCESS);
+    StoreEnvironment* environment = nullptr;
+    REQUIRE(store_env_create(&environment) == storeSuccess);
+    REQUIRE(store_env_open(environment, path) == storeSuccess);
+    StoreTransaction* transaction = nullptr;
+    REQUIRE(store_txn_begin(environment, nullptr, 0, &transaction) ==
+            storeSuccess);
+    LogicalDatabase metadata = 0;
+    REQUIRE(store_dbi_open(transaction, "metadata", storeCreate, &metadata) ==
+            storeSuccess);
 
     std::vector<std::uint8_t> manifest;
     appendU16(manifest, 1);
@@ -131,35 +119,32 @@ createNotebookFixture(const std::filesystem::path& path,
     }
 
     constexpr std::string_view keyText = "manifest";
-    MDB_val key{keyText.size(), const_cast<char*>(keyText.data())};
-    MDB_val value{manifest.size(), manifest.data()};
-    REQUIRE(mdb_put(transaction, metadata, &key, &value, 0) == MDB_SUCCESS);
-    REQUIRE(mdb_txn_commit(transaction) == MDB_SUCCESS);
-    mdb_env_close(environment);
+    StoreValue key{keyText.size(), const_cast<char*>(keyText.data())};
+    StoreValue value{manifest.size(), manifest.data()};
+    REQUIRE(store_put(transaction, metadata, &key, &value, 0) == storeSuccess);
+    REQUIRE(store_txn_commit(transaction) == storeSuccess);
+    store_env_close(environment);
 }
 
 auto
 readBlockRecord(const std::filesystem::path& path,
                 hieda::notebook::BlockId blockId) -> std::vector<std::uint8_t>
 {
-    MDB_env* environment = nullptr;
-    REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
-    REQUIRE(mdb_env_set_maxdbs(environment, 16) == MDB_SUCCESS);
-    const auto encodedPath = lmdbFixturePath(path);
-    REQUIRE(mdb_env_open(environment, encodedPath.c_str(),
-                         MDB_NOSUBDIR | MDB_RDONLY, 0600) == MDB_SUCCESS);
-    MDB_txn* transaction = nullptr;
-    REQUIRE(mdb_txn_begin(environment, nullptr, MDB_RDONLY, &transaction) ==
-            MDB_SUCCESS);
-    MDB_dbi blocks = 0;
-    REQUIRE(mdb_dbi_open(transaction, "blocks", 0, &blocks) == MDB_SUCCESS);
-    MDB_val key{blockId.bytes.size(), blockId.bytes.data()};
-    MDB_val value{};
-    REQUIRE(mdb_get(transaction, blocks, &key, &value) == MDB_SUCCESS);
-    const auto* bytes = static_cast<const std::uint8_t*>(value.mv_data);
-    std::vector<std::uint8_t> record(bytes, bytes + value.mv_size);
-    mdb_txn_abort(transaction);
-    mdb_env_close(environment);
+    StoreEnvironment* environment = nullptr;
+    REQUIRE(store_env_create(&environment) == storeSuccess);
+    REQUIRE(store_env_open(environment, path) == storeSuccess);
+    StoreTransaction* transaction = nullptr;
+    REQUIRE(store_txn_begin(environment, nullptr, storeReadOnly,
+                            &transaction) == storeSuccess);
+    LogicalDatabase blocks = 0;
+    REQUIRE(store_dbi_open(transaction, "blocks", 0, &blocks) == storeSuccess);
+    StoreValue key{blockId.bytes.size(), blockId.bytes.data()};
+    StoreValue value{};
+    REQUIRE(store_get(transaction, blocks, &key, &value) == storeSuccess);
+    const auto* bytes = static_cast<const std::uint8_t*>(value.data);
+    std::vector<std::uint8_t> record(bytes, bytes + value.size);
+    store_txn_abort(transaction);
+    store_env_close(environment);
     return record;
 }
 
@@ -168,43 +153,38 @@ writeBlockRecord(const std::filesystem::path& path,
                  hieda::notebook::BlockId blockId,
                  std::vector<std::uint8_t> record)
 {
-    MDB_env* environment = nullptr;
-    REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
-    REQUIRE(mdb_env_set_maxdbs(environment, 16) == MDB_SUCCESS);
-    const auto encodedPath = lmdbFixturePath(path);
-    REQUIRE(mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR,
-                         0600) == MDB_SUCCESS);
-    MDB_txn* transaction = nullptr;
-    REQUIRE(mdb_txn_begin(environment, nullptr, 0, &transaction) ==
-            MDB_SUCCESS);
-    MDB_dbi blocks = 0;
-    REQUIRE(mdb_dbi_open(transaction, "blocks", 0, &blocks) == MDB_SUCCESS);
-    MDB_val key{blockId.bytes.size(), blockId.bytes.data()};
-    MDB_val value{record.size(), record.data()};
-    REQUIRE(mdb_put(transaction, blocks, &key, &value, 0) == MDB_SUCCESS);
-    REQUIRE(mdb_txn_commit(transaction) == MDB_SUCCESS);
-    mdb_env_close(environment);
+    StoreEnvironment* environment = nullptr;
+    REQUIRE(store_env_create(&environment) == storeSuccess);
+    REQUIRE(store_env_open(environment, path) == storeSuccess);
+    StoreTransaction* transaction = nullptr;
+    REQUIRE(store_txn_begin(environment, nullptr, 0, &transaction) ==
+            storeSuccess);
+    LogicalDatabase blocks = 0;
+    REQUIRE(store_dbi_open(transaction, "blocks", 0, &blocks) == storeSuccess);
+    StoreValue key{blockId.bytes.size(), blockId.bytes.data()};
+    StoreValue value{record.size(), record.data()};
+    REQUIRE(store_put(transaction, blocks, &key, &value, 0) == storeSuccess);
+    REQUIRE(store_txn_commit(transaction) == storeSuccess);
+    store_env_close(environment);
 }
 
 void
 removePageLinkIndexes(const std::filesystem::path& path)
 {
-    MDB_env* environment = nullptr;
-    REQUIRE(mdb_env_create(&environment) == MDB_SUCCESS);
-    REQUIRE(mdb_env_set_maxdbs(environment, 16) == MDB_SUCCESS);
-    const auto encodedPath = lmdbFixturePath(path);
-    REQUIRE(mdb_env_open(environment, encodedPath.c_str(), MDB_NOSUBDIR,
-                         0600) == MDB_SUCCESS);
-    MDB_txn* transaction = nullptr;
-    REQUIRE(mdb_txn_begin(environment, nullptr, 0, &transaction) ==
-            MDB_SUCCESS);
+    StoreEnvironment* environment = nullptr;
+    REQUIRE(store_env_create(&environment) == storeSuccess);
+    REQUIRE(store_env_open(environment, path) == storeSuccess);
+    StoreTransaction* transaction = nullptr;
+    REQUIRE(store_txn_begin(environment, nullptr, 0, &transaction) ==
+            storeSuccess);
     for (const auto* name : {"references_by_source", "references_by_target"}) {
-        MDB_dbi database = 0;
-        REQUIRE(mdb_dbi_open(transaction, name, 0, &database) == MDB_SUCCESS);
-        REQUIRE(mdb_drop(transaction, database, 1) == MDB_SUCCESS);
+        LogicalDatabase database = 0;
+        REQUIRE(store_dbi_open(transaction, name, 0, &database) ==
+                storeSuccess);
+        REQUIRE(store_drop(transaction, database, 1) == storeSuccess);
     }
-    REQUIRE(mdb_txn_commit(transaction) == MDB_SUCCESS);
-    mdb_env_close(environment);
+    REQUIRE(store_txn_commit(transaction) == storeSuccess);
+    store_env_close(environment);
 }
 
 auto
@@ -285,7 +265,7 @@ TEST_CASE("a created Notebook closes and reopens with the same identity")
     REQUIRE(created);
     const auto& createdInfo = created.value();
 
-    session.close();
+    REQUIRE(session.close());
     CHECK_FALSE(session.isOpen());
     CHECK_FALSE(session.current().has_value());
 
@@ -314,10 +294,29 @@ TEST_CASE("a Notebook path can contain non-ASCII characters")
     REQUIRE(created);
     CHECK(created.value().path == notebookPath);
 
-    session.close();
+    REQUIRE(session.close());
     const auto reopened = session.open(notebookPath);
     REQUIRE(reopened);
     CHECK(reopened.value().path == notebookPath);
+}
+
+TEST_CASE("a failed close keeps the Notebook open and can be retried")
+{
+    TemporaryDirectory temporaryDirectory;
+    hieda::notebook::NotebookSession session;
+    REQUIRE(session.create(temporaryDirectory.path() / "close-retry.hieda"));
+    const auto beforeClose = session.current();
+
+    hieda::notebook::NotebookSessionTestAccess::rejectNextClose(session);
+    const auto rejected = session.close();
+
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code ==
+          hieda::notebook::NotebookErrorCode::ioFailure);
+    CHECK(session.isOpen());
+    CHECK(session.current() == beforeClose);
+    REQUIRE(session.close());
+    CHECK_FALSE(session.isOpen());
 }
 
 TEST_CASE("creating never overwrites an existing path")
@@ -415,7 +414,7 @@ TEST_CASE(
     hieda::notebook::NotebookSession session;
     hieda::notebook::NotebookSession setup;
     REQUIRE(setup.create(secondPath));
-    setup.close();
+    REQUIRE(setup.close());
     const auto first = session.create(firstPath);
     REQUIRE(first);
 
@@ -443,7 +442,7 @@ TEST_CASE("a Notebook cannot be owned by two sessions")
     REQUIRE_FALSE(result);
     CHECK(result.error().code ==
           hieda::notebook::NotebookErrorCode::alreadyInUse);
-    firstSession.close();
+    REQUIRE(firstSession.close());
     REQUIRE(secondSession.open(notebookPath));
 }
 
@@ -454,7 +453,7 @@ TEST_CASE("file aliases cannot bypass Notebook ownership")
     const auto aliasPath = temporaryDirectory.path() / "alias.hieda";
     hieda::notebook::NotebookSession setup;
     REQUIRE(setup.create(notebookPath));
-    setup.close();
+    REQUIRE(setup.close());
     std::filesystem::create_hard_link(notebookPath, aliasPath);
 
     hieda::notebook::NotebookSession firstSession;
@@ -553,7 +552,7 @@ TEST_CASE("a Journal Page stays virtual until its first Entry is committed")
     CHECK_FALSE(empty.value().metadata.has_value());
     CHECK(empty.value().entries.empty());
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     const auto reopened = session.outline(date);
     REQUIRE(reopened);
@@ -605,7 +604,7 @@ TEST_CASE("titled Pages preserve unique names identity and contents across "
     CHECK(renamed.value().entries.front().metadata.id == parentId);
     CHECK(renamed.value().entries.back().metadata.id == childId);
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(path));
     const auto reopened = session.outline(pageId);
     REQUIRE(reopened);
@@ -775,7 +774,7 @@ TEST_CASE("Page Hierarchy derives previews and pages from hierarchical names")
     CHECK(notifications == notificationCount);
     REQUIRE(session.pageHierarchyNode("work/client/alpha").value()->page);
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(path));
     REQUIRE(session.pageHierarchyNode("work/client/alpha").value()->page);
     REQUIRE(session.pageHierarchyNode("work/client").value());
@@ -996,7 +995,7 @@ TEST_CASE("Page rename atomically rewrites resolved Page Links without "
               .value()
               .entries[0]
               .authoredText == rewritten.authoredText);
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(path));
     CHECK(session.outline(sourcePage.metadata.id)
               .value()
@@ -1090,7 +1089,7 @@ TEST_CASE("Entry commits replace Page Link meaning atomically and persist it "
     REQUIRE(session.updateEntry(entry.metadata.id, "plain [[incomplete"));
     CHECK(session.pageLinks(entry.metadata.id).value().empty());
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(path));
     CHECK(session.pageLinks(entry.metadata.id).value().empty());
 }
@@ -1141,7 +1140,7 @@ TEST_CASE("a user inserts follows and reopens a durable Block Reference")
     CHECK(followed.value().containmentPath[0] == target.metadata.id);
     CHECK(followed.value().containmentPath[1] == child.metadata.id);
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     REQUIRE(session.blockReferences(source.metadata.id).value()[0].target);
     CHECK(
@@ -1395,7 +1394,7 @@ TEST_CASE("opening a schema v2 Notebook backfills missing derived indexes")
     const auto revision =
         session.current().value_or(hieda::notebook::NotebookInfo{}).revision;
 
-    session.close();
+    REQUIRE(session.close());
     removePageLinkIndexes(notebookPath);
 
     const auto reopened = session.open(notebookPath);
@@ -1619,7 +1618,7 @@ TEST_CASE(
     CHECK(second.value().entries[2].metadata.id == thirdId);
 
     const auto& expected = second.value();
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     const auto reopened = session.outline(date);
     REQUIRE(reopened);
@@ -1663,7 +1662,7 @@ TEST_CASE("editing a Journal Entry acknowledges exact multiline Unicode text")
     CHECK(page.value().entries.front().authoredText == multiline);
     CHECK(page.value().metadata == pageMetadata);
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     CHECK(session.outline(date).value().entries.front().authoredText ==
           multiline);
@@ -1718,7 +1717,7 @@ TEST_CASE("a rejected Journal commit leaves the acknowledged state intact")
     const auto current = session.outline(date);
     REQUIRE(current);
     CHECK(current.value().entries.front().authoredText == "durable");
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     const auto reopened = session.outline(date);
     REQUIRE(reopened);
@@ -1792,7 +1791,7 @@ TEST_CASE("a failing subscriber cannot make a committed Journal command appear "
     CHECK(
         session.current().value_or(hieda::notebook::NotebookInfo{}).revision ==
         1);
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(
         session.open(temporaryDirectory.path() / "subscriber-failure.hieda"));
     REQUIRE(session.outline(date));
@@ -1850,7 +1849,7 @@ TEST_CASE(
     CHECK_FALSE(split.value().entries[2].parentEntry);
 
     const auto& expected = split.value();
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     const auto reopened = session.outline(date);
     REQUIRE(reopened);
@@ -1990,7 +1989,7 @@ TEST_CASE(
         session.current().value_or(hieda::notebook::NotebookInfo{}).revision ==
         revision);
     CHECK(session.outline(date).value() == acknowledged);
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     CHECK(session.outline(date).value() == acknowledged);
 }
@@ -2044,7 +2043,7 @@ TEST_CASE("selected Journal subtrees are cut as one durable undoable action")
     CHECK(cut.value().entries.front().metadata.id == tailId);
     CHECK(session.undoEdit().value().front() == before);
     CHECK(session.redoEdit().value().front() == cut.value());
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     CHECK(session.outline(date).value() == cut.value());
 }
@@ -2297,7 +2296,7 @@ TEST_CASE(
             }
         }
     }
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     CHECK(session.outline(date).value() == page);
 }
@@ -2457,7 +2456,7 @@ TEST_CASE(
     const auto restored = session.redoEdit().value().front();
     CHECK(restored == second);
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(path));
     CHECK(session.editCapabilities().value() ==
           hieda::notebook::EditCapabilities{});
@@ -2570,7 +2569,7 @@ TEST_CASE("schema v2 persists Page kind separately from one Entry type")
     const auto journalMetadata =
         journal.metadata.value_or(hieda::notebook::BlockMetadata{});
     const auto entryId = journal.entries.front().metadata.id;
-    session.close();
+    REQUIRE(session.close());
 
     const auto namedRecord = readBlockRecord(notebookPath, named.metadata.id);
     const auto payloadPageRecord =
@@ -2727,7 +2726,7 @@ TEST_CASE("an Entry subtree moves atomically between Named and Journal Pages")
     CHECK(session.outline(destinationDate).value().entries ==
           destination.entries);
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(temporaryDirectory.path() / "cross-page-move.hieda"));
     CHECK(session.outline(namedId).value().entries.empty());
     CHECK(session.outline(destinationDate).value().entries ==
@@ -2771,7 +2770,7 @@ TEST_CASE("a saved Query selects Entry Blocks and survives reopening")
         }));
     CHECK_FALSE(evaluated.value().continuationCursor);
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     const auto reopened = session.evaluateQuery(queryId);
     REQUIRE(reopened);
@@ -3311,7 +3310,7 @@ TEST_CASE("invalid Query intent is editable diagnosed and never partially run")
     CHECK(session.blockReferences(query.metadata.id).value().empty());
     CHECK(session.linkedReferences(target.metadata.id).value().sources.empty());
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     const auto reopened = session.evaluateQuery(query.metadata.id);
     REQUIRE(reopened);
@@ -3442,7 +3441,7 @@ TEST_CASE("Containment Query predicates distinguish direct and transitive "
                               "grandchild"));
     CHECK(matches("(child-of " + queryAnchor(child.metadata.id) + ")").empty());
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     CHECK(matches("(ancestor-of " + queryAnchor(grandchild.metadata.id) +
                   ")") == sorted({page.metadata.id, parent.metadata.id}));
@@ -3678,7 +3677,7 @@ TEST_CASE("Semantic Reference Queries distinguish literal outgoing and "
     REQUIRE(session.undoEdit());
     REQUIRE(session.undoEdit());
 
-    session.close();
+    REQUIRE(session.close());
     REQUIRE(session.open(notebookPath));
     CHECK(matches("(linked-by " + queryAnchor(source.metadata.id) + ")") ==
           std::vector{targetPage.metadata.id});

@@ -70,9 +70,8 @@ acquireExclusiveFileLock(const std::filesystem::path& path, bool create)
     -> std::variant<ExclusiveFileLock, FileError>
 {
     if (!create) {
-        // LockFileEx would also block LMDB's second handle from reading its
-        // metadata. Use the stable file identity so hard-linked paths still
-        // contend without locking the data stream.
+        // Use the stable file identity so hard-linked paths still contend
+        // without locking the data stream.
         const auto handle =
             CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
