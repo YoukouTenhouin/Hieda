@@ -4,6 +4,9 @@
 
 Accepted
 
+The LMDB dependency choice is superseded by
+[ADR 0026](0026-use-miare-for-notebook-storage.md).
+
 ## Context
 
 Hieda supports Linux, Windows, and macOS, but a successful source build does not prove that a

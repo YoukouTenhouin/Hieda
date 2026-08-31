@@ -1,6 +1,6 @@
 # Use versioned binary records in bounded LMDB databases
 
-Status: accepted
+Status: superseded by [ADR 0026](0026-use-miare-for-notebook-storage.md)
 
 The canonical Notebook uses LMDB with `MDB_NOSUBDIR`, default synchronous durability, one environment owner, a 64-bit process, an initial 8 GiB map, and at most sixteen named databases. Keys use explicit big-endian byte encodings and values use strictly bounded, versioned tag-length-value records. UUIDv4 values are stored as 16 bytes; text is exact UTF-8; timestamps are signed UTC microseconds. The schema separates metadata/settings, Blocks and type indexes, Containment in both directions, Semantic References in both directions, parsed properties and property indexes, and Page title/date indexes. All canonical and derived updates for one command share a write transaction.
 
